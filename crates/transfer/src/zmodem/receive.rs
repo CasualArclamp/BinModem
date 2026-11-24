@@ -126,11 +126,7 @@ impl Receiver {
 
     pub fn progress(&self) -> super::send::Progress {
         super::send::Progress {
-            name: self
-                .file
-                .as_ref()
-                .map(|f| f.name.clone())
-                .unwrap_or_default(),
+            name: self.file.as_ref().map(|f| f.name.clone()).unwrap_or_default(),
             position: self.data.len() as u64,
             total: self.file.as_ref().and_then(|f| f.length),
             rewinds: self.rewinds,
@@ -154,10 +150,9 @@ impl Receiver {
     /// rest.
     pub fn finished(&self) -> Option<Received> {
         match (self.state, self.complete, &self.file) {
-            (State::Done, true, Some(file)) => Some(Received {
-                file: file.clone(),
-                data: self.data.clone(),
-            }),
+            (State::Done, true, Some(file)) => {
+                Some(Received { file: file.clone(), data: self.data.clone() })
+            }
             _ => None,
         }
     }
@@ -353,10 +348,7 @@ impl Receiver {
                     if !self.complete
                         && let Some(file) = &self.file
                     {
-                        self.arrived.push(Received {
-                            file: file.clone(),
-                            data: self.data.clone(),
-                        });
+                        self.arrived.push(Received { file: file.clone(), data: self.data.clone() });
                     }
                     self.complete = true;
                     self.state = State::Finishing;
@@ -419,10 +411,7 @@ impl Receiver {
     /// because "ZP0 and ZP1 contain the size of the receiver's buffer in
     /// bytes, or 0 if nonstop I/O is allowed".
     fn announce(&mut self) {
-        self.say(
-            Header::flags(Kind::Rinit, 0, 0, 0, CAPABILITIES),
-            Style::Hex,
-        );
+        self.say(Header::flags(Kind::Rinit, 0, 0, 0, CAPABILITIES), Style::Hex);
     }
 
     fn say(&mut self, h: Header, style: Style) {

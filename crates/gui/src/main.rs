@@ -38,12 +38,12 @@
 mod answer;
 mod app;
 mod callprompt;
-mod console;
 mod crashlog;
 mod dialin;
 mod document;
-mod engine;
 mod faxwin;
+mod console;
+mod engine;
 mod live;
 mod net;
 mod network;
@@ -108,11 +108,7 @@ fn list_accounts() {
                     account.name,
                     account.uri(),
                     account.next_hop(),
-                    if account.register {
-                        ""
-                    } else {
-                        " (no registration)"
-                    }
+                    if account.register { "" } else { " (no registration)" }
                 );
             }
         }
@@ -173,9 +169,7 @@ fn parse() -> Result<Option<Args>, String> {
     let mut rest = raw.iter();
     while let Some(arg) = rest.next() {
         let mut value = |name: &str| {
-            rest.next()
-                .cloned()
-                .ok_or_else(|| format!("{name} needs a value"))
+            rest.next().cloned().ok_or_else(|| format!("{name} needs a value"))
         };
         match arg.as_str() {
             "--live" => args.live = true,
@@ -289,16 +283,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
     }
 
-    let Some(mut args) = parse()? else {
-        return Ok(());
-    };
+    let Some(mut args) = parse()? else { return Ok(()) };
     // Taken now, because `args` is picked apart below.
-    let (typed, scopes, fax, setup) = (
-        std::mem::take(&mut args.typed),
-        args.scopes,
-        args.fax,
-        args.setup,
-    );
+    let (typed, scopes, fax, setup) = (std::mem::take(&mut args.typed), args.scopes, args.fax, args.setup);
     let answer_as = args.answer_as.take();
     let review = args.review.take();
 
@@ -380,9 +367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
-    control
-        .quit
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    control.quit.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = engine.join();
     Ok(())
 }

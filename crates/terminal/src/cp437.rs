@@ -28,8 +28,8 @@ const HIGH: [char; 128] = [
 /// Glyphs for `0x00`-`0x1F`, used only when a byte reaches the screen as a
 /// printable rather than being consumed as a control code.
 const LOW: [char; 32] = [
-    ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼', '►', '◄', '↕',
-    '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
+    ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼',
+    '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
 ];
 
 /// Translate one CP437 byte to Unicode.

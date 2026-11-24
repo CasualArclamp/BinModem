@@ -25,11 +25,7 @@ fn a_page(lines: usize) -> Page {
     let width = fax::page::WIDTH;
     Page {
         lines: (0..lines)
-            .map(|y| {
-                (0..width)
-                    .map(|x| (x / 40 + y / 8).is_multiple_of(2) && x % 40 < 30)
-                    .collect()
-            })
+            .map(|y| (0..width).map(|x| (x / 40 + y / 8).is_multiple_of(2) && x % 40 < 30).collect())
             .collect(),
         resolution: Resolution::Standard,
     }
@@ -106,11 +102,7 @@ impl Direction {
                 .enumerate()
                 .map(|(i, v)| {
                     let edge = i.min(n - 1 - i);
-                    if edge < fade {
-                        v * edge as f64 / fade as f64
-                    } else {
-                        *v
-                    }
+                    if edge < fade { v * edge as f64 / fade as f64 } else { *v }
                 })
                 .collect();
             self.replay.reverse();
@@ -133,13 +125,7 @@ impl Direction {
 ///
 /// `FAX_TRACE=1` prints every change of phase at both ends, and every
 /// control frame each end heard, as `faxcall.rs`'s own tests do.
-fn call(
-    mut caller: FaxCall,
-    mut answerer: FaxCall,
-    snr_db: f64,
-    slip_after: Option<f64>,
-    seed: u64,
-) -> (FaxCall, FaxCall) {
+fn call(mut caller: FaxCall, mut answerer: FaxCall, snr_db: f64, slip_after: Option<f64>, seed: u64) -> (FaxCall, FaxCall) {
     let mut to_answerer = Direction::new(seed, snr_db, slip_after);
     let mut to_caller = Direction::new(seed + 1, snr_db, None);
     let (mut from_caller, mut from_answerer) = (0.0, 0.0);
@@ -159,11 +145,7 @@ fn call(
                 eprintln!("{at:6.2}s answerer heard {:?} {:02x?}", m.frame, m.fif);
             }
             if caller.phase() != was_a || answerer.phase() != was_b {
-                eprintln!(
-                    "{at:6.2}s caller {:<32} answerer {}",
-                    caller.phase().name(),
-                    answerer.phase().name()
-                );
+                eprintln!("{at:6.2}s caller {:<32} answerer {}", caller.phase().name(), answerer.phase().name());
                 (was_a, was_b) = (caller.phase(), answerer.phase());
             }
         }
@@ -177,8 +159,7 @@ fn call(
 /// The two ends of a call from here with one page, at V.27 ter only.
 fn ends(page: &Page) -> (FaxCall, FaxCall) {
     (
-        FaxCall::originate_pages(FS, "61399990000", vec![page.clone()])
-            .offering(&[Modulation::V27ter]),
+        FaxCall::originate_pages(FS, "61399990000", vec![page.clone()]).offering(&[Modulation::V27ter]),
         FaxCall::answer(FS, "61388880000"),
     )
 }
@@ -195,23 +176,13 @@ fn a_page_crosses_at_4800_over_a_line_with_hiss_on_it() {
         let page = a_page(40);
         let (caller, answerer) = ends(&page);
         let (caller, answerer) = call(caller, answerer, snr_db, None, seed);
-        let whole = answerer
-            .received()
-            .is_some_and(|got| got.lines == page.lines);
-        eprintln!(
-            "at {snr_db} dB: rate {}, page {}, ({:?})",
-            caller.rate(),
-            if whole { "whole" } else { "not whole" },
-            caller.trouble()
-        );
+        let whole = answerer.received().is_some_and(|got| got.lines == page.lines);
+        eprintln!("at {snr_db} dB: rate {}, page {}, ({:?})", caller.rate(), if whole { "whole" } else { "not whole" }, caller.trouble());
         if !whole || caller.rate() != 4800 {
             failed.push((snr_db, caller.rate(), whole));
         }
     }
-    assert!(
-        failed.is_empty(),
-        "(dB, rate, page whole) that failed: {failed:?}"
-    );
+    assert!(failed.is_empty(), "(dB, rate, page whole) that failed: {failed:?}");
 }
 
 #[test]
@@ -221,25 +192,11 @@ fn a_page_crosses_at_4800_through_a_slip_in_the_middle_of_it() {
     // after the jump rather than losing the rest of the burst.
     let page = a_page(120);
     let (caller, answerer) = ends(&page);
-    let (caller, answerer) = call(
-        caller.with_error_correction(true),
-        answerer.with_error_correction(true),
-        30.0,
-        Some(1.0),
-        3,
-    );
-    let whole = answerer
-        .received()
-        .is_some_and(|got| got.lines == page.lines);
-    eprintln!(
-        "slip: rate {}, ecm {}, page {}",
-        caller.rate(),
-        caller.error_correction(),
-        if whole { "whole" } else { "not whole" }
-    );
-    let got = answerer
-        .received()
-        .unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
+    let (caller, answerer) =
+        call(caller.with_error_correction(true), answerer.with_error_correction(true), 30.0, Some(1.0), 3);
+    let whole = answerer.received().is_some_and(|got| got.lines == page.lines);
+    eprintln!("slip: rate {}, ecm {}, page {}", caller.rate(), caller.error_correction(), if whole { "whole" } else { "not whole" });
+    let got = answerer.received().unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
     assert_eq!(got.lines, page.lines, "the page came out different");
     assert_eq!(caller.rate(), 4800, "the call dropped a rate");
 }
@@ -253,18 +210,9 @@ fn a_line_too_noisy_for_4800_falls_back_to_2400() {
     let page = a_page(20);
     let (caller, answerer) = ends(&page);
     let (caller, answerer) = call(caller, answerer, 13.0, None, 5);
-    let whole = answerer
-        .received()
-        .is_some_and(|got| got.lines == page.lines);
-    eprintln!(
-        "at 13 dB: rate {}, page {} ({:?})",
-        caller.rate(),
-        if whole { "whole" } else { "not whole" },
-        caller.trouble()
-    );
-    let got = answerer
-        .received()
-        .unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
+    let whole = answerer.received().is_some_and(|got| got.lines == page.lines);
+    eprintln!("at 13 dB: rate {}, page {} ({:?})", caller.rate(), if whole { "whole" } else { "not whole" }, caller.trouble());
+    let got = answerer.received().unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
     assert_eq!(got.lines, page.lines, "the page came out different");
     assert_eq!(caller.rate(), 2400, "the call should have settled at 2400");
 }

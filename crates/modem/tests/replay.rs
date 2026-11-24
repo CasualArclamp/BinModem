@@ -43,10 +43,7 @@ fn capture() -> Option<Vec<f32>> {
         wav.sample_rate
     );
     let mut line = wav.channel(0);
-    let pad: f64 = std::env::var("MODEM_PAD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
+    let pad: f64 = std::env::var("MODEM_PAD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
     line.resize(line.len() + (pad.max(0.0) * FS) as usize, 0.0);
     Some(line)
 }
@@ -60,8 +57,8 @@ fn probe_replay_call() {
     };
     // The command line the window sends, so that the replay is the same modem
     // the call was placed with rather than a default one.
-    let commands =
-        std::env::var("MODEM_COMMANDS").unwrap_or_else(|_| "AT+MS=V22B,1,1200,2400".to_owned());
+    let commands = std::env::var("MODEM_COMMANDS")
+        .unwrap_or_else(|_| "AT+MS=V22B,1,1200,2400".to_owned());
 
     let mut modem = Modem::new(FS);
     if let Ok(text) = std::env::var("MODEM_MEMO") {
@@ -84,33 +81,21 @@ fn probe_replay_call() {
     let mut dte = Vec::new();
     let (mut state, mut phase, mut ec) = (modem.state(), "", "");
     let mut damaged = 0u64;
-    println!(
-        "  {:>7}  {:<14} {:<26} {:<13} rate",
-        "t", "state", "line", "V.42"
-    );
+    println!("  {:>7}  {:<14} {:<26} {:<13} rate", "t", "state", "line", "V.42");
     for (i, s) in line.iter().enumerate() {
         modem.step(f64::from(*s));
         dte.extend(modem.take_dte());
         for text in modem.take_line_notes() {
             println!("  {:>7.3}  {text}", i as f64 / FS);
         }
-        let now = (
-            modem.state(),
-            modem.line_phase(),
-            modem.error_control_phase(),
-        );
+        let now = (modem.state(), modem.line_phase(), modem.error_control_phase());
         if now != (state, phase, ec) || modem.damaged_frames() != damaged {
             damaged = modem.damaged_frames();
             let shown = format!("{:?}", now.0);
             let line = format!("{} {}", modem.standard(), now.1);
-            let rate = modem
-                .rate()
-                .map_or_else(|| "-".to_owned(), |r| r.to_string());
-            let damage = if damaged > 0 {
-                format!("  {damaged} damaged")
-            } else {
-                String::new()
-            };
+            let rate = modem.rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
+            let damage =
+                if damaged > 0 { format!("  {damaged} damaged") } else { String::new() };
             println!(
                 "  {:>7.3}  {shown:<14} {line:<26} {:<13} {rate}{damage}",
                 i as f64 / FS,
@@ -124,15 +109,11 @@ fn probe_replay_call() {
     // question about why a call went the way it did.
     let distant = modem.distant();
     if distant.is_empty() {
-        println!(
-            "
-  the far end said nothing about itself"
-        );
+        println!("
+  the far end said nothing about itself");
     } else {
-        println!(
-            "
-  the far end:"
-        );
+        println!("
+  the far end:");
         for (what, value) in distant {
             println!("    {what:<22} {value}");
         }
@@ -202,10 +183,7 @@ fn probe_replay_frames() {
         if connected.is_none() {
             if let Status::Connected(rate) = pump.status() {
                 connected = Some(t);
-                println!(
-                    "\n  carriers up at {t:.3} s, {} bit/s",
-                    rate.bits_per_second()
-                );
+                println!("\n  carriers up at {t:.3} s, {} bit/s", rate.bits_per_second());
                 // The training is not the connection: what the receiver made
                 // of it is thousands of bits of noise, and feeding them to a
                 // deframer is how a call finds frames in its own warm-up.
@@ -297,15 +275,10 @@ fn probe_replay_raw() {
         println!("set MODEM_RAW to a raw s16le capture to run this");
         return;
     };
-    let fs: f64 = std::env::var("MODEM_FS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8000.0);
+    let fs: f64 = std::env::var("MODEM_FS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000.0);
     let bytes = std::fs::read(&path).expect("could not read the capture");
     let line: Vec<f64> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
+        .as_chunks::<2>().0.iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
         .collect();
     println!("\n{path}: {:.1} s at {fs} Hz", line.len() as f64 / fs);
@@ -314,10 +287,7 @@ fn probe_replay_raw() {
     // When this end went off-hook, which the rig holds back so that the caller
     // has finished dialling (`--answer-delay`, 3.4 s by default). A replay that
     // answers at once puts its ANSam in before the far end's V.8 has begun.
-    let answer_at: f64 = std::env::var("MODEM_ANSWER_AT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3.4);
+    let answer_at: f64 = std::env::var("MODEM_ANSWER_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(3.4);
     let mut modem = Modem::new(fs);
     let say = |modem: &mut Modem, bytes: &[u8]| {
         for b in bytes {
@@ -357,12 +327,8 @@ fn probe_replay_raw() {
             );
         }
         if now != (state, phase.clone()) {
-            let rate = modem
-                .rate()
-                .map_or_else(|| "-".to_owned(), |r| r.to_string());
-            let up = modem
-                .transmit_rate()
-                .map_or_else(|| "-".to_owned(), |r| r.to_string());
+            let rate = modem.rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
+            let up = modem.transmit_rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
             println!(
                 "  {:>7.3}  {:?} {} {} down {rate} / up {up}",
                 i as f64 / fs,
@@ -395,9 +361,5 @@ fn probe_replay_raw() {
         let _ = std::fs::write(&out, &dte);
         println!("  written to {out}");
     }
-    println!(
-        "  ended in {:?}, {} damaged frames\n",
-        modem.state(),
-        modem.damaged_frames()
-    );
+    println!("  ended in {:?}, {} damaged frames\n", modem.state(), modem.damaged_frames());
 }

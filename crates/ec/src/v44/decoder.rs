@@ -107,6 +107,7 @@ impl Decoder {
         self.mode
     }
 
+
     /// C1, "codeword value of next available entry of ... string collection".
     fn c1(&self) -> u16 {
         N5 + self.strings.len() as u16
@@ -187,9 +188,7 @@ impl Decoder {
     /// because the octets it needs are still on their way.
     fn take_code(&mut self) -> Result<Option<Code>, Error> {
         let mut peek = self.reader.clone();
-        let Some(first) = peek.read(1) else {
-            return Ok(None);
-        };
+        let Some(first) = peek.read(1) else { return Ok(None) };
         if first == 1 {
             // A control code or a codeword; which, is settled by the value.
             // 7.11.2: a STEPUP for the codeword size goes before the codeword
@@ -201,9 +200,7 @@ impl Decoder {
                 }
                 c2 += 1;
             }
-            let Some(value) = peek.read(c2) else {
-                return Ok(None);
-            };
+            let Some(value) = peek.read(c2) else { return Ok(None) };
             self.reader = peek;
             self.c2 = c2;
             self.stepping_up = false;
@@ -217,9 +214,7 @@ impl Decoder {
         // takes "0" "1". Anywhere else there is no extension to confuse it
         // with, so an ordinal is a bare "0".
         let extension = if self.after_codeword {
-            let Some(second) = peek.read(1) else {
-                return Ok(None);
-            };
+            let Some(second) = peek.read(1) else { return Ok(None) };
             second == 1
         } else {
             false
@@ -240,9 +235,7 @@ impl Decoder {
             }
             c5 = 8;
         }
-        let Some(value) = peek.read(c5) else {
-            return Ok(None);
-        };
+        let Some(value) = peek.read(c5) else { return Ok(None) };
         self.reader = peek;
         self.c5 = c5;
         self.stepping_up = false;
@@ -316,7 +309,9 @@ impl Decoder {
                 // first character, because that is the only string the encoder
                 // could have made since.
                 let (start, len) = match self.prev {
-                    Prev::Codeword(k) => self.string(k).ok_or(Error::UnknownCodeword(value))?,
+                    Prev::Codeword(k) => {
+                        self.string(k).ok_or(Error::UnknownCodeword(value))?
+                    }
                     // Item 4: "as if it were a string of length one".
                     Prev::Ordinal(_) => (self.history.len() - 1, 1),
                     _ => return Err(Error::UnknownCodeword(value)),
@@ -387,18 +382,14 @@ impl Decoder {
         let made = match (code, self.prev) {
             // "The corresponding character is appended to the previous
             // character to create a 2-character string."
-            (Code::Ordinal(_), Prev::Ordinal(_)) => Some(Str {
-                end: at as u32,
-                len: 2,
-            }),
+            (Code::Ordinal(_), Prev::Ordinal(_)) => Some(Str { end: at as u32, len: 2 }),
             // "...appended to the previous string to create a longer string."
-            (Code::Ordinal(_), Prev::Codeword(k)) => self.longer(k, at as u32, 1),
+            (Code::Ordinal(_), Prev::Codeword(k)) => {
+                self.longer(k, at as u32, 1)
+            }
             // "The first character of the codeword's string is appended to the
             // previous character to create a 2-character string."
-            (Code::Codeword(_), Prev::Ordinal(_)) => Some(Str {
-                end: at as u32,
-                len: 2,
-            }),
+            (Code::Codeword(_), Prev::Ordinal(_)) => Some(Str { end: at as u32, len: 2 }),
             (Code::Codeword(_), Prev::Codeword(k)) => self.longer(k, at as u32, 1),
             // "The previous string is extended to create a new and longer
             // string."
@@ -421,9 +412,6 @@ impl Decoder {
     /// The previous string with `more` characters after it, ending at `end`.
     fn longer(&self, previous: u16, end: u32, more: u16) -> Option<Str> {
         let s = self.strings.get(usize::from(previous.checked_sub(N5)?))?;
-        Some(Str {
-            end,
-            len: s.len + more,
-        })
+        Some(Str { end, len: s.len + more })
     }
 }

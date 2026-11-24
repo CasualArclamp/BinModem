@@ -22,10 +22,7 @@ pub struct Fft {
 impl Fft {
     /// `n` must be a power of two of at least 2.
     pub fn new(n: usize) -> Self {
-        assert!(
-            n >= 2 && n.is_power_of_two(),
-            "FFT size must be a power of two"
-        );
+        assert!(n >= 2 && n.is_power_of_two(), "FFT size must be a power of two");
         let half = n / 2;
         let mut twiddle_re = Vec::with_capacity(half);
         let mut twiddle_im = Vec::with_capacity(half);
@@ -38,12 +35,7 @@ impl Fft {
         let reversal = (0..n)
             .map(|i| (i as u32).reverse_bits() >> (32 - bits))
             .collect();
-        Self {
-            n,
-            twiddle_re,
-            twiddle_im,
-            reversal,
-        }
+        Self { n, twiddle_re, twiddle_im, reversal }
     }
 
     pub fn len(&self) -> usize {
@@ -198,10 +190,7 @@ mod tests {
         fft.process(&mut re, &mut im);
         assert!((re[0] - 8.0).abs() < 1e-12, "DC bin {}", re[0]);
         for k in 1..8 {
-            assert!(
-                re[k].abs() < 1e-12 && im[k].abs() < 1e-12,
-                "bin {k} not empty"
-            );
+            assert!(re[k].abs() < 1e-12 && im[k].abs() < 1e-12, "bin {k} not empty");
         }
     }
 
@@ -210,9 +199,7 @@ mod tests {
         let n = 64;
         let fft = Fft::new(n);
         let k0 = 5;
-        let mut re: Vec<f64> = (0..n)
-            .map(|i| (TAU * k0 as f64 * i as f64 / n as f64).cos())
-            .collect();
+        let mut re: Vec<f64> = (0..n).map(|i| (TAU * k0 as f64 * i as f64 / n as f64).cos()).collect();
         let mut im = vec![0.0; n];
         fft.process(&mut re, &mut im);
         let mags: Vec<f64> = (0..n / 2)
@@ -251,10 +238,8 @@ mod tests {
         sp.magnitudes_db(&mut bins);
         let peak = peak_bin(&bins);
         let f = sp.bin_frequency(peak);
-        assert!(
-            (f - 2225.0).abs() < sp.sample_rate / sp.size() as f64,
-            "peak at {f} Hz, expected 2225"
-        );
+        assert!((f - 2225.0).abs() < sp.sample_rate / sp.size() as f64,
+                "peak at {f} Hz, expected 2225");
     }
 
     #[test]

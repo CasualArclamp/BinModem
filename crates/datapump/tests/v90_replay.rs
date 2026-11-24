@@ -33,11 +33,7 @@ fn probe_replay_v90() {
     };
     let start: usize = start.parse().expect("V90_START is a sample number");
     let wav = line::wav::read(&path).expect("could not read the capture");
-    assert_eq!(
-        f64::from(wav.sample_rate),
-        FS,
-        "the modem is built for 16 kHz"
-    );
+    assert_eq!(f64::from(wav.sample_rate), FS, "the modem is built for 16 kHz");
     let arrived = wav.channel(0);
     let mut modem = Analogue::new(FS, 0.0);
     let mut last = None;
@@ -59,11 +55,7 @@ fn probe_replay_v90() {
         if let Some(mut v) = before.take_if(|_| modem.v90().is_none_or(|v| v.route().is_some())) {
             let took = std::time::Instant::now();
             v.step(f64::from(s));
-            println!(
-                "{:8.3}  the choice took {:.1} ms",
-                i as f64 / FS,
-                took.elapsed().as_secs_f64() * 1e3
-            );
+            println!("{:8.3}  the choice took {:.1} ms", i as f64 / FS, took.elapsed().as_secs_f64() * 1e3);
             chosen(&v, i as f64 / FS);
         }
         let v90 = modem.v90();
@@ -92,23 +84,11 @@ fn probe_replay_v90() {
                     )
                 })
                 .unwrap_or_default();
-            println!(
-                "{:8.3}  {:<28} {detail}{}",
-                i as f64 / FS,
-                now.0,
-                modem
-                    .round_trip()
-                    .map(|r| format!(" round trip {r:.3} s"))
-                    .unwrap_or_default()
-            );
+            println!("{:8.3}  {:<28} {detail}{}", i as f64 / FS, now.0, modem.round_trip().map(|r| format!(" round trip {r:.3} s")).unwrap_or_default());
             last = Some(now);
         }
     }
-    println!(
-        "ended {:?}, last failure {:?}",
-        modem.status(),
-        modem.last_failure()
-    );
+    println!("ended {:?}, last failure {:?}", modem.status(), modem.last_failure());
 }
 
 /// What the DIL and TRN1d came to: what was chosen, shaped and not, and what
@@ -122,28 +102,12 @@ fn chosen(v: &datapump::v90::analogue::Modem, at: f64) {
     let leftover = v.receiver().residue().leftover();
     let rate = |c: &dil::Choice| sequences::data_rate(c.data.drn);
     let unshaped = dil::choose(route, law, limit, |drn| jd.enables(drn));
-    let asked = shaping::choose(
-        route,
-        law,
-        limit,
-        |drn| jd.enables(drn),
-        jd.lookahead,
-        leftover.as_ref(),
-    );
-    let slack = shaping::choose_with_slack(
-        route,
-        law,
-        limit,
-        |drn| jd.enables(drn),
-        jd.lookahead,
-        leftover.as_ref(),
-    );
+    let asked = shaping::choose(route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref());
+    let slack = shaping::choose_with_slack(route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref());
     // How far apart the levels stand, in the error the DIL leads the modem to
     // expect, over SPACING: what SLACK asks of the choice.
     let noise = route.noise_at(law, f64::from(limit) / 32768.0);
-    let room = |a: &shaping::Asked| {
-        dil::least_gap(&a.choice.data, route) / (dil::SPACING * noise * a.left.sqrt())
-    };
+    let room = |a: &shaping::Asked| dil::least_gap(&a.choice.data, route) / (dil::SPACING * noise * a.left.sqrt());
     println!(
         "{at:8.3}  unshaped {:?}; best {:?} with {:?}, leaving {:.2} of the error, room {:.2}; chosen with room {:?}, room {:.2}; V.34 would carry {}",
         unshaped.as_ref().and_then(rate),
@@ -173,13 +137,7 @@ fn chosen(v: &datapump::v90::analogue::Modem, at: f64) {
     // level is something the signal brings with it.
     let spreads: Vec<String> = (8..100u8)
         .step_by(10)
-        .map(|u| {
-            format!(
-                "{u}: {:.1e} at {:.3}",
-                route.spread[usize::from(u)],
-                datapump::v90::ucode::level(law, u)
-            )
-        })
+        .map(|u| format!("{u}: {:.1e} at {:.3}", route.spread[usize::from(u)], datapump::v90::ucode::level(law, u)))
         .collect();
     println!("          spread by codeword {}", spreads.join(", "));
 }

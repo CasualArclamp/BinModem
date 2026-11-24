@@ -73,10 +73,7 @@ pub enum Outcome {
     /// The caller chose PPP. `user` is who logged in first, if anyone did --
     /// None means PPP itself has to ask -- and `early` is whatever of PPP has
     /// already arrived.
-    Ppp {
-        user: Option<String>,
-        early: Vec<u8>,
-    },
+    Ppp { user: Option<String>, early: Vec<u8> },
     /// The call should be put down, for this reason.
     HangUp(String),
 }
@@ -180,10 +177,7 @@ impl Server {
                 }
             }
             Stage::Name | Stage::Password(_) if self.idle_ms >= LOGIN_IDLE_MS => {
-                self.leave(
-                    "\r\nTimed out waiting for login.\r\n",
-                    "nobody logged in for a minute",
-                );
+                self.leave("\r\nTimed out waiting for login.\r\n", "nobody logged in for a minute");
             }
             Stage::Shell(user) if self.idle_ms >= SHELL_IDLE_MS => {
                 let why = format!("{user} was idle for ten minutes");
@@ -214,9 +208,7 @@ impl Server {
             let user = self.user().map(str::to_owned);
             self.notes.push(match &user {
                 Some(user) => format!("{user} started PPP"),
-                None => {
-                    "the caller started PPP without logging in, so PPP asks who it is".to_owned()
-                }
+                None => "the caller started PPP without logging in, so PPP asks who it is".to_owned(),
             });
             self.outcome = Some(Outcome::Ppp { user, early });
             self.stage = Stage::Done;
@@ -236,10 +228,7 @@ impl Server {
                 self.after_return = byte == b'\r';
                 continue;
             }
-            if !matches!(
-                self.stage,
-                Stage::Name | Stage::Password(_) | Stage::Shell(_)
-            ) {
+            if !matches!(self.stage, Stage::Name | Stage::Password(_) | Stage::Shell(_)) {
                 return;
             }
             self.key(byte);
@@ -300,8 +289,7 @@ impl Server {
     }
 
     fn prompt(&mut self) {
-        self.out
-            .extend_from_slice(format!("{}> ", self.config.host).as_bytes());
+        self.out.extend_from_slice(format!("{}> ", self.config.host).as_bytes());
     }
 
     fn leave(&mut self, goodbye: &str, why: &str) {
@@ -328,11 +316,7 @@ impl Server {
                 // Asked for whether or not the name exists, and refused the
                 // same way either way: which half was wrong is not the
                 // caller's to find out.
-                let known = self
-                    .config
-                    .accounts
-                    .iter()
-                    .any(|a| a.name == name && a.password == line);
+                let known = self.config.accounts.iter().any(|a| a.name == name && a.password == line);
                 if known {
                     self.notes.push(format!("{name} logged in"));
                     self.out.extend_from_slice(
@@ -348,27 +332,16 @@ impl Server {
                     return;
                 }
                 self.attempts += 1;
-                self.notes.push(format!(
-                    "wrong name or password for {name} ({} of {ATTEMPTS})",
-                    self.attempts
-                ));
+                self.notes.push(format!("wrong name or password for {name} ({} of {ATTEMPTS})", self.attempts));
                 if self.attempts >= ATTEMPTS {
-                    self.leave(
-                        "Login incorrect\r\nToo many tries. Goodbye.\r\n",
-                        "three wrong passwords",
-                    );
+                    self.leave("Login incorrect\r\nToo many tries. Goodbye.\r\n", "three wrong passwords");
                 } else {
-                    self.out
-                        .extend_from_slice(b"Login incorrect\r\n\r\nlogin: ");
+                    self.out.extend_from_slice(b"Login incorrect\r\n\r\nlogin: ");
                     self.stage = Stage::Name;
                 }
             }
             Stage::Shell(user) => {
-                let command = line
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
+                let command = line.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
                 self.stage = Stage::Shell(user.clone());
                 match command.as_str() {
                     "" => self.prompt(),
@@ -377,10 +350,7 @@ impl Server {
                         self.out.extend_from_slice(message.as_bytes());
                         self.out.extend_from_slice(b"\r\n");
                         self.notes.push(format!("{user} started PPP"));
-                        self.outcome = Some(Outcome::Ppp {
-                            user: Some(user),
-                            early: Vec::new(),
-                        });
+                        self.outcome = Some(Outcome::Ppp { user: Some(user), early: Vec::new() });
                         self.stage = Stage::Done;
                     }
                     "help" | "?" => {
@@ -400,9 +370,7 @@ impl Server {
                         self.leave("Goodbye.\r\n", &why);
                     }
                     other => {
-                        self.out.extend_from_slice(
-                            format!("{other}: command not found\r\n").as_bytes(),
-                        );
+                        self.out.extend_from_slice(format!("{other}: command not found\r\n").as_bytes());
                         self.prompt();
                     }
                 }
@@ -439,10 +407,7 @@ mod tests {
     fn a_caller_is_greeted_after_a_second_and_asked_for_a_name() {
         let mut s = server();
         s.tick(SETTLE_MS - 1);
-        assert!(
-            s.take_output().is_empty(),
-            "spoke before the line had settled"
-        );
+        assert!(s.take_output().is_empty(), "spoke before the line had settled");
         s.tick(1);
         let said = String::from_utf8(s.take_output()).unwrap();
         assert!(said.contains("BinModem dial-in"), "{said:?}");
@@ -456,25 +421,13 @@ mod tests {
         assert_eq!(typed(&mut s, "guest\r"), "guest\r\nPassword: ");
         let welcome = typed(&mut s, "letmein\r");
         assert!(!welcome.contains("letmein"), "the password was echoed");
-        assert!(
-            welcome.contains("Welcome to binmodem, guest."),
-            "{welcome:?}"
-        );
+        assert!(welcome.contains("Welcome to binmodem, guest."), "{welcome:?}");
         assert!(welcome.ends_with("binmodem> "), "{welcome:?}");
         assert_eq!(s.user(), Some("guest"));
 
         let said = typed(&mut s, "ppp\r\n");
-        assert!(
-            said.contains("PPP session from 10.0.0.1 to 10.0.0.2 beginning...."),
-            "{said:?}"
-        );
-        assert_eq!(
-            s.take_outcome(),
-            Some(Outcome::Ppp {
-                user: Some("guest".into()),
-                early: vec![]
-            })
-        );
+        assert!(said.contains("PPP session from 10.0.0.1 to 10.0.0.2 beginning...."), "{said:?}");
+        assert_eq!(s.take_outcome(), Some(Outcome::Ppp { user: Some("guest".into()), early: vec![] }));
         assert!(s.take_notes().iter().any(|n| n == "guest logged in"));
     }
 
@@ -490,11 +443,7 @@ mod tests {
                 assert!(said.ends_with("login: "), "{said:?}");
             }
         }
-        assert_eq!(
-            s.take_outcome(),
-            None,
-            "hung up before the goodbye could cross"
-        );
+        assert_eq!(s.take_outcome(), None, "hung up before the goodbye could cross");
         s.tick(GOODBYE_MS);
         assert!(matches!(s.take_outcome(), Some(Outcome::HangUp(_))));
     }
@@ -507,10 +456,7 @@ mod tests {
         let mut b = server();
         answered(&mut a);
         answered(&mut b);
-        assert_eq!(
-            typed(&mut a, "nobody\r").replace("nobody", "guest"),
-            typed(&mut b, "guest\r")
-        );
+        assert_eq!(typed(&mut a, "nobody\r").replace("nobody", "guest"), typed(&mut b, "guest\r"));
         assert_eq!(typed(&mut a, "x\r"), typed(&mut b, "x\r"));
     }
 
@@ -521,11 +467,7 @@ mod tests {
         assert_eq!(typed(&mut s, "gux\x08"), "gux\x08 \x08");
         typed(&mut s, "est\r");
         typed(&mut s, "letmeix\x7fn\r");
-        assert_eq!(
-            s.user(),
-            Some("guest"),
-            "the corrected password was not the one checked"
-        );
+        assert_eq!(s.user(), Some("guest"), "the corrected password was not the one checked");
     }
 
     #[test]
@@ -536,16 +478,10 @@ mod tests {
         typed(&mut s, "letmein\r");
         assert!(typed(&mut s, "help\r").contains("ppp"));
         assert_eq!(typed(&mut s, "whoami\r"), "whoami\r\nguest\r\nbinmodem> ");
-        assert_eq!(
-            typed(&mut s, "rm -rf /\r"),
-            "rm -rf /\r\nrm: command not found\r\nbinmodem> "
-        );
+        assert_eq!(typed(&mut s, "rm -rf /\r"), "rm -rf /\r\nrm: command not found\r\nbinmodem> ");
         assert!(typed(&mut s, "logout\r").contains("Goodbye."));
         s.tick(GOODBYE_MS);
-        assert_eq!(
-            s.take_outcome(),
-            Some(Outcome::HangUp("guest logged out".into()))
-        );
+        assert_eq!(s.take_outcome(), Some(Outcome::HangUp("guest logged out".into())));
     }
 
     /// A dialler that goes straight to PPP is answered as PPP, with the frame
@@ -557,13 +493,7 @@ mod tests {
         let frame = [0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21, 0x7d, 0x21];
         s.feed(&frame[..4]);
         s.feed(&frame[4..]);
-        assert_eq!(
-            s.take_outcome(),
-            Some(Outcome::Ppp {
-                user: None,
-                early: frame.to_vec()
-            })
-        );
+        assert_eq!(s.take_outcome(), Some(Outcome::Ppp { user: None, early: frame.to_vec() }));
         // And nothing was echoed back into the frame's way.
         assert!(!s.take_output().contains(&0x7e));
     }
@@ -580,11 +510,7 @@ mod tests {
     #[test]
     fn with_no_accounts_nobody_gets_in_and_whoever_runs_it_is_told() {
         let mut s = Server::new(Config::default());
-        assert!(
-            s.take_notes()
-                .iter()
-                .any(|n| n.contains("nobody can log in"))
-        );
+        assert!(s.take_notes().iter().any(|n| n.contains("nobody can log in")));
         answered(&mut s);
         typed(&mut s, "\r");
         typed(&mut s, "guest\r");

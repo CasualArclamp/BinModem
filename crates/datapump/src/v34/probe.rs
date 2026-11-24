@@ -129,12 +129,7 @@ pub struct Analyzer {
 impl Analyzer {
     pub fn new(fs: f64) -> Self {
         let window = window(fs);
-        Self {
-            fs,
-            window,
-            buffer: Vec::with_capacity(window),
-            readings: Vec::new(),
-        }
+        Self { fs, window, buffer: Vec::with_capacity(window), readings: Vec::new() }
     }
 
     /// Start again, for a new stretch of probing.
@@ -199,10 +194,7 @@ impl Analyzer {
             }
             turn.1.atan2(turn.0)
         };
-        let at_1050 = TONES
-            .iter()
-            .position(|&(f, _)| f == 1050.0)
-            .expect("1050 Hz is a probing tone");
+        let at_1050 = TONES.iter().position(|&(f, _)| f == 1050.0).expect("1050 Hz is a probing tone");
         let seconds = self.window as f64 / self.fs;
         // The field names 1050 Hz, so the offset is 1050 Hz's.
         let offset = turn_of(at_1050) / (std::f64::consts::TAU * seconds);
@@ -219,15 +211,10 @@ impl Analyzer {
                     .map(|(k, r)| {
                         let angle = -per_window * k as f64;
                         let (re, im) = r[t];
-                        (
-                            re * angle.cos() - im * angle.sin(),
-                            re * angle.sin() + im * angle.cos(),
-                        )
+                        (re * angle.cos() - im * angle.sin(), re * angle.sin() + im * angle.cos())
                     })
                     .collect();
-                let mean = derotated
-                    .iter()
-                    .fold((0.0, 0.0), |m, x| (m.0 + x.0, m.1 + x.1));
+                let mean = derotated.iter().fold((0.0, 0.0), |m, x| (m.0 + x.0, m.1 + x.1));
                 let mean = (mean.0 / windows as f64, mean.1 / windows as f64);
                 let power = mean.0 * mean.0 + mean.1 * mean.1;
                 // The noise, from how far each window's reading is from the
@@ -239,10 +226,8 @@ impl Analyzer {
                 // noise they read a clean line at 17 dB. The median does not
                 // see them. For noise of power p in each reading, a difference
                 // has 2p, and the median of its square is ln 2 of that.
-                let mut steps: Vec<f64> = derotated
-                    .windows(2)
-                    .map(|w| (w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2))
-                    .collect();
+                let mut steps: Vec<f64> =
+                    derotated.windows(2).map(|w| (w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).collect();
                 steps.sort_by(f64::total_cmp);
                 let noise = steps[steps.len() / 2] / (2.0 * std::f64::consts::LN_2);
                 Tone {
@@ -255,10 +240,7 @@ impl Analyzer {
         // The field's own accuracy is a quarter of a hertz, and one window's
         // worth of turn is only unambiguous to half a repetition's width.
         let frequency_offset = (offset.abs() < 10.0).then_some(offset);
-        Some(Reading {
-            tones,
-            frequency_offset,
-        })
+        Some(Reading { tones, frequency_offset })
     }
 }
 
@@ -319,20 +301,8 @@ fn transmits(far: &Info0, rate: SymbolRate, high: bool) -> bool {
         SymbolRate::S2400 => true,
         SymbolRate::S2743 => far.rate_2743,
         SymbolRate::S2800 => far.rate_2800,
-        SymbolRate::S3000 => {
-            if high {
-                far.high_carrier_3000
-            } else {
-                far.low_carrier_3000
-            }
-        }
-        SymbolRate::S3200 => {
-            if high {
-                far.high_carrier_3200
-            } else {
-                far.low_carrier_3200
-            }
-        }
+        SymbolRate::S3000 => if high { far.high_carrier_3000 } else { far.low_carrier_3000 },
+        SymbolRate::S3200 => if high { far.high_carrier_3200 } else { far.low_carrier_3200 },
         SymbolRate::S3429 => far.rate_3429 && far.transmit_3429,
     }
 }
@@ -350,23 +320,14 @@ impl Reading {
         if f >= last.frequency {
             return linear(last);
         }
-        let above = self
-            .tones
-            .iter()
-            .position(|t| t.frequency >= f)
-            .unwrap_or(self.tones.len() - 1);
+        let above = self.tones.iter().position(|t| t.frequency >= f).unwrap_or(self.tones.len() - 1);
         let (lo, hi) = (&self.tones[above - 1], &self.tones[above]);
         let x = (f - lo.frequency) / (hi.frequency - lo.frequency);
         linear(lo) * (1.0 - x) + linear(hi) * x
     }
 
     fn gain_at(&self, f: f64) -> f64 {
-        let above = self
-            .tones
-            .iter()
-            .position(|t| t.frequency >= f)
-            .unwrap_or(self.tones.len() - 1)
-            .max(1);
+        let above = self.tones.iter().position(|t| t.frequency >= f).unwrap_or(self.tones.len() - 1).max(1);
         let (lo, hi) = (&self.tones[above - 1], &self.tones[above]);
         let x = ((f - lo.frequency) / (hi.frequency - lo.frequency)).clamp(0.0, 1.0);
         lo.gain_db * (1.0 - x) + hi.gain_db * x
@@ -428,11 +389,7 @@ impl Reading {
         if max < floor(rate) {
             return Probed::default();
         }
-        Probed {
-            high_carrier,
-            pre_emphasis: self.pre_emphasis(rate, carrier),
-            max_rate: max,
-        }
+        Probed { high_carrier, pre_emphasis: self.pre_emphasis(rate, carrier), max_rate: max }
     }
 }
 
@@ -448,10 +405,7 @@ mod tests {
         let period = window(FS);
         let l2: Vec<f64> = (0..period * 10).map(|_| g.next_sample(false)).collect();
         let rms = (l2.iter().map(|x| x * x).sum::<f64>() / l2.len() as f64).sqrt();
-        assert!(
-            (rms - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-3,
-            "L2 at {rms}"
-        );
+        assert!((rms - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-3, "L2 at {rms}");
         let l1: Vec<f64> = (0..period * 10).map(|_| g.next_sample(true)).collect();
         let loud = (l1.iter().map(|x| x * x).sum::<f64>() / l1.len() as f64).sqrt();
         assert!((20.0 * (loud / rms).log10() - 6.02).abs() < 0.05);
@@ -520,13 +474,7 @@ mod tests {
         let last = reading.tones[20];
         assert!((first.gain_db + 20.0).abs() < 0.5, "{first:?}");
         assert!((last.gain_db + 26.0).abs() < 0.8, "{last:?}");
-        assert!(
-            reading
-                .tones
-                .iter()
-                .all(|t| t.snr_db > 20.0 && t.snr_db < 45.0),
-            "{reading:?}"
-        );
+        assert!(reading.tones.iter().all(|t| t.snr_db > 20.0 && t.snr_db < 45.0), "{reading:?}");
     }
 
     #[test]
@@ -541,30 +489,21 @@ mod tests {
             let t = i as f64 / FS;
             let signal: f64 = TONES
                 .iter()
-                .map(|&(f, phase)| {
-                    (std::f64::consts::TAU * f * ratio * t + phase.to_radians()).cos()
-                })
+                .map(|&(f, phase)| (std::f64::consts::TAU * f * ratio * t + phase.to_radians()).cos())
                 .sum::<f64>()
                 * nominal_amplitude();
             seed ^= seed << 13;
             seed ^= seed >> 17;
             seed ^= seed << 5;
             // Uniform noise 40 dB under each tone, as a per-tone ratio.
-            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5)
-                * 2.0
-                * nominal_amplitude()
-                * 0.01
-                * 3f64.sqrt()
-                * 4.0;
+            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * nominal_amplitude() * 0.01 * 3f64.sqrt() * 4.0;
             a.feed(signal + noise);
         }
         let reading = a.reading().expect("no reading");
         let offset = reading.frequency_offset.expect("no offset");
         assert!((offset + 1050.0 * 114e-6).abs() < 0.02, "offset {offset}");
         let snr: Vec<f64> = reading.tones.iter().map(|t| t.snr_db).collect();
-        let (low, high) = snr
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(l, h), &s| (l.min(s), h.max(s)));
+        let (low, high) = snr.iter().fold((f64::MAX, f64::MIN), |(l, h), &s| (l.min(s), h.max(s)));
         assert!(high - low < 6.0, "the tones read {snr:?}");
         assert!(low > 30.0, "the tones read {snr:?}");
     }
@@ -593,12 +532,7 @@ mod tests {
             seed ^= seed << 13;
             seed ^= seed >> 17;
             seed ^= seed << 5;
-            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5)
-                * 2.0
-                * nominal_amplitude()
-                * 0.01
-                * 3f64.sqrt()
-                * 4.0;
+            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * nominal_amplitude() * 0.01 * 3f64.sqrt() * 4.0;
             a.feed(x + noise);
         }
         let reading = a.reading().expect("no reading");
@@ -639,14 +573,7 @@ mod tests {
 
     fn flat(snr_db: f64) -> Reading {
         Reading {
-            tones: TONES
-                .iter()
-                .map(|&(frequency, _)| Tone {
-                    frequency,
-                    gain_db: 0.0,
-                    snr_db,
-                })
-                .collect(),
+            tones: TONES.iter().map(|&(frequency, _)| Tone { frequency, gain_db: 0.0, snr_db }).collect(),
             frequency_offset: Some(0.0),
         }
     }
@@ -656,21 +583,13 @@ mod tests {
         let clean = flat(40.0).probed(SymbolRate::S3429, &everything(), true);
         assert_eq!(clean.max_rate, 14);
         // Without the 1664-point constellation at both ends, twelve at most.
-        assert_eq!(
-            flat(40.0)
-                .probed(SymbolRate::S3429, &everything(), false)
-                .max_rate,
-            12
-        );
+        assert_eq!(flat(40.0).probed(SymbolRate::S3429, &everything(), false).max_rate, 12);
         let noisy = flat(18.0).probed(SymbolRate::S3429, &everything(), true);
         assert!(noisy.max_rate > 0 && noisy.max_rate < 9, "{noisy:?}");
         // A far end that will not transmit 3429 gets nothing projected for it.
         let mut no_3429 = everything();
         no_3429.transmit_3429 = false;
-        assert_eq!(
-            flat(40.0).probed(SymbolRate::S3429, &no_3429, true),
-            Probed::default()
-        );
+        assert_eq!(flat(40.0).probed(SymbolRate::S3429, &no_3429, true), Probed::default());
     }
 
     #[test]
@@ -683,11 +602,6 @@ mod tests {
         }
         let probed = tilted.probed(SymbolRate::S3200, &everything(), true);
         assert_eq!(probed.pre_emphasis, 4);
-        assert_eq!(
-            flat(40.0)
-                .probed(SymbolRate::S3200, &everything(), true)
-                .pre_emphasis,
-            0
-        );
+        assert_eq!(flat(40.0).probed(SymbolRate::S3200, &everything(), true).pre_emphasis, 0);
     }
 }

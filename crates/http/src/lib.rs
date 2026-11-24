@@ -214,11 +214,7 @@ impl Session {
             return self.work();
         }
         let mut first = std::mem::take(&mut self.parked);
-        self.state = if self.body == Body::None {
-            State::Reading
-        } else {
-            State::Sending
-        };
+        self.state = if self.body == Body::None { State::Reading } else { State::Sending };
         first.extend(self.work());
         first
     }
@@ -275,11 +271,7 @@ impl Session {
         // already there, which is the saving this whole module exists for.
         if self.open_to.as_deref() == Some(parsed.target.authority.as_str()) {
             out.extend_from_slice(&parsed.head);
-            self.state = if self.body == Body::None {
-                State::Reading
-            } else {
-                State::Sending
-            };
+            self.state = if self.body == Body::None { State::Reading } else { State::Sending };
             return true;
         }
         // Somewhere else, or nowhere yet. A browser talking to a proxy is
@@ -327,7 +319,10 @@ impl Session {
                 let line: Vec<u8> = self.pending.drain(..end).collect();
                 // "chunk-size = 1*HEXDIG", with an optional chunk-ext after a
                 // semicolon which nothing here needs to understand.
-                let digits: &[u8] = line.split(|&b| b == b';').next().unwrap_or(&line);
+                let digits: &[u8] = line
+                    .split(|&b| b == b';')
+                    .next()
+                    .unwrap_or(&line);
                 let text = String::from_utf8_lossy(digits);
                 let Ok(size) = u64::from_str_radix(text.trim(), 16) else {
                     self.fail(400, "a chunk size that is not a number");
@@ -337,22 +332,15 @@ impl Session {
                 // 7.1: "complete when a chunk with a chunk-size of zero is
                 // received, possibly followed by a trailer section, and
                 // finally terminated by an empty line".
-                self.body = Body::Chunked(if size == 0 {
-                    Chunk::Trailer
-                } else {
-                    Chunk::Data(size)
-                });
+                self.body =
+                    Body::Chunked(if size == 0 { Chunk::Trailer } else { Chunk::Data(size) });
                 true
             }
             Chunk::Data(left) => {
                 let take = left.min(self.pending.len() as u64) as usize;
                 out.extend(self.pending.drain(..take));
                 let left = left - take as u64;
-                self.body = Body::Chunked(if left == 0 {
-                    Chunk::Ending
-                } else {
-                    Chunk::Data(left)
-                });
+                self.body = Body::Chunked(if left == 0 { Chunk::Ending } else { Chunk::Data(left) });
                 left == 0
             }
             Chunk::Ending => {
@@ -463,10 +451,7 @@ fn parse(head: &[u8]) -> Option<Parsed> {
             return None;
         }
         return Some(Parsed {
-            target: Target {
-                authority,
-                tunnel: true,
-            },
+            target: Target { authority, tunnel: true },
             head: Vec::new(),
             body: Body::None,
         });
@@ -495,13 +480,8 @@ fn parse(head: &[u8]) -> Option<Parsed> {
             "host" => continue,
             // 7.6.1's own list of what an intermediary removes whether or not
             // the Connection field named it.
-            "proxy-connection"
-            | "keep-alive"
-            | "te"
-            | "upgrade"
-            | "connection"
-            | "proxy-authorization"
-            | "proxy-authenticate" => continue,
+            "proxy-connection" | "keep-alive" | "te" | "upgrade" | "connection"
+            | "proxy-authorization" | "proxy-authenticate" => continue,
             // Held back rather than written out. Item 3 has an intermediary
             // forwarding a message with both framings "first remove the
             // received Content-Length field", and whether there is a
@@ -543,10 +523,7 @@ fn parse(head: &[u8]) -> Option<Parsed> {
     // The replacement Host, from the request-target, as 3.2.2 requires.
     let head = format!("{out}Host: {authority}\r\n\r\n").into_bytes();
     Some(Parsed {
-        target: Target {
-            authority,
-            tunnel: false,
-        },
+        target: Target { authority, tunnel: false },
         head,
         body: framing,
     })
@@ -576,11 +553,7 @@ fn split_absolute(target: &str) -> Option<(String, String)> {
     };
     // 3.2.1: "if the path component is empty, the client MUST send / as the
     // path" -- and a proxy writing the origin-form owes the same.
-    let path = if path.is_empty() {
-        "/".to_owned()
-    } else {
-        path.to_owned()
-    };
+    let path = if path.is_empty() { "/".to_owned() } else { path.to_owned() };
     Some((authority, path))
 }
 

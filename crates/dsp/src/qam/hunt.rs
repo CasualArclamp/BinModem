@@ -62,12 +62,7 @@ const CHUNKS_USED: usize = 16;
 
 /// The four quarter turns a half-symbol sample steps through at a quarter of
 /// the half-symbol rate, which is where S's band-edge lines fall.
-const QUARTERS: [Complex; 4] = [
-    Complex::ONE,
-    Complex::I,
-    Complex::new(-1.0, 0.0),
-    Complex::new(0.0, -1.0),
-];
+const QUARTERS: [Complex; 4] = [Complex::ONE, Complex::I, Complex::new(-1.0, 0.0), Complex::new(0.0, -1.0)];
 
 /// What a hunt came to.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -76,18 +71,10 @@ pub(super) enum Hunted {
     /// S-bar begins at half `at`, give or take one, after an S whose carrier
     /// turns by `turn` radians a symbol against ours, and whose symbols are
     /// `drift` longer than the half-symbol samples' spacing makes them.
-    Reversal {
-        at: u64,
-        turn: f64,
-        drift: f64,
-    },
+    Reversal { at: u64, turn: f64, drift: f64 },
     /// S stopped at half `at` without turning into S-bar, having turned by
     /// `turn` and drifted by `drift` as a reversal's are measured.
-    Lapsed {
-        at: u64,
-        turn: f64,
-        drift: f64,
-    },
+    Lapsed { at: u64, turn: f64, drift: f64 },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,10 +104,7 @@ pub(super) struct Hunt {
 
 impl Hunt {
     pub(super) fn new(discriminate: bool) -> Self {
-        Self {
-            discriminate,
-            ..Self::default()
-        }
+        Self { discriminate, ..Self::default() }
     }
 
     pub(super) fn feed(&mut self, half: Complex, index: u64) -> Option<Hunted> {
@@ -138,19 +122,12 @@ impl Hunt {
             if self.matches.len() > 4 {
                 self.matches.pop_front();
             }
-            let (along, power) = self
-                .matches
-                .iter()
-                .fold((0.0, 0.0), |(a, p), &(x, y)| (a + x, p + y));
+            let (along, power) = self.matches.iter().fold((0.0, 0.0), |(a, p), &(x, y)| (a + x, p + y));
             let ratio = along / power.max(1e-12);
             if self.matches.len() == 4 && ratio < -0.5 {
                 // The first of the four that turned it.
                 let (turn, drift) = self.estimate();
-                return Some(Hunted::Reversal {
-                    at: index.saturating_sub(3),
-                    turn,
-                    drift,
-                });
+                return Some(Hunted::Reversal { at: index.saturating_sub(3), turn, drift });
             }
             if ratio > 0.5 {
                 self.template[phase] = self.template[phase].scale(0.9) + half.scale(0.1);
@@ -191,16 +168,11 @@ impl Hunt {
             if self.correlations.len() > 8 {
                 self.correlations.pop_front();
             }
-            let (sum_c, sum_p) = self
-                .correlations
-                .iter()
-                .fold((Complex::ZERO, 0.0), |(sc, sp), &(c, p)| (sc + c, sp + p));
-            let mut s_like =
-                sum_c.re > 0.7 * sum_p && sum_p / self.correlations.len() as f64 > AUDIBLE;
+            let (sum_c, sum_p) =
+                self.correlations.iter().fold((Complex::ZERO, 0.0), |(sc, sp), &(c, p)| (sc + c, sp + p));
+            let mut s_like = sum_c.re > 0.7 * sum_p && sum_p / self.correlations.len() as f64 > AUDIBLE;
             if s_like && self.discriminate {
-                s_like = self
-                    .share()
-                    .is_some_and(|share| (SHARE.0..=SHARE.1).contains(&share));
+                s_like = self.share().is_some_and(|share| (SHARE.0..=SHARE.1).contains(&share));
             }
             if s_like {
                 self.held += 1;
@@ -274,10 +246,7 @@ impl Hunt {
             })
         };
         let (early, late) = (sum(&blocks[..count / 2]), sum(&blocks[count / 2..]));
-        let lean = early
-            .iter()
-            .zip(&late)
-            .fold(Complex::ZERO, |s, (e, l)| s + *l * e.conj());
+        let lean = early.iter().zip(&late).fold(Complex::ZERO, |s, (e, l)| s + *l * e.conj());
         // Symbols between the two blocks' middles.
         let lag = (count / 2 * CHUNK / 2) as f64;
         let expected = coarse * lag;
@@ -286,12 +255,7 @@ impl Hunt {
         // sample's four phases step through a quarter turn each at the band
         // edges.
         let edges = |s: &[Complex; 4]| {
-            let (upper, lower) = s
-                .iter()
-                .zip(QUARTERS)
-                .fold((Complex::ZERO, Complex::ZERO), |(u, l), (x, q)| {
-                    (u + *x * q.conj(), l + *x * q)
-                });
+            let (upper, lower) = s.iter().zip(QUARTERS).fold((Complex::ZERO, Complex::ZERO), |(u, l), (x, q)| (u + *x * q.conj(), l + *x * q));
             upper * lower.conj()
         };
         let moved = wrap((edges(&late) * edges(&early).conj()).arg());

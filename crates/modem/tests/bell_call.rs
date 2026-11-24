@@ -59,12 +59,7 @@ impl Pair {
         Self::type_at(&mut p.host, "ATA");
         Self::type_at(&mut p.caller, "ATD5551234");
         p.run(seconds);
-        assert_eq!(
-            p.caller.state(),
-            State::Data,
-            "caller: {:?}",
-            p.caller_saw()
-        );
+        assert_eq!(p.caller.state(), State::Data, "caller: {:?}", p.caller_saw());
         assert_eq!(p.host.state(), State::Data, "host: {:?}", p.host_saw());
         p
     }
@@ -78,20 +73,12 @@ impl Pair {
             self.caller.feed_dte(*b);
         }
         self.run(wait);
-        assert!(
-            self.host_saw().contains("cactus"),
-            "host saw {:?}",
-            self.host_saw()
-        );
+        assert!(self.host_saw().contains("cactus"), "host saw {:?}", self.host_saw());
         for b in b"Password:" {
             self.host.feed_dte(*b);
         }
         self.run(wait);
-        assert!(
-            self.caller_saw().contains("Password:"),
-            "caller saw {:?}",
-            self.caller_saw()
-        );
+        assert!(self.caller_saw().contains("Password:"), "caller saw {:?}", self.caller_saw());
     }
 }
 
@@ -128,10 +115,7 @@ fn b202_at_both_ends_takes_turns_at_1200() {
     let mut p = Pair::call("B202", "B202", 8.0);
     assert_eq!(p.caller.rate(), Some(1200));
     assert_eq!(p.caller.standard(), "Bell 202");
-    assert!(
-        !p.caller.error_controlled(),
-        "error control over half duplex"
-    );
+    assert!(!p.caller.error_controlled(), "error control over half duplex");
     p.converse(0.2, 1.0);
 }
 

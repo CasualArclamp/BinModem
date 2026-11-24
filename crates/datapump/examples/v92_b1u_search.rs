@@ -42,9 +42,9 @@ use std::fs;
 use std::io::Write;
 
 use datapump::v32::{Mode, Scrambler};
-use datapump::v92::precoder::index_to_ki;
 use datapump::v92::upstream::UpEncoder;
-use datapump::v92::{CONSTELLATION_FRAME, Filters, Parameters, Trellis};
+use datapump::v92::{Filters, Parameters, Trellis, CONSTELLATION_FRAME};
+use datapump::v92::precoder::index_to_ki;
 
 /// The twelve data frame intervals (6.4.1, Figure 1).
 const UP_INTERVALS: usize = 12;
@@ -76,31 +76,17 @@ fn read_trace(path: &str) -> Result<Trace, Box<dyn std::error::Error>> {
         return Err(format!("not an index trace: {header}").into());
     }
     let k: u32 = words[1].parse()?;
-    let moduli: Vec<u8> = words[3..]
-        .iter()
-        .map(|word| word.parse())
-        .collect::<Result<_, _>>()?;
-    let moduli: [u8; UP_INTERVALS] = moduli
-        .as_slice()
-        .try_into()
-        .map_err(|_| "not twelve moduli")?;
+    let moduli: Vec<u8> = words[3..].iter().map(|word| word.parse()).collect::<Result<_, _>>()?;
+    let moduli: [u8; UP_INTERVALS] = moduli.as_slice().try_into().map_err(|_| "not twelve moduli")?;
     let mut stages = Vec::new();
     for line in lines {
-        let numbers: Vec<i64> = line
-            .split_whitespace()
-            .map(|word| word.parse())
-            .collect::<Result<_, _>>()?;
+        let numbers: Vec<i64> = line.split_whitespace().map(|word| word.parse()).collect::<Result<_, _>>()?;
         if numbers.len() != 1 + TRELLIS_FRAME {
             return Err(format!("not an index line: {line}").into());
         }
         stages.push((
             numbers[0] as u64,
-            [
-                numbers[1] as i32,
-                numbers[2] as i32,
-                numbers[3] as i32,
-                numbers[4] as i32,
-            ],
+            [numbers[1] as i32, numbers[2] as i32, numbers[3] as i32, numbers[4] as i32],
         ));
     }
     Ok(Trace { k, moduli, stages })
@@ -124,9 +110,8 @@ impl Trace {
                 let interval = pending.len();
                 pending.push(index_to_ki(eta, self.moduli[interval], k));
                 if pending.len() == UP_INTERVALS {
-                    let labels: [u8; UP_INTERVALS] = std::mem::take(&mut pending)
-                        .try_into()
-                        .expect("twelve intervals");
+                    let labels: [u8; UP_INTERVALS] =
+                        std::mem::take(&mut pending).try_into().expect("twelve intervals");
                     frames.push(labels);
                 }
             }
@@ -142,11 +127,7 @@ impl Trace {
 /// a constellation point and the nearest one is the index that was sent. What
 /// this bypasses is the Viterbi, whose decisions are the other candidate for
 /// where a decided index goes wrong.
-fn levels_frames(
-    path: &str,
-    trace: &Trace,
-    gain: f64,
-) -> Result<Vec<[u8; UP_INTERVALS]>, Box<dyn std::error::Error>> {
+fn levels_frames(path: &str, trace: &Trace, gain: f64) -> Result<Vec<[u8; UP_INTERVALS]>, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let mut levels = Vec::new();
     for line in text.lines() {
@@ -159,11 +140,7 @@ fn levels_frames(
     let nearest = |level: f64| {
         let mut best = (f64::MAX, 0i32);
         for eta in -8i32..8 {
-            let point = if eta >= 0 {
-                positive[eta as usize]
-            } else {
-                -positive[(-eta - 1) as usize]
-            };
+            let point = if eta >= 0 { positive[eta as usize] } else { -positive[(-eta - 1) as usize] };
             let cost = (level - point) * (level - point);
             if cost < best.0 {
                 best = (cost, eta);
@@ -175,11 +152,7 @@ fn levels_frames(
     let mut labels = [0u8; UP_INTERVALS];
     for (n, &level) in levels.iter().enumerate() {
         let interval = n % UP_INTERVALS;
-        labels[interval] = index_to_ki(
-            nearest(level),
-            trace.moduli[interval],
-            interval % TRELLIS_FRAME,
-        );
+        labels[interval] = index_to_ki(nearest(level), trace.moduli[interval], interval % TRELLIS_FRAME);
         if interval == UP_INTERVALS - 1 {
             frames.push(labels);
             labels = [0u8; UP_INTERVALS];
@@ -199,23 +172,16 @@ fn levels_frames(
 /// scrambler shows up as a level that is not where this says it should be.
 fn b1u_levels(trace: &Trace, gain: f64, frames: usize, trellis: Trellis) -> Vec<u8> {
     let parameters = Parameters {
-        drn: (0..=19u8)
-            .find(|&drn| datapump::v92::up_bits(drn) == trace.k)
-            .unwrap_or(1),
+        drn: (0..=19u8).find(|&drn| datapump::v92::up_bits(drn) == trace.k).unwrap_or(1),
         trellis,
         extend_e2u: false,
         gain,
         moduli: trace.moduli,
-        filters: Filters {
-            z2: vec![1.0],
-            ..Filters::default()
-        },
+        filters: Filters { z2: vec![1.0], ..Filters::default() },
         sets: vec![(0..8).map(|index| (2 * index + 1) as u16).collect()],
         indices: [0; CONSTELLATION_FRAME],
     };
-    let Ok(mut encoder) = UpEncoder::new(&parameters) else {
-        return Vec::new();
-    };
+    let Ok(mut encoder) = UpEncoder::new(&parameters) else { return Vec::new() };
     encoder.reset_all();
     let mut levels = Vec::with_capacity(frames * UP_INTERVALS);
     for n in 0..(frames * UP_INTERVALS) {
@@ -223,11 +189,7 @@ fn b1u_levels(trace: &Trace, gain: f64, frames: usize, trellis: Trellis) -> Vec<
         // What the digital modem has to recover: not the point, which the
         // analogue modem chose from the class, but the class itself (6.4.2).
         let interval = n % UP_INTERVALS;
-        levels.push(index_to_ki(
-            symbol.eta,
-            trace.moduli[interval],
-            interval % TRELLIS_FRAME,
-        ));
+        levels.push(index_to_ki(symbol.eta, trace.moduli[interval], interval % TRELLIS_FRAME));
     }
     levels
 }
@@ -238,13 +200,7 @@ fn b1u_levels(trace: &Trace, gain: f64, frames: usize, trellis: Trellis) -> Vec<
 /// the fit is the fraction of symbols whose *decided point* is the one B1u
 /// puts there, with the capture's scale taken as the CPd gain -- the same
 /// division `v92::decoder` does.
-fn match_b1u(
-    levels: &[u8],
-    captured: &[f64],
-    at: usize,
-    gain: f64,
-    moduli: &[u8; UP_INTERVALS],
-) -> (usize, usize) {
+fn match_b1u(levels: &[u8], captured: &[f64], at: usize, gain: f64, moduli: &[u8; UP_INTERVALS]) -> (usize, usize) {
     let point = |eta: i32| {
         let magnitude = f64::from(2 * eta.abs() + 1);
         if eta >= 0 { magnitude } else { -magnitude }
@@ -252,9 +208,7 @@ fn match_b1u(
     let mut agree = 0usize;
     let mut seen = 0usize;
     for (offset, &ki) in levels.iter().enumerate() {
-        let Some(&level) = captured.get(at + offset) else {
-            break;
-        };
+        let Some(&level) = captured.get(at + offset) else { break };
         seen += 1;
         // The capture on the encoder's scale: G x v(n), divided back by G.
         let target = level / gain;
@@ -378,16 +332,8 @@ impl Convention {
             Scrambling::Scramble(Mode::Call) => "scramble/call",
             Scrambling::None => "plain",
         };
-        let b0 = if self.b0_at_top {
-            "b0 top"
-        } else {
-            "b0 bottom"
-        };
-        let reset = if self.reset_each_frame {
-            "scrambler per frame"
-        } else {
-            "scrambler continuous"
-        };
+        let b0 = if self.b0_at_top { "b0 top" } else { "b0 bottom" };
+        let reset = if self.reset_each_frame { "scrambler per frame" } else { "scrambler continuous" };
         format!(
             "d(-1)={} reflect {reflect} accumulate {accumulate} {scrambling} {b0} {reset}",
             u8::from(self.d_init)
@@ -499,11 +445,7 @@ fn scan(bits: &[bool], length: usize) -> Window {
         running.push(total);
     }
     let total_at = |end: usize| if end == 0 { 0 } else { running[end - 1] };
-    let mut best = Window {
-        ones: 0,
-        at: 0,
-        run: 0,
-    };
+    let mut best = Window { ones: 0, at: 0, run: 0 };
     let mut run = 0usize;
     for (i, &bit) in bits.iter().enumerate() {
         if bit {
@@ -545,9 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--levels" => levels = Some(args.next().ok_or("--levels wants a path")?),
             "--gain" => gain = args.next().ok_or("--gain wants a number")?.parse()?,
             "--forward" => forward = true,
-            "--within" => {
-                within = Some(args.next().ok_or("--within wants a frame count")?.parse()?)
-            }
+            "--within" => within = Some(args.next().ok_or("--within wants a frame count")?.parse()?),
             other => path = Some(other.to_owned()),
         }
     }
@@ -563,11 +503,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frames.len(),
         trace.k,
         trace.moduli,
-        if levels.is_some() {
-            " (indices straight off the levels, no Viterbi)"
-        } else {
-            ""
-        }
+        if levels.is_some() { " (indices straight off the levels, no Viterbi)" } else { "" }
     );
     if frames.len() < count {
         return Err("not enough whole data frames in the trace".into());
@@ -580,39 +516,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let captured: Vec<f64> = fs::read_to_string(path)?
             .lines()
-            .filter_map(|line| {
-                line.split_whitespace()
-                    .nth(1)
-                    .and_then(|word| word.parse::<f64>().ok())
-            })
+            .filter_map(|line| line.split_whitespace().nth(1).and_then(|word| word.parse::<f64>().ok()))
             .collect();
         let codes = [Trellis::Sixteen, Trellis::ThirtyTwo, Trellis::SixtyFour];
         for &trellis in &codes {
-            let b1u = b1u_levels(&trace, gain, 64, trellis);
-            println!(
-                "\n  {trellis:?}: B1u from memories at zero, {} symbols, compared by Ki",
-                b1u.len()
-            );
-            println!(
-                "\n  {:>5}  {:>13}  agreement with the capture",
-                "at", "agree"
-            );
-            let mut rows = Vec::new();
-            let last = captured.len().saturating_sub(b1u.len());
-            for at in 0..last {
-                let (agree, seen) = match_b1u(&b1u, &captured, at, gain, &trace.moduli);
-                if seen == 0 {
-                    break;
-                }
-                rows.push((agree, seen, at));
+        let b1u = b1u_levels(&trace, gain, 64, trellis);
+        println!("\n  {trellis:?}: B1u from memories at zero, {} symbols, compared by Ki", b1u.len());
+        println!("\n  {:>5}  {:>13}  agreement with the capture", "at", "agree");
+        let mut rows = Vec::new();
+        let last = captured.len().saturating_sub(b1u.len());
+        for at in 0..last {
+            let (agree, seen) = match_b1u(&b1u, &captured, at, gain, &trace.moduli);
+            if seen == 0 {
+                break;
             }
-            rows.sort_by_key(|a| std::cmp::Reverse(a.0));
-            for &(agree, seen, at) in rows.iter().take(3) {
-                println!(
-                    "  {at:>6}  {agree:>4}/{seen:<4}   {:.1}%",
-                    100.0 * agree as f64 / seen as f64
-                );
-            }
+            rows.push((agree, seen, at));
+        }
+        rows.sort_by_key(|a| std::cmp::Reverse(a.0));
+        for &(agree, seen, at) in rows.iter().take(3) {
+            println!("  {at:>6}  {agree:>4}/{seen:<4}   {:.1}%", 100.0 * agree as f64 / seen as f64);
+        }
         }
         std::io::stdout().flush()?;
         return Ok(());
@@ -655,10 +578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scored.push((found.ones, found.run, found.at, convention, bits));
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    println!(
-        "\n  {:>7}  {:>6}  {:>6}  {:>4}  conventions",
-        "ones", "ones%", "at bit", "run"
-    );
+    println!("\n  {:>7}  {:>6}  {:>6}  {:>4}  conventions", "ones", "ones%", "at bit", "run");
     for (ones, run, at, convention, _) in scored.iter().take(12) {
         println!(
             "  {ones:>7}  {:>6.1}  {at:>6}  {run:>4}  {}",
@@ -670,9 +590,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A caller that names one convention wants that one analysed, whatever
     // else does better, so that two captures can be compared like for like.
     let chosen = match only.as_deref() {
-        Some(fragment) => scored
-            .iter()
-            .find(|(_, _, _, convention, _)| convention.label().contains(fragment)),
+        Some(fragment) => scored.iter().find(|(_, _, _, convention, _)| convention.label().contains(fragment)),
         None => None,
     };
     let Some((ones, run, at, convention, bits)) = chosen.or_else(|| scored.first()) else {
@@ -707,10 +625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         let ones = bits[from..to].iter().filter(|bit| **bit).count();
-        let text: String = bits[from..to]
-            .iter()
-            .map(|bit| if *bit { '1' } else { '0' })
-            .collect();
+        let text: String = bits[from..to].iter().map(|bit| if *bit { '1' } else { '0' }).collect();
         println!("    {frame:>5}: {ones:>2}/{per_frame} {text}");
     }
     let mut octets = BTreeMap::<u8, usize>::new();
@@ -727,11 +642,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut common: Vec<(u8, usize)> = octets.into_iter().collect();
     common.sort_by_key(|a| std::cmp::Reverse(a.1));
-    let shown: Vec<String> = common
-        .iter()
-        .take(8)
-        .map(|(octet, n)| format!("{octet:02x}:{n}"))
-        .collect();
+    let shown: Vec<String> = common.iter().take(8).map(|(octet, n)| format!("{octet:02x}:{n}")).collect();
     println!("  most common octets in the window: {}", shown.join(" "));
 
     // Every frame's ones, all the way down the capture: a stretch that is all
@@ -759,12 +670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = dump {
         let text: String = bits
             .chunks(per_frame)
-            .map(|frame| {
-                frame
-                    .iter()
-                    .map(|bit| if *bit { '1' } else { '0' })
-                    .collect::<String>()
-            })
+            .map(|frame| frame.iter().map(|bit| if *bit { '1' } else { '0' }).collect::<String>())
             .collect::<Vec<String>>()
             .join("\n");
         fs::write(&path, text + "\n")?;

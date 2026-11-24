@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use datapump::Bell103Rx;
 use datapump::v22bis::{Channel, Receiver as V22bisRx};
-use dsp::Spectrum;
 use ec::hdlc::{Decoder, Fcs};
 use line::AudioSink;
+use dsp::Spectrum;
 use telemetry::{CallState, Direction, Leds, Publisher};
 
 use crate::tap::{V32Tap, V34Tap};
@@ -51,11 +51,7 @@ pub const PCM_DEPTH: usize = 16_384;
 /// a point, up to sixteen thousand -- which at 3429 baud is still only the
 /// last three to five seconds.
 pub fn scope_depth(states: usize) -> usize {
-    if states > 128 {
-        (12 * states).min(16_384)
-    } else {
-        SYMBOL_HISTORY
-    }
+    if states > 128 { (12 * states).min(16_384) } else { SYMBOL_HISTORY }
 }
 
 /// Which standard a capture holds, and whether we can yet demodulate it.
@@ -101,10 +97,7 @@ impl Standard {
     /// For V.32bis and V.34 that is a receiver for as much of the call as one
     /// tap has in it: each end's training, and not the data (`tap`).
     pub fn has_receiver(self) -> bool {
-        matches!(
-            self,
-            Self::Bell103 | Self::V22bis | Self::V32bis | Self::V34
-        )
+        matches!(self, Self::Bell103 | Self::V22bis | Self::V32bis | Self::V34)
     }
 
     pub fn label(self) -> &'static str {
@@ -219,10 +212,7 @@ enum Demod {
     // Both boxed. A receiver carries filter state by the hundred taps, and the
     // two modulations differ enough in size that an unboxed enum would be as
     // large as its biggest arm whichever one is in use.
-    Bell103 {
-        host: Box<Bell103Rx>,
-        caller: Box<Bell103Rx>,
-    },
+    Bell103 { host: Box<Bell103Rx>, caller: Box<Bell103Rx> },
     V22bis {
         host: Box<V22bisRx>,
         caller: Box<V22bisRx>,
@@ -265,12 +255,7 @@ impl Demod {
                     from_caller.push(b);
                 }
             }
-            Self::V22bis {
-                host,
-                caller,
-                host_sift,
-                caller_sift,
-            } => {
+            Self::V22bis { host, caller, host_sift, caller_sift } => {
                 host.feed(x);
                 caller.feed(x);
                 host_sift.feed(host.take_bits(), from_host);
@@ -404,10 +389,7 @@ struct LineAssembler {
 
 impl LineAssembler {
     fn new(direction: Direction) -> Self {
-        Self {
-            direction,
-            width: 0,
-        }
+        Self { direction, width: 0 }
     }
 
     fn push(&mut self, byte: u8, tx: &Publisher) {
@@ -440,10 +422,7 @@ pub struct Ring {
 
 impl Ring {
     pub fn new(len: usize) -> Self {
-        Self {
-            data: vec![0.0; len],
-            write: 0,
-        }
+        Self { data: vec![0.0; len], write: 0 }
     }
 
     #[inline]
@@ -510,13 +489,7 @@ fn run(
     control: Arc<Control>,
     sink: Arc<AudioSink>,
 ) {
-    tx.log(
-        Direction::Note,
-        format!(
-            "loaded {name} ({:.1}s at {fs:.0} Hz)",
-            samples.len() as f64 / fs
-        ),
-    );
+    tx.log(Direction::Note, format!("loaded {name} ({:.1}s at {fs:.0} Hz)", samples.len() as f64 / fs));
     if matches!(standard, Standard::V32bis | Standard::V34) {
         tx.log(
             Direction::Note,
@@ -526,25 +499,15 @@ fn run(
             ),
         );
     } else if standard == Standard::V22bis {
-        tx.log(
-            Direction::Note,
-            "V.22bis: calling on 1200 Hz, answering on 2400 Hz",
-        );
+        tx.log(Direction::Note, "V.22bis: calling on 1200 Hz, answering on 2400 Hz");
     } else if standard.has_receiver() {
-        tx.log(
-            Direction::Note,
-            "Bell 103: originate 1070/1270, answer 2025/2225",
-        );
+        tx.log(Direction::Note, "Bell 103: originate 1070/1270, answer 2025/2225");
     } else {
         tx.log(
             Direction::Note,
             format!(
                 "{} is not implemented yet - showing waterfall, spectrum and level only",
-                standard
-                    .label()
-                    .split(" (")
-                    .next()
-                    .unwrap_or("this modulation")
+                standard.label().split(" (").next().unwrap_or("this modulation")
             ),
         );
     }
@@ -681,10 +644,8 @@ fn run(
             }
         }
 
-        let (host_carrier, caller_carrier) = demod
-            .as_ref()
-            .map(Demod::carriers)
-            .unwrap_or((false, false));
+        let (host_carrier, caller_carrier) =
+            demod.as_ref().map(Demod::carriers).unwrap_or((false, false));
         let carrier = host_carrier || caller_carrier;
         if carrier && connected_since.is_none() {
             connected_since = Some(Instant::now());
@@ -699,11 +660,7 @@ fn run(
             // so measure the raw line instead.
             let level = demod.as_ref().and_then(Demod::level).unwrap_or_else(|| {
                 let n = waveform.data.len();
-                (waveform
-                    .data
-                    .iter()
-                    .map(|v| (*v as f64) * (*v as f64))
-                    .sum::<f64>()
+                (waveform.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>()
                     / n as f64)
                     .sqrt()
             });
@@ -727,11 +684,7 @@ fn run(
                 } else if let Some((training, _)) = progress {
                     // Followed from a tap, a call never reaches data: it is
                     // training while a receiver is, and negotiating around it.
-                    if training {
-                        CallState::Training
-                    } else {
-                        CallState::Negotiating
-                    }
+                    if training { CallState::Training } else { CallState::Negotiating }
                 } else if carrier {
                     CallState::Connected
                 } else {
@@ -805,16 +758,9 @@ mod tests {
     fn the_capture_built_in_is_a_capture() {
         let wav = capture(Path::new(GOLDEN_NAME)).expect("the built-in vector");
         assert_eq!(wav.sample_rate, 16_000);
-        assert!(
-            wav.duration_secs() > 1.0,
-            "only {:.2} s",
-            wav.duration_secs()
-        );
+        assert!(wav.duration_secs() > 1.0, "only {:.2} s", wav.duration_secs());
         let samples = wav.mono();
-        let rms = (samples
-            .iter()
-            .map(|s| f64::from(*s) * f64::from(*s))
-            .sum::<f64>()
+        let rms = (samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
             / samples.len() as f64)
             .sqrt();
         assert!(rms > 0.01, "the built-in capture is silence: rms {rms:.5}");
@@ -893,8 +839,8 @@ mod tests {
             "/../../tests/vectors/v22bis-2400.wav"
         );
         let wav = line::wav::read(path).expect("read V.22bis vector");
-        let mut demod =
-            Demod::new(Standard::V22bis, wav.sample_rate as f64).expect("V.22bis is demodulated");
+        let mut demod = Demod::new(Standard::V22bis, wav.sample_rate as f64)
+            .expect("V.22bis is demodulated");
         let (mut host, mut caller) = (Vec::new(), Vec::new());
         for s in wav.mono() {
             demod.feed(s as f64, &mut host, &mut caller);
@@ -904,11 +850,7 @@ mod tests {
             text.contains("Welcome to phl6-dial1.popsite.net"),
             "the host greeting never reached the transcript; got {text:?}"
         );
-        assert_eq!(
-            demod.bit_rate(),
-            Some(1200),
-            "both modems settle on 1200 bit/s"
-        );
+        assert_eq!(demod.bit_rate(), Some(1200), "both modems settle on 1200 bit/s");
     }
 
     #[test]
@@ -941,7 +883,11 @@ mod tests {
         // As far as one tap goes, which is their training.
         assert!(Standard::V32bis.has_receiver());
         assert!(Standard::V34.has_receiver());
-        for s in [Standard::V90, Standard::V92, Standard::Unknown] {
+        for s in [
+            Standard::V90,
+            Standard::V92,
+            Standard::Unknown,
+        ] {
             assert!(!s.has_receiver(), "{s:?} should not claim a receiver");
         }
     }
@@ -1044,10 +990,7 @@ mod demod_tests {
     /// pin the path that feeds it.
     #[test]
     fn v22bis_produces_moving_constellation_points() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/vectors/v22bis-2400.wav"
-        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v22bis-2400.wav");
         let wav = line::wav::read(path).expect("vector");
         let fs = wav.sample_rate as f64;
         let mono = wav.mono();
@@ -1057,11 +1000,7 @@ mod demod_tests {
         let mut caller_bytes = Vec::new();
         let mut points: Vec<(f32, f32)> = Vec::new();
         // Well into the data, as the engine would be by then.
-        for &s in mono
-            .iter()
-            .skip((6.0 * fs) as usize)
-            .take((4.0 * fs) as usize)
-        {
+        for &s in mono.iter().skip((6.0 * fs) as usize).take((4.0 * fs) as usize) {
             host_bytes.clear();
             caller_bytes.clear();
             d.feed(s as f64, &mut host_bytes, &mut caller_bytes);
@@ -1081,10 +1020,7 @@ mod demod_tests {
             .iter()
             .map(|p| (p.0 * p.0 + p.1 * p.1).sqrt())
             .fold(0.0f32, f32::max);
-        assert!(
-            spread > 0.1,
-            "points are all at the origin: largest {spread}"
-        );
+        assert!(spread > 0.1, "points are all at the origin: largest {spread}");
     }
 
     /// The scope starts at the beginning of the capture, not part way in: the
@@ -1092,10 +1028,7 @@ mod demod_tests {
     /// has to survive.
     #[test]
     fn v22bis_points_stay_finite_from_the_start_of_a_capture() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/vectors/v22bis-2400.wav"
-        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v22bis-2400.wav");
         let wav = line::wav::read(path).expect("vector");
         let fs = wav.sample_rate as f64;
         let mono = wav.mono();

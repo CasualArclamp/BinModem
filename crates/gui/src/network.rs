@@ -36,11 +36,7 @@ pub struct LinkSettings {
 
 impl Default for LinkSettings {
     fn default() -> Self {
-        Self {
-            mru: ppp::lcp::DEFAULT_MRU,
-            route: Route::Auto,
-            port: proxy::DEFAULT_PORT,
-        }
+        Self { mru: ppp::lcp::DEFAULT_MRU, route: Route::Auto, port: proxy::DEFAULT_PORT }
     }
 }
 
@@ -259,10 +255,7 @@ impl Networking {
             },
         );
         if asking {
-            tx.log(
-                Direction::Note,
-                "ppp: asking the far end who it is, with CHAP or PAP",
-            );
+            tx.log(Direction::Note, "ppp: asking the far end who it is, with CHAP or PAP");
         }
         let mut link = Link::with_authentication(local, remote, authentication);
         if !compress_headers {
@@ -272,10 +265,7 @@ impl Networking {
         }
         if settings.mru != ppp::lcp::DEFAULT_MRU {
             link = link.with_mru(settings.mru);
-            tx.log(
-                Direction::Note,
-                format!("ppp: asking for frames of {} octets at most", settings.mru),
-            );
+            tx.log(Direction::Note, format!("ppp: asking for frames of {} octets at most", settings.mru));
         }
         link.open();
         Self {
@@ -323,11 +313,7 @@ impl Networking {
         let (local, remote) = self.link.addresses();
         // The seed only has to differ between the two ends, and they are never
         // the same role.
-        let seed = if self.serving {
-            0x9e37_79b9
-        } else {
-            0x85eb_ca6b
-        };
+        let seed = if self.serving { 0x9e37_79b9 } else { 0x85eb_ca6b };
         if self.serving {
             tx.log(
                 Direction::Note,
@@ -336,13 +322,7 @@ impl Networking {
             self.proxy = Some(Proxy::Serving(Box::new(proxy::Server::new(local, seed))));
             return;
         }
-        match proxy::Client::routed(
-            &self.settings.listen_at(),
-            local,
-            remote,
-            seed,
-            self.settings.route,
-        ) {
+        match proxy::Client::routed(&self.settings.listen_at(), local, remote, seed, self.settings.route) {
             Ok(client) => {
                 tx.log(
                     Direction::Note,
@@ -424,14 +404,8 @@ impl Networking {
         // Each to where the stack addressed it: the far end, for a BinModem's
         // proxy, or through it, for a web server.
         for out in outgoing {
-            if !self
-                .link
-                .send_to(out.to, ppp::ip::PROTOCOL_TCP, &out.payload)
-            {
-                tx.log(
-                    Direction::Note,
-                    "ip: a segment was too large for the far end's MRU and was not sent",
-                );
+            if !self.link.send_to(out.to, ppp::ip::PROTOCOL_TCP, &out.payload) {
+                tx.log(Direction::Note, "ip: a segment was too large for the far end's MRU and was not sent");
             }
         }
     }
@@ -536,14 +510,7 @@ impl Networking {
                 let (mru_in, mru_out) = self.link.mru();
                 let (accm_in, accm_out) = self.link.accm();
                 let (acfc, pfc) = self.link.compressed_fields();
-                LcpView {
-                    mru_in,
-                    mru_out,
-                    accm_in,
-                    accm_out,
-                    acfc,
-                    pfc,
-                }
+                LcpView { mru_in, mru_out, accm_in, accm_out, acfc, pfc }
             },
             counters: self.link.counters(),
         }
@@ -554,24 +521,14 @@ impl Networking {
         if self.link.up() && !self.announced {
             self.announced = true;
             let (local, remote) = self.link.addresses();
-            let who = match (
-                self.link.who(),
-                self.link.checked_with(),
-                self.link.proved_with(),
-            ) {
-                (Some(who), Some(method), _) => {
-                    format!(", the caller is {who} over {}", method.name())
-                }
+            let who = match (self.link.who(), self.link.checked_with(), self.link.proved_with()) {
+                (Some(who), Some(method), _) => format!(", the caller is {who} over {}", method.name()),
                 (_, _, Some(method)) => format!(", logged in over {}", method.name()),
                 _ => String::new(),
             };
             tx.log(
                 Direction::Note,
-                format!(
-                    "ppp: up, {} talking to {}{who}",
-                    dotted(local),
-                    dotted(remote)
-                ),
+                format!("ppp: up, {} talking to {}{who}", dotted(local), dotted(remote)),
             );
             // Worth a line of its own: it is the difference between forty
             // octets of header on every segment and three, and a far end that
@@ -587,7 +544,9 @@ impl Networking {
                     ),
                     (Some(_), None) => "ppp: headers compressed outbound only".to_owned(),
                     (None, Some(_)) => "ppp: headers compressed inbound only".to_owned(),
-                    (None, None) => "ppp: headers uncompressed, the far end declined".to_owned(),
+                    (None, None) => {
+                        "ppp: headers uncompressed, the far end declined".to_owned()
+                    }
                 },
             );
         }
@@ -598,10 +557,7 @@ impl Networking {
         }
         for event in self.pinger.take_events() {
             match event {
-                Event::Reply {
-                    sequence,
-                    round_trip_ms,
-                } => tx.log(
+                Event::Reply { sequence, round_trip_ms } => tx.log(
                     Direction::Note,
                     format!(
                         "ping: {} octets from {}, seq {sequence}, {round_trip_ms} ms",
@@ -609,11 +565,12 @@ impl Networking {
                         self.view().remote
                     ),
                 ),
-                Event::Lost(sequence) => tx.log(
-                    Direction::Note,
-                    format!("ping: seq {sequence} never came back"),
-                ),
-                Event::Answered => tx.log(Direction::Note, "ping: answered one from the far end"),
+                Event::Lost(sequence) => {
+                    tx.log(Direction::Note, format!("ping: seq {sequence} never came back"))
+                }
+                Event::Answered => {
+                    tx.log(Direction::Note, "ping: answered one from the far end")
+                }
                 // Not logged: at one a second it would be half the transcript,
                 // and a reply says everything a request would have.
                 Event::Sent(_) => {}
@@ -637,23 +594,11 @@ mod tests {
     #[test]
     fn the_answering_end_is_the_one_with_addresses_to_give() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let answering = Networking::start(
-            Role::Answering,
-            Authentication::default(),
-            true,
-            LinkSettings::default(),
-            &tx,
-        );
+        let answering = Networking::start(Role::Answering, Authentication::default(), true, LinkSettings::default(), &tx);
         assert!(answering.serving);
         assert_eq!(answering.view().local, "10.0.0.1");
 
-        let calling = Networking::start(
-            Role::Calling,
-            Authentication::default(),
-            true,
-            LinkSettings::default(),
-            &tx,
-        );
+        let calling = Networking::start(Role::Calling, Authentication::default(), true, LinkSettings::default(), &tx);
         assert!(!calling.serving);
         assert_eq!(calling.view().local, "0.0.0.0", "it made an address up");
     }
@@ -663,20 +608,8 @@ mod tests {
     #[test]
     fn two_ends_of_a_call_come_up_and_ping() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let mut answering = Networking::start(
-            Role::Answering,
-            Authentication::default(),
-            true,
-            LinkSettings::default(),
-            &tx,
-        );
-        let mut calling = Networking::start(
-            Role::Calling,
-            Authentication::default(),
-            true,
-            LinkSettings::default(),
-            &tx,
-        );
+        let mut answering = Networking::start(Role::Answering, Authentication::default(), true, LinkSettings::default(), &tx);
+        let mut calling = Networking::start(Role::Calling, Authentication::default(), true, LinkSettings::default(), &tx);
 
         let mut came_up = None;
         for ms in 0..30_000u32 {

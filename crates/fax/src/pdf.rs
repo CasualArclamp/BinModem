@@ -27,10 +27,7 @@ pub type Sheet<'a> = (&'a [Vec<bool>], Resolution);
 /// A page with no lines has nothing to draw and no size to draw it at, and is
 /// left out.
 pub fn document(pages: &[Sheet<'_>]) -> Vec<u8> {
-    let pages: Vec<&Sheet<'_>> = pages
-        .iter()
-        .filter(|(lines, _)| !lines.is_empty())
-        .collect();
+    let pages: Vec<&Sheet<'_>> = pages.iter().filter(|(lines, _)| !lines.is_empty()).collect();
     let mut out = Writer::default();
     // The header, and a comment of bytes past 127 on the line after it, which
     // is what 7.5.2 recommends so that anything moving the file knows it is
@@ -41,17 +38,10 @@ pub fn document(pages: &[Sheet<'_>]) -> Vec<u8> {
     // three more after that -- the page, what is drawn on it, the picture.
     let page_object = |n: usize| 4 + 3 * n;
     out.object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
-    let kids: Vec<String> = (0..pages.len())
-        .map(|n| format!("{} 0 R", page_object(n)))
-        .collect();
+    let kids: Vec<String> = (0..pages.len()).map(|n| format!("{} 0 R", page_object(n))).collect();
     out.object(
         2,
-        format!(
-            "<< /Type /Pages /Kids [{}] /Count {} >>",
-            kids.join(" "),
-            pages.len()
-        )
-        .as_bytes(),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).as_bytes(),
     );
     out.object(
         3,
@@ -74,11 +64,7 @@ pub fn document(pages: &[Sheet<'_>]) -> Vec<u8> {
         );
         // The picture is a unit square until it is drawn: scaled to the sheet
         // it fills the sheet (8.9).
-        out.stream(
-            drawn,
-            "",
-            format!("q {wide} 0 0 {tall} 0 0 cm /Page Do Q").as_bytes(),
-        );
+        out.stream(drawn, "", format!("q {wide} 0 0 {tall} 0 0 cm /Page Do Q").as_bytes());
         // K -1 is T.6 (Table 11). BlackIs1 false, which is also the default,
         // is T.4's sense of the bits: a 0 in the picture is black, which is
         // what DeviceGray makes of it too. The coding ends in EOFB, which
@@ -171,19 +157,12 @@ mod tests {
     /// so that a decoder that slips shows it.
     fn page_of(rows: usize, seed: usize) -> Vec<Vec<bool>> {
         (0..rows)
-            .map(|y| {
-                (0..WIDTH)
-                    .map(|x| (x * 7 + y * 13 + seed) % 29 < 9 || x / 64 == y % 27)
-                    .collect()
-            })
+            .map(|y| (0..WIDTH).map(|x| (x * 7 + y * 13 + seed) % 29 < 9 || x / 64 == y % 27).collect())
             .collect()
     }
 
     fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-        hay[from..]
-            .windows(needle.len())
-            .position(|w| w == needle)
-            .map(|i| i + from)
+        hay[from..].windows(needle.len()).position(|w| w == needle).map(|i| i + from)
     }
 
     /// The text of the dictionary of object `n`, and where it starts, found
@@ -192,23 +171,14 @@ mod tests {
         let tail = pdf.len() - 40;
         let mark = find(pdf, b"startxref\n", tail).unwrap() + 10;
         let digits = find(pdf, b"\n", mark).unwrap();
-        let at: usize = std::str::from_utf8(&pdf[mark..digits])
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(
-            pdf[at..].starts_with(b"xref\n0 "),
-            "startxref does not point at the table"
-        );
+        let at: usize = std::str::from_utf8(&pdf[mark..digits]).unwrap().parse().unwrap();
+        assert!(pdf[at..].starts_with(b"xref\n0 "), "startxref does not point at the table");
         let entries = find(pdf, b"65535 f\r\n", at).unwrap() + 9;
         let entry = &pdf[entries + (n - 1) * 20..entries + n * 20];
         assert_eq!(&entry[10..], b" 00000 n\r\n");
         let offset: usize = std::str::from_utf8(&entry[..10]).unwrap().parse().unwrap();
         let head = format!("{n} 0 obj\n");
-        assert!(
-            pdf[offset..].starts_with(head.as_bytes()),
-            "object {n} is not where the table says"
-        );
+        assert!(pdf[offset..].starts_with(head.as_bytes()), "object {n} is not where the table says");
         let body = offset + head.len();
         let end = find(pdf, b">>\n", body).unwrap() + 2;
         (body, String::from_utf8(pdf[body..end].to_vec()).unwrap())
@@ -226,17 +196,8 @@ mod tests {
     }
 
     fn number(dict: &str, key: &str) -> f64 {
-        let at = dict
-            .find(key)
-            .unwrap_or_else(|| panic!("no {key} in {dict}"))
-            + key.len();
-        dict[at..]
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .trim_end_matches(']')
-            .parse()
-            .unwrap()
+        let at = dict.find(key).unwrap_or_else(|| panic!("no {key} in {dict}")) + key.len();
+        dict[at..].split_whitespace().next().unwrap().trim_end_matches(']').parse().unwrap()
     }
 
     #[test]
@@ -253,19 +214,15 @@ mod tests {
         let (_, tree) = object(&pdf, 2);
         assert!(tree.contains("/Kids [4 0 R 7 0 R] /Count 2"), "{tree}");
 
-        for (n, (lines, resolution)) in
-            [(&standard, Resolution::Standard), (&fine, Resolution::Fine)]
-                .into_iter()
-                .enumerate()
+        for (n, (lines, resolution)) in [(&standard, Resolution::Standard), (&fine, Resolution::Fine)]
+            .into_iter()
+            .enumerate()
         {
             let (_, page) = object(&pdf, 4 + 3 * n);
             // 1728 pels over 215 mm across, and the lines at the resolution's
             // pitch down, in points.
             let (wide, tall) = media_box(&page);
-            assert!(
-                (wide - 215.0 * POINTS_PER_MM).abs() < 0.01,
-                "{wide} points across"
-            );
+            assert!((wide - 215.0 * POINTS_PER_MM).abs() < 0.01, "{wide} points across");
             let want = lines.len() as f64 / resolution.lines_per_mm() * POINTS_PER_MM;
             assert!((tall - want).abs() < 0.01, "{tall} points down, not {want}");
             // The picture drawn over the whole of it.
@@ -273,30 +230,19 @@ mod tests {
             let length = number(&drawn, "/Length ") as usize;
             let at = find(&pdf, b"stream\n", body).unwrap() + 7;
             let content = String::from_utf8_lossy(&pdf[at..at + length]).into_owned();
-            let sheet = format!(
-                "{} 0 0 {}",
-                points(215.0),
-                points(lines.len() as f64 / resolution.lines_per_mm())
-            );
+            let sheet = format!("{} 0 0 {}", points(215.0), points(lines.len() as f64 / resolution.lines_per_mm()));
             assert_eq!(content, format!("q {sheet} 0 0 cm /Page Do Q"));
         }
         // A full standard page is A4's 297 mm.
         let (_, first) = object(&pdf, 4);
         let (_, tall) = media_box(&first);
-        assert!(
-            (tall / POINTS_PER_MM - 297.0).abs() < 0.5,
-            "{} mm",
-            tall / POINTS_PER_MM
-        );
+        assert!((tall / POINTS_PER_MM - 297.0).abs() < 0.5, "{} mm", tall / POINTS_PER_MM);
     }
 
     #[test]
     fn the_picture_on_each_sheet_is_the_page_in_t6() {
         let pages = [page_of(1143, 0), page_of(400, 11)];
-        let pdf = document(&[
-            (&pages[0], Resolution::Standard),
-            (&pages[1], Resolution::Fine),
-        ]);
+        let pdf = document(&[(&pages[0], Resolution::Standard), (&pages[1], Resolution::Fine)]);
         for (n, lines) in pages.iter().enumerate() {
             let (body, dict) = object(&pdf, 6 + 3 * n);
             assert!(dict.contains("/Filter /CCITTFaxDecode"), "{dict}");
@@ -306,10 +252,7 @@ mod tests {
             assert_eq!(number(&dict, "/Height "), lines.len() as f64);
             let length = number(&dict, "/Length ") as usize;
             let data = find(&pdf, b"stream\n", body).unwrap() + 7;
-            assert!(
-                pdf[data + length..].starts_with(b"\nendstream"),
-                "the length is wrong"
-            );
+            assert!(pdf[data + length..].starts_with(b"\nendstream"), "the length is wrong");
             // Our own T.6 decoder reads it back as the page that went in.
             let mut decoder = mmr::Decoder::new(WIDTH);
             let bits: Vec<bool> = pdf[data..data + length]
@@ -319,11 +262,7 @@ mod tests {
             decoder.feed_bits(&bits);
             assert!(decoder.is_done(), "no EOFB at the end of page {n}");
             assert_eq!(decoder.damaged(), 0);
-            assert_eq!(
-                decoder.lines(),
-                lines.as_slice(),
-                "page {n} came back different"
-            );
+            assert_eq!(decoder.lines(), lines.as_slice(), "page {n} came back different");
         }
     }
 }

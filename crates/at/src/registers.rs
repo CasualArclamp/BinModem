@@ -22,89 +22,29 @@ pub struct Spec {
 /// exists. V.250 gives S7 and S10 a range but no default, so those two take the
 /// long-standing Hayes values; that is convention, not conformance.
 pub const SPECS: &[Spec] = &[
-    Spec {
-        number: 0,
-        default: 0,
-        min: 0,
-        max: 255,
-        clause: "V.250 6.3.8",
-        note: "rings before automatic answer; 0 disables",
-    },
-    Spec {
-        number: 2,
-        default: 43,
-        min: 0,
-        max: 255,
-        clause: "extension",
-        note: "escape character; values above 127 disable escaping. \
-                  Hayes/TIA-602, absent from V.250",
-    },
-    Spec {
-        number: 3,
-        default: 13,
-        min: 0,
-        max: 127,
-        clause: "V.250 6.2.1",
-        note: "command line termination character",
-    },
-    Spec {
-        number: 4,
-        default: 10,
-        min: 0,
-        max: 127,
-        clause: "V.250 6.2.2",
-        note: "response formatting character",
-    },
-    Spec {
-        number: 5,
-        default: 8,
-        min: 0,
-        max: 127,
-        clause: "V.250 6.2.3",
-        note: "command line editing character",
-    },
-    Spec {
-        number: 6,
-        default: 2,
-        min: 2,
-        max: 10,
-        clause: "V.250 6.3.9",
-        note: "seconds to pause before blind dialling",
-    },
-    Spec {
-        number: 7,
-        default: 50,
-        min: 1,
-        max: 255,
-        clause: "V.250 6.3.10",
-        note: "seconds to wait for carrier; no ITU default, Hayes value used",
-    },
-    Spec {
-        number: 8,
-        default: 2,
-        min: 0,
-        max: 255,
-        clause: "V.250 6.3.11",
-        note: "seconds to pause for the comma dial modifier",
-    },
-    Spec {
-        number: 10,
-        default: 14,
-        min: 1,
-        max: 254,
-        clause: "V.250 6.3.12",
-        note: "tenths of a second to hold the line after carrier loss; \
-                  no ITU default, Hayes value used",
-    },
-    Spec {
-        number: 12,
-        default: 50,
-        min: 0,
-        max: 255,
-        clause: "extension",
-        note: "escape sequence guard time in fiftieths of a second; \
-                  Hayes/TIA-602, absent from V.250",
-    },
+    Spec { number: 0,  default: 0,  min: 0, max: 255, clause: "V.250 6.3.8",
+           note: "rings before automatic answer; 0 disables" },
+    Spec { number: 2,  default: 43, min: 0, max: 255, clause: "extension",
+           note: "escape character; values above 127 disable escaping. \
+                  Hayes/TIA-602, absent from V.250" },
+    Spec { number: 3,  default: 13, min: 0, max: 127, clause: "V.250 6.2.1",
+           note: "command line termination character" },
+    Spec { number: 4,  default: 10, min: 0, max: 127, clause: "V.250 6.2.2",
+           note: "response formatting character" },
+    Spec { number: 5,  default: 8,  min: 0, max: 127, clause: "V.250 6.2.3",
+           note: "command line editing character" },
+    Spec { number: 6,  default: 2,  min: 2, max: 10,  clause: "V.250 6.3.9",
+           note: "seconds to pause before blind dialling" },
+    Spec { number: 7,  default: 50, min: 1, max: 255, clause: "V.250 6.3.10",
+           note: "seconds to wait for carrier; no ITU default, Hayes value used" },
+    Spec { number: 8,  default: 2,  min: 0, max: 255, clause: "V.250 6.3.11",
+           note: "seconds to pause for the comma dial modifier" },
+    Spec { number: 10, default: 14, min: 1, max: 254, clause: "V.250 6.3.12",
+           note: "tenths of a second to hold the line after carrier loss; \
+                  no ITU default, Hayes value used" },
+    Spec { number: 12, default: 50, min: 0, max: 255, clause: "extension",
+           note: "escape sequence guard time in fiftieths of a second; \
+                  Hayes/TIA-602, absent from V.250" },
 ];
 
 pub fn spec_for(number: u8) -> Option<&'static Spec> {
@@ -133,12 +73,7 @@ pub enum RegError {
     /// V.250 5.3.2: the parameter number is not implemented.
     Unknown(u8),
     /// V.250 5.6.2: the value lies outside the parameter's defined range.
-    OutOfRange {
-        number: u8,
-        value: u32,
-        min: u8,
-        max: u8,
-    },
+    OutOfRange { number: u8, value: u32, min: u8, max: u8 },
 }
 
 impl Registers {
@@ -217,11 +152,7 @@ mod tests {
         assert_eq!(r.get(6).unwrap(), 5);
         assert!(matches!(r.set(6, 1), Err(RegError::OutOfRange { .. })));
         assert!(matches!(r.set(6, 11), Err(RegError::OutOfRange { .. })));
-        assert_eq!(
-            r.get(6).unwrap(),
-            5,
-            "a rejected write must not alter the value"
-        );
+        assert_eq!(r.get(6).unwrap(), 5, "a rejected write must not alter the value");
     }
 
     #[test]
@@ -229,24 +160,16 @@ mod tests {
         let mut r = Registers::default();
         for n in [3u8, 4, 5] {
             assert!(r.set(n, 127).is_ok(), "S{n} should accept 127");
-            assert!(
-                matches!(r.set(n, 128), Err(RegError::OutOfRange { .. })),
-                "S{n} should reject 128"
-            );
+            assert!(matches!(r.set(n, 128), Err(RegError::OutOfRange { .. })),
+                    "S{n} should reject 128");
         }
     }
 
     #[test]
     fn every_default_lies_within_its_own_range() {
         for s in SPECS {
-            assert!(
-                s.default >= s.min && s.default <= s.max,
-                "S{} default {} outside {}..={}",
-                s.number,
-                s.default,
-                s.min,
-                s.max
-            );
+            assert!(s.default >= s.min && s.default <= s.max,
+                    "S{} default {} outside {}..={}", s.number, s.default, s.min, s.max);
         }
     }
 }

@@ -90,11 +90,7 @@ fn energies(params: &Params, shell: &Shell) -> (f64, f64) {
             .sum::<f64>()
             / per_ring as f64
     };
-    let plain: f64 = shares
-        .iter()
-        .enumerate()
-        .map(|(r, s)| s * ring_energy(r, &|e| e))
-        .sum();
+    let plain: f64 = shares.iter().enumerate().map(|(r, s)| s * ring_energy(r, &|e| e)).sum();
     let theta = params.theta();
     let bent: f64 = shares
         .iter()
@@ -141,9 +137,7 @@ struct Precoder {
 impl Precoder {
     fn new(params: &Params) -> Self {
         Self {
-            h: params
-                .precoding
-                .map(|(re, im)| (i64::from(re), i64::from(im))),
+            h: params.precoding.map(|(re, im)| (i64::from(re), i64::from(im))),
             step: 2 * params.framing.precoder_scale() * FINE,
             x: [(0, 0); 3],
         }
@@ -189,9 +183,7 @@ struct Group {
 
 /// Read `count` bits into a number, first bit least significant.
 fn number(bits: &[bool]) -> usize {
-    bits.iter()
-        .enumerate()
-        .fold(0, |n, (i, &b)| n | usize::from(b) << i)
+    bits.iter().enumerate().fold(0, |n, (i, &b)| n | usize::from(b) << i)
 }
 
 /// A mapping frame's bits split as 9.3 says: the shell mapper's K, and four
@@ -219,11 +211,7 @@ fn parse(framing: &Framing, high: bool, bits: &[bool]) -> (Vec<bool>, [Group; 4]
         return (Vec::new(), groups);
     }
     let k = framing.k;
-    let mut shell_bits: Vec<bool> = if high {
-        bits[..k].to_vec()
-    } else {
-        bits[..k - 1].to_vec()
-    };
+    let mut shell_bits: Vec<bool> = if high { bits[..k].to_vec() } else { bits[..k - 1].to_vec() };
     if !high {
         shell_bits.push(false);
     }
@@ -233,10 +221,7 @@ fn parse(framing: &Framing, high: bool, bits: &[bool]) -> (Vec<bool>, [Group; 4]
         group.i1 = bits[at];
         group.i2 = bits[at + 1];
         group.i3 = bits[at + 2];
-        group.q = [
-            number(&bits[at + 3..at + 3 + q]),
-            number(&bits[at + 3 + q..at + 3 + 2 * q]),
-        ];
+        group.q = [number(&bits[at + 3..at + 3 + q]), number(&bits[at + 3 + q..at + 3 + 2 * q])];
         at += 3 + 2 * q;
     }
     (shell_bits, groups)
@@ -336,23 +321,15 @@ impl Encoder {
         let within = (self.frame % framing.p as u64) as usize;
         let high = framing.high(within);
         let count = framing.bits_in(within);
-        let bits: Vec<bool> = (0..count)
-            .map(|_| self.scrambler.scramble(source()))
-            .collect();
+        let bits: Vec<bool> = (0..count).map(|_| self.scrambler.scramble(source())).collect();
         let (shell_bits, groups) = parse(&framing, high, &bits);
-        let rings = if framing.k > 0 {
-            self.shell.map(number(&shell_bits) as u64)
-        } else {
-            [0; 8]
-        };
+        let rings = if framing.k > 0 { self.shell.map(number(&shell_bits) as u64) } else { [0; 8] };
         let theta = self.params.theta();
         for (j, group) in groups.iter().enumerate() {
             let m = self.frame * 4 + j as u64;
             // 9.5
             self.z = (self.z + u32::from(group.i2) + 2 * u32::from(group.i3)) % 4;
-            let point = |side: usize| {
-                quarter((group.q[side] + (rings[2 * j + side] << framing.q)).min(QUARTER - 1))
-            };
+            let point = |side: usize| quarter((group.q[side] + (rings[2 * j + side] << framing.q)).min(QUARTER - 1));
             let (v0, v1) = (point(0), point(1));
             // Table 11, steps 1 to 9.
             let u0 = clockwise(v0, self.z);
@@ -369,8 +346,7 @@ impl Encoder {
             let x1 = (y1.0 - p1.0, y1.1 - p1.1);
             self.precoder.push(x1);
             let grid = |y: (i64, i64)| ((y.0 / FINE) as i32, (y.1 / FINE) as i32);
-            let inputs = trellis::convert(trellis::label(grid(y0)), trellis::label(grid(y1)))
-                & self.params.code.inputs();
+            let inputs = trellis::convert(trellis::label(grid(y0)), trellis::label(grid(y1))) & self.params.code.inputs();
             self.state = self.params.code.next(self.state, inputs);
             // 9.7, and out at unit power.
             for x in [x0, x1] {
@@ -433,12 +409,8 @@ pub fn unit_peak(params: &Params) -> f64 {
 
 /// The label of each point of the quarter superconstellation, by position.
 fn quarter_label(point: Point) -> Option<usize> {
-    static LABELS: std::sync::OnceLock<std::collections::HashMap<Point, usize>> =
-        std::sync::OnceLock::new();
-    LABELS
-        .get_or_init(|| (0..QUARTER).map(|n| (quarter(n), n)).collect())
-        .get(&point)
-        .copied()
+    static LABELS: std::sync::OnceLock<std::collections::HashMap<Point, usize>> = std::sync::OnceLock::new();
+    LABELS.get_or_init(|| (0..QUARTER).map(|n| (quarter(n), n)).collect()).get(&point).copied()
 }
 
 /// For each label, the nearest odd-grid point carrying it and how far away.
@@ -529,28 +501,20 @@ impl Channel {
     /// From the start of B1, where the precoder's memory is empty.
     pub fn new(params: Params) -> Self {
         let bent = Decoder::new(params);
-        let plain = Decoder::new(Params {
-            nonlinear: false,
-            ..params
-        });
+        let plain = Decoder::new(Params { nonlinear: false, ..params });
         Self {
             params,
             energy: bent.energy,
             scale: bent.scale,
             plain: plain.scale,
-            h: params
-                .precoding
-                .map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)),
+            h: params.precoding.map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)),
             past: [Complex::ZERO; 3],
         }
     }
 
     /// The parameters to make the decoder after it with.
     pub fn decoder_params(&self) -> Params {
-        Params {
-            nonlinear: false,
-            ..self.params
-        }
+        Params { nonlinear: false, ..self.params }
     }
 
     /// One equalised 2D symbol at unit mean power, as the decoder is to have
@@ -782,10 +746,7 @@ impl Decoder {
         }
         let oldest = self.stages.pop_front().expect("more than DEPTH are held");
         // `state` is where the oldest branch left from.
-        let y = [
-            oldest.near[0][labels.0 as usize].0,
-            oldest.near[1][labels.1 as usize].0,
-        ];
+        let y = [oldest.near[0][labels.0 as usize].0, oldest.near[1][labels.1 as usize].0];
         self.undo(y, state as u8);
     }
 
@@ -813,22 +774,15 @@ impl Decoder {
         let i = (z + 4 - self.z) % 4;
         self.z = z;
         let label = |u: Point, turn: u32, outside: &mut u64| {
-            quarter_label(counterclockwise(u, turn))
-                .filter(|&l| l < framing.l / 4)
-                .unwrap_or_else(|| {
-                    *outside += 1;
-                    0
-                })
+            quarter_label(counterclockwise(u, turn)).filter(|&l| l < framing.l / 4).unwrap_or_else(|| {
+                *outside += 1;
+                0
+            })
         };
         let l0 = label(u0, z, &mut self.outside);
         let l1 = label(u1, t, &mut self.outside);
         let mask = (1usize << framing.q) - 1;
-        self.groups[j] = Group {
-            i1,
-            i2: i & 1 == 1,
-            i3: i & 2 == 2,
-            q: [l0 & mask, l1 & mask],
-        };
+        self.groups[j] = Group { i1, i2: i & 1 == 1, i3: i & 2 == 2, q: [l0 & mask, l1 & mask] };
         self.labels[2 * j] = l0 >> framing.q;
         self.labels[2 * j + 1] = l1 >> framing.q;
         self.decided += 1;
@@ -967,20 +921,14 @@ impl Acquirer {
         self.read = [0, 0];
         self.trials = (0..2)
             .flat_map(|pairing| (0..self.half_frame()).map(move |phase| (pairing, phase)))
-            .map(|(pairing, phase)| Trial {
-                pairing,
-                phase,
-                metrics: vec![0.0; states],
-                cost: 0.0,
-            })
+            .map(|(pairing, phase)| Trial { pairing, phase, metrics: vec![0.0; states], cost: 0.0 })
             .collect();
     }
 
     /// One received 2D symbol at unit mean power.
     pub fn feed(&mut self, symbol: Complex) -> Acquired {
         self.symbols.push(symbol);
-        self.points
-            .push(to_grid(&self.params, self.energy, self.scale, symbol));
+        self.points.push(to_grid(&self.params, self.energy, self.scale, symbol));
         let (length, half_frame, code) = (self.length(), self.half_frame(), self.params.code);
         for pairing in 0..2 {
             let n = self.read[pairing];
@@ -988,10 +936,7 @@ impl Acquirer {
             if n == length || at + 1 >= self.points.len() {
                 continue;
             }
-            let near = [
-                nearest_by_label(self.points[at]),
-                nearest_by_label(self.points[at + 1]),
-            ];
+            let near = [nearest_by_label(self.points[at]), nearest_by_label(self.points[at + 1])];
             let table: Vec<f64> = branches(&self.subsets, &near).iter().map(|b| b.0).collect();
             for trial in self.trials.iter_mut().filter(|t| t.pairing == pairing) {
                 let free = n % half_frame == trial.phase;
@@ -1047,48 +992,25 @@ impl Acquirer {
         let mut back = Vec::with_capacity(length);
         for n in 0..length {
             let at = trial.pairing + 2 * n;
-            let near = [
-                nearest_by_label(self.points[at]),
-                nearest_by_label(self.points[at + 1]),
-            ];
+            let near = [nearest_by_label(self.points[at]), nearest_by_label(self.points[at + 1])];
             let table: Vec<f64> = branches(&self.subsets, &near).iter().map(|b| b.0).collect();
             let mut stage = vec![(0u8, false); code.states()];
-            step(
-                &mut metrics,
-                &table,
-                code,
-                n % half_frame == trial.phase,
-                Some(&mut stage),
-            );
+            step(&mut metrics, &table, code, n % half_frame == trial.phase, Some(&mut stage));
             back.push(stage);
         }
-        let mut state = metrics
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.total_cmp(b.1))
-            .map_or(0, |(s, _)| s);
+        let mut state = metrics.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(s, _)| s);
         let mut inverted = vec![false; length];
         for n in (0..length).rev() {
             let (from, flipped) = back[n][state];
             inverted[n] = flipped;
             state = usize::from(from);
         }
-        let seen: Vec<bool> = (trial.phase..length)
-            .step_by(half_frame)
-            .map(|n| inverted[n])
-            .collect();
+        let seen: Vec<bool> = (trial.phase..length).step_by(half_frame).map(|n| inverted[n]).collect();
         let halves = 2 * self.params.framing.j;
         let misread = |offset: usize| {
-            seen.iter()
-                .enumerate()
-                .filter(|&(i, &v)| {
-                    trellis::inversion(self.params.framing.j, (offset + i) % halves) != v
-                })
-                .count()
+            seen.iter().enumerate().filter(|&(i, &v)| trellis::inversion(self.params.framing.j, (offset + i) % halves) != v).count()
         };
-        let mut fits: Vec<(usize, usize)> = (0..halves)
-            .map(|offset| (misread(offset), offset))
-            .collect();
+        let mut fits: Vec<(usize, usize)> = (0..halves).map(|offset| (misread(offset), offset)).collect();
         fits.sort_unstable();
         (fits[0].0 <= 1 && fits[1].0 >= fits[0].0 + 2).then_some(fits[0].1)
     }
@@ -1098,13 +1020,7 @@ impl Acquirer {
 /// as it may where a half frame starts. The cheapest path's cost is taken out
 /// of every metric and returned; `back`, if given, keeps where each state came
 /// from and whether Y0 went out inverted to get there.
-fn step(
-    metrics: &mut Vec<f64>,
-    table: &[f64],
-    code: Code,
-    free: bool,
-    mut back: Option<&mut Vec<(u8, bool)>>,
-) -> f64 {
+fn step(metrics: &mut Vec<f64>, table: &[f64], code: Code, free: bool, mut back: Option<&mut Vec<(u8, bool)>>) -> f64 {
     let mut next = vec![f64::MAX; code.states()];
     for (state, &from) in metrics.iter().enumerate() {
         if from == f64::MAX {
@@ -1114,11 +1030,7 @@ fn step(
         for y in (0..16u8).filter(|y| y & !code.inputs() == 0) {
             let plain = table[out * 16 + y as usize];
             let turned = table[(1 - out) * 16 + y as usize];
-            let (d, flipped) = if free && turned < plain {
-                (turned, true)
-            } else {
-                (plain, false)
-            };
+            let (d, flipped) = if free && turned < plain { (turned, true) } else { (plain, false) };
             if d == f64::MAX {
                 continue;
             }
@@ -1146,13 +1058,7 @@ mod tests {
     use super::*;
     use crate::v34::info::SymbolRate;
 
-    fn params(
-        rate: SymbolRate,
-        primary: u32,
-        code: Code,
-        expanded: bool,
-        nonlinear: bool,
-    ) -> Params {
+    fn params(rate: SymbolRate, primary: u32, code: Code, expanded: bool, nonlinear: bool) -> Params {
         Params {
             framing: Framing::new(rate, primary, false, expanded).unwrap(),
             code,
@@ -1198,13 +1104,7 @@ mod tests {
 
     #[test]
     fn a_frames_bits_come_back_from_its_split() {
-        for (rate, primary) in [
-            (SymbolRate::S3429, 4800),
-            (SymbolRate::S3429, 7200),
-            (SymbolRate::S2400, 2400),
-            (SymbolRate::S3429, 33_600),
-            (SymbolRate::S3000, 4800),
-        ] {
+        for (rate, primary) in [(SymbolRate::S3429, 4800), (SymbolRate::S3429, 7200), (SymbolRate::S2400, 2400), (SymbolRate::S3429, 33_600), (SymbolRate::S3000, 4800)] {
             let f = Framing::new(rate, primary, false, false).unwrap();
             // A framing whose every frame is high has no low frame to split.
             let lows = f.r < f.p;
@@ -1212,11 +1112,7 @@ mod tests {
                 let count = if high { f.b } else { f.b - 1 };
                 let bits: Vec<bool> = (0..count).map(|i| (i * 7 + 3) % 5 < 2).collect();
                 let (shell_bits, groups) = parse(&f, high, &bits);
-                assert_eq!(
-                    unparse(&f, high, &shell_bits, &groups),
-                    bits,
-                    "{rate:?} at {primary}, high {high}"
-                );
+                assert_eq!(unparse(&f, high, &shell_bits, &groups), bits, "{rate:?} at {primary}, high {high}");
             }
         }
     }
@@ -1245,22 +1141,10 @@ mod tests {
                 for expanded in [false, true] {
                     let p = params(rate, primary, code, expanded, false);
                     let (sent, got) = loopback(p, 60, 80.0);
-                    assert!(
-                        got.len() > 100,
-                        "{rate:?} at {primary} {code:?}: {} bits",
-                        got.len()
-                    );
+                    assert!(got.len() > 100, "{rate:?} at {primary} {code:?}: {} bits", got.len());
                     // The descrambler needs 23 bits to fall into step.
-                    let wrong = sent
-                        .iter()
-                        .zip(&got)
-                        .skip(23)
-                        .filter(|(a, b)| a != b)
-                        .count();
-                    assert_eq!(
-                        wrong, 0,
-                        "{rate:?} at {primary} {code:?} expanded {expanded}"
-                    );
+                    let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
+                    assert_eq!(wrong, 0, "{rate:?} at {primary} {code:?} expanded {expanded}");
                 }
             }
         }
@@ -1323,31 +1207,19 @@ mod tests {
                     match acquirer.feed(symbols[fed]) {
                         Acquired::Searching => {}
                         Acquired::Found(found) => decoder = Some(found),
-                        Acquired::Nothing => {
-                            panic!("{rate:?} {primary} {code:?}: nothing from {start}")
-                        }
+                        Acquired::Nothing => panic!("{rate:?} {primary} {code:?}: nothing from {start}"),
                     }
                     fed += 1;
                 }
-                let mut decoder = decoder.unwrap_or_else(|| {
-                    panic!("{rate:?} {primary} {code:?}: never found from {start}")
-                });
-                assert!(
-                    fed - start <= 2 * superframe + 2,
-                    "{rate:?} {primary}: {} symbols to find",
-                    fed - start
-                );
+                let mut decoder = decoder.unwrap_or_else(|| panic!("{rate:?} {primary} {code:?}: never found from {start}"));
+                assert!(fed - start <= 2 * superframe + 2, "{rate:?} {primary}: {} symbols to find", fed - start);
                 for &symbol in &symbols[fed..] {
                     decoder.feed(symbol);
                 }
                 // A good long run of what went in, back out of it.
                 let got = decoder.take_bits();
                 let middle = &sent[sent.len() * 2 / 3..sent.len() * 2 / 3 + 2000];
-                assert!(
-                    got.windows(middle.len()).any(|w| w == middle),
-                    "{rate:?} {primary} {code:?} from {start}: {} bits and not those",
-                    got.len()
-                );
+                assert!(got.windows(middle.len()).any(|w| w == middle), "{rate:?} {primary} {code:?} from {start}: {} bits and not those", got.len());
             }
         }
     }
@@ -1377,12 +1249,7 @@ mod tests {
     fn non_linear_encoding_decodes_clean() {
         let p = params(SymbolRate::S3429, 33_600, Code::States64, true, true);
         let (sent, got) = loopback(p, 60, 80.0);
-        let wrong = sent
-            .iter()
-            .zip(&got)
-            .skip(23)
-            .filter(|(a, b)| a != b)
-            .count();
+        let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
         assert_eq!(wrong, 0);
     }
 
@@ -1391,22 +1258,10 @@ mod tests {
         // Every rate at 3429 symbols a second, both shapings, and non-linear
         // encoding at the rates that stretch the most: high and low mapping
         // frames alike, since TRN's power is the one to keep (10.1.3).
-        let mut cases: Vec<(u32, bool, bool)> = (2..=14)
-            .flat_map(|r| [(r * 2400, false, false), (r * 2400, true, false)])
-            .collect();
-        cases.extend([
-            (33_600, true, true),
-            (31_200, false, true),
-            (28_800, true, true),
-        ]);
+        let mut cases: Vec<(u32, bool, bool)> = (2..=14).flat_map(|r| [(r * 2400, false, false), (r * 2400, true, false)]).collect();
+        cases.extend([(33_600, true, true), (31_200, false, true), (28_800, true, true)]);
         for (primary, expanded, nonlinear) in cases {
-            let p = params(
-                SymbolRate::S3429,
-                primary,
-                Code::States64,
-                expanded,
-                nonlinear,
-            );
+            let p = params(SymbolRate::S3429, primary, Code::States64, expanded, nonlinear);
             let mut encoder = Encoder::new(p);
             let mut seed = 77u32;
             let n = 120_000;
@@ -1421,10 +1276,7 @@ mod tests {
                 })
                 .sum::<f64>()
                 / n as f64;
-            assert!(
-                (power - 1.0).abs() < 0.012,
-                "{primary} expanded {expanded} nonlinear {nonlinear}: {power}"
-            );
+            assert!((power - 1.0).abs() < 0.012, "{primary} expanded {expanded} nonlinear {nonlinear}: {power}");
         }
     }
 
@@ -1445,22 +1297,13 @@ mod tests {
                     s.re.abs().max(s.im.abs())
                 })
                 .fold(0.0, f64::max);
-            assert!(
-                furthest <= peak * 1.000_001,
-                "nonlinear {nonlinear}: a symbol at {furthest} past {peak}"
-            );
-            assert!(
-                furthest > 0.9 * peak,
-                "nonlinear {nonlinear}: nothing near {peak}, {furthest} at most"
-            );
+            assert!(furthest <= peak * 1.000_001, "nonlinear {nonlinear}: a symbol at {furthest} past {peak}");
+            assert!(furthest > 0.9 * peak, "nonlinear {nonlinear}: nothing near {peak}, {furthest} at most");
             peaks.push(peak);
         }
         // Stretched outwards, and a shaped constellation reaches about one
         // and a half at unit power.
-        assert!(
-            peaks[1] > peaks[0] && (1.3..2.0).contains(&peaks[0]),
-            "{peaks:?}"
-        );
+        assert!(peaks[1] > peaks[0] && (1.3..2.0).contains(&peaks[0]), "{peaks:?}");
     }
 
     #[test]
@@ -1470,25 +1313,11 @@ mod tests {
         // less than 29. Both hold over 300 mapping frames here, and 33 600
         // does not at 29 dB -- which is the cliff a line trained at 33 dB
         // stands at the edge of.
-        for (primary, snr, clean) in [
-            (33_600, 36.0, true),
-            (14_400, 29.0, true),
-            (33_600, 29.0, false),
-        ] {
+        for (primary, snr, clean) in [(33_600, 36.0, true), (14_400, 29.0, true), (33_600, 29.0, false)] {
             let p = params(SymbolRate::S3429, primary, Code::States16, false, false);
             let (sent, got) = loopback(p, 300, snr);
-            let wrong = sent
-                .iter()
-                .zip(&got)
-                .skip(23)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(
-                wrong == 0,
-                clean,
-                "{primary} at {snr} dB: {wrong} of {} wrong",
-                got.len()
-            );
+            let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
+            assert_eq!(wrong == 0, clean, "{primary} at {snr} dB: {wrong} of {} wrong", got.len());
         }
     }
 
@@ -1500,11 +1329,7 @@ mod tests {
         p.precoding = [(4096, -2048), (-1024, 512), (256, 0)];
         let mut encoder = Encoder::new(p);
         let mut decoder = Decoder::new(p);
-        let h: Vec<Complex> = p
-            .precoding
-            .iter()
-            .map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0))
-            .collect();
+        let h: Vec<Complex> = p.precoding.iter().map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)).collect();
         let mut past = VecDeque::from(vec![Complex::ZERO; 3]);
         let mut seed = 5u32;
         let mut sent = Vec::new();
@@ -1527,12 +1352,7 @@ mod tests {
             decoder.feed(out.scale(1.0 / decoder.grid_scale()));
         }
         let got = decoder.take_bits();
-        let wrong = sent
-            .iter()
-            .zip(&got)
-            .skip(23)
-            .filter(|(a, b)| a != b)
-            .count();
+        let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
         assert!(got.len() > 1000);
         assert_eq!(wrong, 0);
     }
@@ -1545,22 +1365,10 @@ mod tests {
     /// only then the trellis. `energy` is what the receiver takes the average
     /// energy of x to be, as a share of the mapper's; None measures it off
     /// what was sent. The count of wrong bits, and of bits back.
-    fn through_a_receiver(
-        p: Params,
-        symbols: usize,
-        snr_db: f64,
-        energy: Option<f64>,
-    ) -> (usize, usize) {
+    fn through_a_receiver(p: Params, symbols: usize, snr_db: f64, energy: Option<f64>) -> (usize, usize) {
         let mut encoder = Encoder::new(p);
-        let mut decoder = Decoder::new(Params {
-            nonlinear: false,
-            ..p
-        });
-        let h: Vec<Complex> = p
-            .precoding
-            .iter()
-            .map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0))
-            .collect();
+        let mut decoder = Decoder::new(Params { nonlinear: false, ..p });
+        let h: Vec<Complex> = p.precoding.iter().map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)).collect();
         let mut seed = 0x1234_5678_u32;
         let mut sent = Vec::new();
         let sent_symbols: Vec<Complex> = (0..symbols)
@@ -1584,11 +1392,7 @@ mod tests {
             x
         };
         let mapper = encoder.energy;
-        let measured = sent_symbols
-            .iter()
-            .map(|z| unbend(z.scale(unit), mapper).norm_sqr())
-            .sum::<f64>()
-            / symbols as f64;
+        let measured = sent_symbols.iter().map(|z| unbend(z.scale(unit), mapper).norm_sqr()).sum::<f64>() / symbols as f64;
         let e = energy.map_or(measured, |share| share * mapper);
         let mut noise_seed = 0x2545_f491_u32;
         let sigma = 10f64.powf(-snr_db / 20.0) / 2f64.sqrt();
@@ -1604,10 +1408,7 @@ mod tests {
         };
         let mut past = VecDeque::from(vec![Complex::ZERO; 3]);
         for z in &sent_symbols {
-            let x = unbend(
-                (*z + Complex::new(gauss() * sigma, gauss() * sigma)).scale(unit),
-                e,
-            );
+            let x = unbend((*z + Complex::new(gauss() * sigma, gauss() * sigma)).scale(unit), e);
             let mut y = x;
             for (xp, hp) in past.iter().zip(&h) {
                 y += *xp * *hp;
@@ -1617,12 +1418,7 @@ mod tests {
             decoder.feed(y.scale(1.0 / decoder.grid_scale()));
         }
         let got = decoder.take_bits();
-        let wrong = sent
-            .iter()
-            .zip(&got)
-            .skip(23)
-            .filter(|(a, b)| a != b)
-            .count();
+        let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
         (wrong, got.len())
     }
 
@@ -1650,10 +1446,7 @@ mod tests {
                     for energy in [Some(1.0), None] {
                         let (wrong, got) = through_a_receiver(p, 6000, 32.0, energy);
                         assert!(got > 20_000, "{rate:?} at {primary}: {got} bits");
-                        assert_eq!(
-                            wrong, 0,
-                            "{rate:?} at {primary}, h {h:?}, energy {energy:?}: {wrong} of {got} wrong"
-                        );
+                        assert_eq!(wrong, 0, "{rate:?} at {primary}, h {h:?}, energy {energy:?}: {wrong} of {got} wrong");
                     }
                 }
             }
@@ -1666,22 +1459,12 @@ mod tests {
     /// window drew every point of a real 33 600 page as one dot at the centre.
     #[test]
     fn the_unit_peak_is_as_far_as_the_symbols_reach() {
-        for (rate, primary) in [
-            (SymbolRate::S3429, 33_600),
-            (SymbolRate::S3200, 28_800),
-            (SymbolRate::S2400, 9_600),
-        ] {
+        for (rate, primary) in [(SymbolRate::S3429, 33_600), (SymbolRate::S3200, 28_800), (SymbolRate::S2400, 9_600)] {
             for nonlinear in [false, true] {
                 let p = params(rate, primary, Code::States16, false, nonlinear);
                 let unit = unit_peak(&p);
-                assert!(
-                    (unit - Decoder::new(p).peak()).abs() < 1e-12,
-                    "{primary}: not the decoder's peak"
-                );
-                assert!(
-                    peak(&p) > 3.0 * unit,
-                    "{primary}: grid units and unit power agree, so this test proves nothing"
-                );
+                assert!((unit - Decoder::new(p).peak()).abs() < 1e-12, "{primary}: not the decoder's peak");
+                assert!(peak(&p) > 3.0 * unit, "{primary}: grid units and unit power agree, so this test proves nothing");
                 let mut encoder = Encoder::new(p);
                 let mut seed = 0x9e37_79b9_u32;
                 let mut reach = 0.0f64;
@@ -1728,12 +1511,7 @@ mod tests {
                 decoder.feed(channel.feed(x));
             }
             let got = decoder.take_bits();
-            let wrong = sent
-                .iter()
-                .zip(&got)
-                .skip(23)
-                .filter(|(a, b)| a != b)
-                .count();
+            let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
             assert!(got.len() > 1000);
             assert_eq!(wrong, 0, "non-linear {nonlinear}");
         }

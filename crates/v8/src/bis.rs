@@ -87,14 +87,7 @@ pub enum Signal {
 }
 
 impl Signal {
-    pub const ALL: [Self; 6] = [
-        Self::MRe,
-        Self::MRd,
-        Self::CRe,
-        Self::CRd,
-        Self::ESi,
-        Self::ESr,
-    ];
+    pub const ALL: [Self; 6] = [Self::MRe, Self::MRd, Self::CRe, Self::CRd, Self::ESi, Self::ESr];
 
     /// The single tone of segment 2, which is what tells the signals apart
     /// (Table 1; 10.1.3).
@@ -122,9 +115,7 @@ impl Signal {
 
     /// The signal a second segment at `hz` belongs to, from `station`.
     pub fn from_segment_2(hz: f64, station: Station) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|s| s.segment_2() == hz && s.sent_by(station))
+        Self::ALL.into_iter().find(|s| s.segment_2() == hz && s.sent_by(station))
     }
 
     pub fn name(self) -> &'static str {
@@ -246,10 +237,7 @@ pub struct Par2 {
 impl Par2 {
     /// A block of NPar(2) octets and nothing under them.
     pub fn flat(npar2: &[u8]) -> Self {
-        Self {
-            npar2: npar2.to_vec(),
-            ..Self::default()
-        }
+        Self { npar2: npar2.to_vec(), ..Self::default() }
     }
 
     fn encode(&self, out: &mut Vec<u8>) {
@@ -270,10 +258,7 @@ impl Par2 {
 
     fn decode(octets: &[u8], at: &mut usize) -> Option<Self> {
         let (npar2, ended) = take(octets, at, END_2, 0x3F)?;
-        let mut par = Self {
-            npar2,
-            ..Self::default()
-        };
+        let mut par = Self { npar2, ..Self::default() };
         if ended {
             return Some(par);
         }
@@ -342,11 +327,7 @@ pub struct Tree {
 
 impl Default for Tree {
     fn default() -> Self {
-        Self {
-            npar1: vec![0],
-            spar1: vec![0],
-            par2: Vec::new(),
-        }
+        Self { npar1: vec![0], spar1: vec![0], par2: Vec::new() }
     }
 }
 
@@ -374,9 +355,7 @@ impl Tree {
 
     /// Whether bit `bit` (1 to 7) of NPar(1) octet `octet` (from 1) is set.
     pub fn npar1_bit(&self, octet: usize, bit: u8) -> bool {
-        self.npar1
-            .get(octet - 1)
-            .is_some_and(|o| o & (1 << (bit - 1)) != 0)
+        self.npar1.get(octet - 1).is_some_and(|o| o & (1 << (bit - 1)) != 0)
     }
 
     fn set_npar1_bit(&mut self, octet: usize, bit: u8, on: bool) {
@@ -480,11 +459,7 @@ impl Identification {
             non_standard: tree.npar1_bit(1, 7),
             network: tree.par2(1, 1).map(|p| {
                 let o = p.npar2.first().copied().unwrap_or(0);
-                Network {
-                    cellular: o & 1 != 0,
-                    isdn: o & 2 != 0,
-                    digital: o & 4 != 0,
-                }
+                Network { cellular: o & 1 != 0, isdn: o & 2 != 0, digital: o & 4 != 0 }
             }),
         }
     }
@@ -534,37 +509,12 @@ pub enum Modulation {
 
 impl Data {
     fn octets(self) -> [u8; 4] {
-        let bits = |list: [bool; 6]| {
-            list.iter()
-                .enumerate()
-                .fold(0u8, |o, (i, b)| o | u8::from(*b) << i)
-        };
+        let bits = |list: [bool; 6]| list.iter().enumerate().fold(0u8, |o, (i, b)| o | u8::from(*b) << i);
         [
-            bits([
-                self.transparent,
-                self.v42,
-                self.v42bis,
-                self.v14,
-                false,
-                self.non_standard,
-            ]),
+            bits([self.transparent, self.v42, self.v42bis, self.v14, false, self.non_standard]),
             bits([false, false, false, false, self.v34, self.v32bis]),
-            bits([
-                self.v32,
-                self.v22bis,
-                self.v22,
-                self.v21,
-                self.v90_analogue,
-                self.v90_digital,
-            ]),
-            bits([
-                self.v91,
-                self.v92_analogue,
-                self.v92_digital,
-                false,
-                false,
-                false,
-            ]),
+            bits([self.v32, self.v22bis, self.v22, self.v21, self.v90_analogue, self.v90_digital]),
+            bits([self.v91, self.v92_analogue, self.v92_digital, false, false, false]),
         ]
     }
 
@@ -595,10 +545,7 @@ impl Data {
     /// octets required" (9.1, Note 2).
     pub fn to_par2(self) -> Par2 {
         let octets = self.octets();
-        let used = octets
-            .iter()
-            .rposition(|o| *o != 0)
-            .map_or(1, |last| last + 1);
+        let used = octets.iter().rposition(|o| *o != 0).map_or(1, |last| last + 1);
         Par2::flat(&octets[..used])
     }
 
@@ -615,24 +562,8 @@ impl Data {
     pub fn best_with(&self, far: &Self) -> Option<Modulation> {
         let pair = |a1: bool, d1: bool, a2: bool, d2: bool| (a1 && d2) || (d1 && a2);
         let list = [
-            (
-                pair(
-                    self.v92_analogue,
-                    self.v92_digital,
-                    far.v92_analogue,
-                    far.v92_digital,
-                ),
-                Modulation::V92,
-            ),
-            (
-                pair(
-                    self.v90_analogue,
-                    self.v90_digital,
-                    far.v90_analogue,
-                    far.v90_digital,
-                ),
-                Modulation::V90,
-            ),
+            (pair(self.v92_analogue, self.v92_digital, far.v92_analogue, far.v92_digital), Modulation::V92),
+            (pair(self.v90_analogue, self.v90_digital, far.v90_analogue, far.v90_digital), Modulation::V90),
             (self.v34 && far.v34, Modulation::V34),
             (self.v32bis && far.v32bis, Modulation::V32bis),
             (self.v32 && far.v32, Modulation::V32),
@@ -662,13 +593,7 @@ impl Data {
     /// Only `modulation`, with the half of a PCM pair this end is, and the
     /// protocol bits kept: what goes in an MS.
     pub fn only(&self, modulation: Modulation) -> Self {
-        let mut one = Self {
-            transparent: self.transparent,
-            v42: self.v42,
-            v42bis: self.v42bis,
-            v14: self.v14,
-            ..Self::default()
-        };
+        let mut one = Self { transparent: self.transparent, v42: self.v42, v42bis: self.v42bis, v14: self.v14, ..Self::default() };
         match modulation {
             Modulation::V21 => one.v21 = true,
             Modulation::V22 => one.v22 = true,
@@ -790,10 +715,7 @@ pub mod varc {
                 return None;
             }
             let flags = octets.get(1).copied().unwrap_or(0);
-            Some(Self {
-                modulation: flags & 3,
-                two_wire: flags & 4 != 0,
-            })
+            Some(Self { modulation: flags & 3, two_wire: flags & 4 != 0 })
         }
 
         pub fn name(self) -> &'static str {
@@ -847,9 +769,7 @@ impl Message {
     pub fn data(kind: Kind, identification: Identification, data: Data) -> Self {
         let mut message = Self::bare(kind);
         message.identification = identification.to_tree();
-        message
-            .standard
-            .set_par2(1, mode::DATA, Some(data.to_par2()));
+        message.standard.set_par2(1, mode::DATA, Some(data.to_par2()));
         message
     }
 
@@ -908,17 +828,7 @@ impl Message {
         block.encode(&mut self.non_standard);
         self.identification.set_npar1_bit(1, 7, true);
         if let Some(data) = self.data_mode() {
-            self.standard.set_par2(
-                1,
-                mode::DATA,
-                Some(
-                    Data {
-                        non_standard: true,
-                        ..data
-                    }
-                    .to_par2(),
-                ),
-            );
+            self.standard.set_par2(1, mode::DATA, Some(Data { non_standard: true, ..data }.to_par2()));
         }
         self
     }
@@ -934,9 +844,7 @@ impl Message {
             at += 1 + length;
             let k = country.len();
             if body.starts_with(country)
-                && body
-                    .get(k)
-                    .is_some_and(|l| usize::from(*l) == provider.len())
+                && body.get(k).is_some_and(|l| usize::from(*l) == provider.len())
                 && body[k + 1..].starts_with(provider)
             {
                 return Some(&body[k + 1 + provider.len()..]);
@@ -965,15 +873,8 @@ impl Message {
     pub fn select_varc(ours: &Self) -> Option<Self> {
         let offer = ours.varc()?;
         let mine = ours.identify();
-        let id = Identification {
-            ack1: mine.ack1,
-            network: mine.network,
-            ..Identification::default()
-        };
-        let data = Data {
-            transparent: true,
-            ..Data::default()
-        };
+        let id = Identification { ack1: mine.ack1, network: mine.network, ..Identification::default() };
+        let data = Data { transparent: true, ..Data::default() };
         Some(Self::data(Kind::Ms, id, data).with_varc(offer))
     }
 
@@ -1022,15 +923,8 @@ mod tests {
     fn a_capabilities_list_is_the_octets_clause_8_gives() {
         let cl = Message::data(
             Kind::Cl,
-            Identification {
-                v8: true,
-                ..Identification::default()
-            },
-            Data {
-                v42: true,
-                v92_analogue: true,
-                ..Data::default()
-            },
+            Identification { v8: true, ..Identification::default() },
+            Data { v42: true, v92_analogue: true, ..Data::default() },
         );
         assert_eq!(
             cl.encode(),
@@ -1040,8 +934,7 @@ mod tests {
                 0x80, // I SPar(1): nothing, so no network type: an analogue line
                 0x80, // S NPar(1): nothing
                 0x81, // S SPar(1): data
-                0x02, 0x00, 0x00,
-                0xC2, // data NPar(2): V.42; -; -; V.92 analogue, bits 7 and 8
+                0x02, 0x00, 0x00, 0xC2, // data NPar(2): V.42; -; -; V.92 analogue, bits 7 and 8
             ]
         );
         assert_eq!(Message::decode(&cl.encode()), Some(cl));
@@ -1055,22 +948,10 @@ mod tests {
     fn a_non_standard_block_follows_the_standard_field() {
         let cl = Message::data(
             Kind::Cl,
-            Identification {
-                v8: true,
-                ack1: true,
-                ..Identification::default()
-            },
-            Data {
-                transparent: true,
-                v42: true,
-                v34: true,
-                ..Data::default()
-            },
+            Identification { v8: true, ack1: true, ..Identification::default() },
+            Data { transparent: true, v42: true, v34: true, ..Data::default() },
         )
-        .with_varc(varc::Offer {
-            modulation: 1,
-            two_wire: true,
-        });
+        .with_varc(varc::Offer { modulation: 1, two_wire: true });
         assert_eq!(
             cl.encode(),
             [
@@ -1088,17 +969,8 @@ mod tests {
         );
         let back = Message::decode(&cl.encode()).unwrap();
         assert_eq!(back, cl);
-        assert_eq!(
-            back.varc(),
-            Some(varc::Offer {
-                modulation: 1,
-                two_wire: true
-            })
-        );
-        assert!(
-            back.data_mode().unwrap().v34,
-            "the standard field is as it was"
-        );
+        assert_eq!(back.varc(), Some(varc::Offer { modulation: 1, two_wire: true }));
+        assert!(back.data_mode().unwrap().v34, "the standard field is as it was");
     }
 
     /// A block that is somebody else's is stepped over to the one that is
@@ -1106,29 +978,15 @@ mod tests {
     /// short is not read past its end.
     #[test]
     fn only_its_own_block_is_read() {
-        let plain = Message::data(
-            Kind::Cl,
-            Identification::default(),
-            Data {
-                v34: true,
-                ..Data::default()
-            },
-        );
+        let plain = Message::data(Kind::Cl, Identification::default(), Data { v34: true, ..Data::default() });
         assert_eq!(plain.varc(), None);
-        let theirs = Block {
-            country: vec![0xB5],
-            provider: vec![0x00, 0x11],
-            information: vec![1, 2, 3],
-        };
+        let theirs = Block { country: vec![0xB5], provider: vec![0x00, 0x11], information: vec![1, 2, 3] };
         let other = plain.clone().with_block(&theirs);
         assert_eq!(Message::decode(&other.encode()).unwrap().varc(), None);
         let both = other.with_varc(varc::Offer::default());
         let back = Message::decode(&both.encode()).unwrap();
         assert_eq!(back.varc(), Some(varc::Offer::default()));
-        assert_eq!(
-            back.block_of(&[0xB5], &[0x00, 0x11]),
-            Some(&[1u8, 2, 3][..])
-        );
+        assert_eq!(back.block_of(&[0xB5], &[0x00, 0x11]), Some(&[1u8, 2, 3][..]));
         // An edition this end has not heard of is not V.ARC as it knows it.
         let mut newer = plain.clone().with_varc(varc::Offer::default());
         let at = newer.non_standard.len() - 2;
@@ -1149,37 +1007,14 @@ mod tests {
     fn a_mode_select_for_varc_names_no_other_modulation() {
         let ours = Message::data(
             Kind::Cl,
-            Identification {
-                v8: true,
-                ack1: true,
-                ..Identification::default()
-            },
-            Data {
-                v42: true,
-                v34: true,
-                v92_analogue: true,
-                ..Data::default()
-            },
+            Identification { v8: true, ack1: true, ..Identification::default() },
+            Data { v42: true, v34: true, v92_analogue: true, ..Data::default() },
         );
-        assert_eq!(
-            Message::select_varc(&ours),
-            None,
-            "not a station that has it"
-        );
-        let ms = Message::select_varc(&ours.with_varc(varc::Offer {
-            modulation: 2,
-            two_wire: false,
-        }))
-        .unwrap();
+        assert_eq!(Message::select_varc(&ours), None, "not a station that has it");
+        let ms = Message::select_varc(&ours.with_varc(varc::Offer { modulation: 2, two_wire: false })).unwrap();
         let back = Message::decode(&ms.encode()).unwrap();
         assert_eq!(back.kind, Kind::Ms);
-        assert_eq!(
-            back.varc(),
-            Some(varc::Offer {
-                modulation: 2,
-                two_wire: false
-            })
-        );
+        assert_eq!(back.varc(), Some(varc::Offer { modulation: 2, two_wire: false }));
         assert_eq!(back.data_mode().unwrap().selected(), None);
         assert!(back.identify().ack1 && !back.identify().v8);
     }
@@ -1188,37 +1023,14 @@ mod tests {
     /// absence means an analogue line (Table 5-2).
     #[test]
     fn a_digital_station_says_so_in_the_identification_field() {
-        let id = Identification {
-            short_v8: true,
-            ack1: true,
-            network: Some(Network {
-                digital: true,
-                ..Network::default()
-            }),
-            ..Identification::default()
-        };
-        let cl = Message::data(
-            Kind::Cl,
-            id,
-            Data {
-                v34: true,
-                v90_digital: true,
-                ..Data::default()
-            },
-        );
+        let id = Identification { short_v8: true, ack1: true, network: Some(Network { digital: true, ..Network::default() }), ..Identification::default() };
+        let cl = Message::data(Kind::Cl, id, Data { v34: true, v90_digital: true, ..Data::default() });
         let octets = cl.encode();
         // I: NPar(1) short V.8 + ACK(1); SPar(1) network type; its NPar(2).
         assert_eq!(&octets[..4], [0x22, 0x8A, 0x81, 0xC4]);
         let back = Message::decode(&octets).unwrap();
         assert_eq!(back.identify(), id);
-        assert_eq!(
-            back.data_mode(),
-            Some(Data {
-                v34: true,
-                v90_digital: true,
-                ..Data::default()
-            })
-        );
+        assert_eq!(back.data_mode(), Some(Data { v34: true, v90_digital: true, ..Data::default() }));
     }
 
     /// 8.2.3: a Par(2) with SPar(2) and NPar(3) blocks under it is delimited
@@ -1227,26 +1039,8 @@ mod tests {
     #[test]
     fn a_tree_with_three_levels_reads_back_and_is_stepped_over() {
         let mut tree = Tree::default();
-        tree.set_par2(
-            1,
-            mode::SVD,
-            Some(Par2 {
-                npar2: vec![0x05, 0x01],
-                spar2: vec![0x03],
-                npar3: vec![vec![0x11], vec![0x02, 0x04]],
-            }),
-        );
-        tree.set_par2(
-            1,
-            mode::DATA,
-            Some(
-                Data {
-                    v34: true,
-                    ..Data::default()
-                }
-                .to_par2(),
-            ),
-        );
+        tree.set_par2(1, mode::SVD, Some(Par2 { npar2: vec![0x05, 0x01], spar2: vec![0x03], npar3: vec![vec![0x11], vec![0x02, 0x04]] }));
+        tree.set_par2(1, mode::DATA, Some(Data { v34: true, ..Data::default() }.to_par2()));
         let mut octets = Vec::new();
         tree.encode(&mut octets);
         assert_eq!(
@@ -1269,35 +1063,13 @@ mod tests {
     /// V.90 and V.92 are halves: two analogue modems have neither.
     #[test]
     fn the_fastest_common_modulation_needs_one_of_each_half() {
-        let caller = Data {
-            v34: true,
-            v32bis: true,
-            v90_analogue: true,
-            v92_analogue: true,
-            ..Data::default()
-        };
-        let server = Data {
-            v34: true,
-            v90_digital: true,
-            v92_digital: true,
-            ..Data::default()
-        };
-        let v90_server = Data {
-            v34: true,
-            v90_digital: true,
-            ..Data::default()
-        };
+        let caller = Data { v34: true, v32bis: true, v90_analogue: true, v92_analogue: true, ..Data::default() };
+        let server = Data { v34: true, v90_digital: true, v92_digital: true, ..Data::default() };
+        let v90_server = Data { v34: true, v90_digital: true, ..Data::default() };
         assert_eq!(caller.best_with(&server), Some(Modulation::V92));
         assert_eq!(caller.best_with(&v90_server), Some(Modulation::V90));
         assert_eq!(caller.best_with(&caller), Some(Modulation::V34));
-        assert_eq!(
-            Data {
-                v22bis: true,
-                ..Data::default()
-            }
-            .best_with(&caller),
-            None
-        );
+        assert_eq!(Data { v22bis: true, ..Data::default() }.best_with(&caller), None);
     }
 
     /// An MS names one modulation, in as few octets as hold it (9.1 Note 2),
@@ -1306,37 +1078,17 @@ mod tests {
     fn a_mode_select_names_one_modulation_in_the_fewest_octets() {
         let ours = Message::data(
             Kind::Cl,
-            Identification {
-                v8: true,
-                ack1: true,
-                ..Identification::default()
-            },
-            Data {
-                v42: true,
-                v34: true,
-                v32bis: true,
-                v90_analogue: true,
-                ..Data::default()
-            },
+            Identification { v8: true, ack1: true, ..Identification::default() },
+            Data { v42: true, v34: true, v32bis: true, v90_analogue: true, ..Data::default() },
         );
         let ms = Message::select(&ours, Modulation::V34);
         assert_eq!(ms.encode(), [0x21, 0x89, 0x80, 0x80, 0x81, 0x02, 0xD0]);
         assert_eq!(ms.data_mode().unwrap().selected(), Some(Modulation::V34));
 
-        let server = Data {
-            v34: true,
-            v90_digital: true,
-            ..Data::default()
-        };
+        let server = Data { v34: true, v90_digital: true, ..Data::default() };
         let v90 = Message::select(&ours, Modulation::V90).data_mode().unwrap();
-        assert!(
-            server.can_do(&v90),
-            "a digital modem can answer an analogue one's V.90"
-        );
-        assert!(
-            !ours.data_mode().unwrap().can_do(&v90),
-            "an analogue modem cannot"
-        );
+        assert!(server.can_do(&v90), "a digital modem can answer an analogue one's V.90");
+        assert!(!ours.data_mode().unwrap().can_do(&v90), "an analogue modem cannot");
     }
 
     /// V.92's quick connect messages are V.8 bis frames of type 1101 whose
@@ -1356,19 +1108,10 @@ mod tests {
         let mut tones: Vec<f64> = Signal::ALL.iter().map(|s| s.segment_2()).collect();
         tones.dedup();
         assert_eq!(tones, [650.0, 1150.0, 400.0, 1900.0, 980.0, 1650.0]);
-        assert_eq!(
-            Signal::from_segment_2(400.0, Station::Initiating),
-            Some(Signal::CRe)
-        );
+        assert_eq!(Signal::from_segment_2(400.0, Station::Initiating), Some(Signal::CRe));
         assert_eq!(Signal::from_segment_2(400.0, Station::Responding), None);
-        assert_eq!(
-            Signal::from_segment_2(1900.0, Station::Responding),
-            Some(Signal::CRd)
-        );
-        assert_eq!(
-            Signal::from_segment_2(1650.0, Station::Responding),
-            Some(Signal::ESr)
-        );
+        assert_eq!(Signal::from_segment_2(1900.0, Station::Responding), Some(Signal::CRd));
+        assert_eq!(Signal::from_segment_2(1650.0, Station::Responding), Some(Signal::ESr));
         assert_eq!(Station::Initiating.pair(), (1375.0, 2002.0));
         assert_eq!(Station::Responding.pair(), (1529.0, 2225.0));
     }

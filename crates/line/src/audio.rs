@@ -67,8 +67,7 @@ impl AudioSink {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.volume
-            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn enabled(&self) -> bool {
@@ -263,12 +262,7 @@ pub fn listen(
         .map_err(|e| e.to_string())?;
 
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Monitor {
-        stream,
-        device: name,
-        sample_rate,
-        channels,
-    })
+    Ok(Monitor { stream, device: name, sample_rate, channels })
 }
 
 #[cfg(test)]

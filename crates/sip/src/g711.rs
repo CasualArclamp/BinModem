@@ -107,11 +107,7 @@ pub fn ulaw_encode(sample: i16) -> u8 {
     let sign = if sample < 0 { 0x80u8 } else { 0 };
     // Negated as an i32: -32768 has no positive counterpart in an i16 and
     // negating it in place would wrap back to itself.
-    let mut magnitude = if sample < 0 {
-        -(sample as i32)
-    } else {
-        sample as i32
-    };
+    let mut magnitude = if sample < 0 { -(sample as i32) } else { sample as i32 };
     if magnitude > MU_CLIP {
         magnitude = MU_CLIP;
     }
@@ -140,11 +136,7 @@ pub fn alaw_encode(sample: i16) -> u8 {
     // A-law's sign bit is set for *positive*, the opposite of mu-law's. That
     // is the law and not an implementation's choice.
     let sign = if sample < 0 { 0x00u8 } else { 0x80 };
-    let mut magnitude = if sample < 0 {
-        -(sample as i32)
-    } else {
-        sample as i32
-    };
+    let mut magnitude = if sample < 0 { -(sample as i32) } else { sample as i32 };
     if magnitude > A_CLIP {
         magnitude = A_CLIP;
     }

@@ -182,11 +182,7 @@ mod tests {
 
     #[test]
     fn the_output_arrives_at_the_rate_asked_for() {
-        for (from, to) in [
-            (48_000.0, 16_000.0),
-            (16_000.0, 48_000.0),
-            (44_100.0, 16_000.0),
-        ] {
+        for (from, to) in [(48_000.0, 16_000.0), (16_000.0, 48_000.0), (44_100.0, 16_000.0)] {
             let out = run(from, to, 1_000.0, 48_000);
             let want = 48_000.0 * to / from;
             let error = (out.len() as f64 - want).abs() / want;

@@ -46,12 +46,7 @@ impl Recognized {
     /// A connection nothing is known about beyond that V.92 is to be tried
     /// the short way: for an owner that has been told to force it.
     pub fn unmeasured() -> Self {
-        Self {
-            uqts: DEFAULT_UQTS,
-            a_law: false,
-            round_trip_ms: 0,
-            pcm_upstream: false,
-        }
+        Self { uqts: DEFAULT_UQTS, a_law: false, round_trip_ms: 0, pcm_upstream: false }
     }
 
     /// The U_QTS field of the QC1a this asks for.
@@ -103,12 +98,7 @@ impl Recognized {
         }
         let uqts = uqts?;
         Uqts::from_ucode(uqts)?.ucode()?;
-        Some(Self {
-            uqts,
-            a_law: a_law?,
-            round_trip_ms: rtd?,
-            pcm_upstream: pcm_up?,
-        })
+        Some(Self { uqts, a_law: a_law?, round_trip_ms: rtd?, pcm_upstream: pcm_up? })
     }
 }
 
@@ -120,29 +110,16 @@ mod tests {
     fn a_memo_round_trips_through_its_text_form() {
         for memo in [
             Recognized::unmeasured(),
-            Recognized {
-                uqts: 79,
-                a_law: true,
-                round_trip_ms: 412,
-                pcm_upstream: true,
-            },
+            Recognized { uqts: 79, a_law: true, round_trip_ms: 412, pcm_upstream: true },
         ] {
-            assert_eq!(
-                Recognized::from_text(&memo.to_text()),
-                Some(memo),
-                "{}",
-                memo.to_text()
-            );
+            assert_eq!(Recognized::from_text(&memo.to_text()), Some(memo), "{}", memo.to_text());
         }
     }
 
     #[test]
     fn a_memo_that_cannot_be_trusted_is_no_memo() {
         // Ucode 64 is not in Table 2; a missing field; a law nobody has.
-        assert_eq!(
-            Recognized::from_text("uqts=64 law=mu rtd=10 pcm_up=1"),
-            None
-        );
+        assert_eq!(Recognized::from_text("uqts=64 law=mu rtd=10 pcm_up=1"), None);
         assert_eq!(Recognized::from_text("uqts=70 law=mu pcm_up=1"), None);
         assert_eq!(Recognized::from_text("uqts=70 law=x rtd=10 pcm_up=1"), None);
         assert_eq!(Recognized::from_text(""), None);

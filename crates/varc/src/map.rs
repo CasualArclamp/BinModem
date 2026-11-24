@@ -73,10 +73,7 @@ pub fn qam_slice(z: Complex, bits: u8) -> (u32, Complex) {
     let scale = qam_scale(bits);
     let (vi, li) = pam_slice(z.re / scale, bi);
     let (vq, lq) = pam_slice(z.im / scale, bq);
-    (
-        (vi << bq) | vq,
-        Complex::new(f64::from(li) * scale, f64::from(lq) * scale),
-    )
+    ((vi << bq) | vq, Complex::new(f64::from(li) * scale, f64::from(lq) * scale))
 }
 
 /// Bits waiting to go onto symbols, least significant first out of each octet.

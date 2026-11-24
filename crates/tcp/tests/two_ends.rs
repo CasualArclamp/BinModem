@@ -35,11 +35,7 @@ struct Line {
 
 impl Default for Line {
     fn default() -> Self {
-        Self {
-            delay_ms: 60,
-            lose_one_in: 0,
-            swap_one_in: 0,
-        }
+        Self { delay_ms: 60, lose_one_in: 0, swap_one_in: 0 }
     }
 }
 
@@ -112,14 +108,10 @@ impl Pair {
 
         let now = self.clock;
         let arriving: Vec<(bool, Vec<u8>)> = {
-            let (arrived, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.flying)
-                .into_iter()
-                .partition(|(at, _, _)| *at <= now);
+            let (arrived, waiting): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.flying).into_iter().partition(|(at, _, _)| *at <= now);
             self.flying = waiting;
-            arrived
-                .into_iter()
-                .map(|(_, to_b, bytes)| (to_b, bytes))
-                .collect()
+            arrived.into_iter().map(|(_, to_b, bytes)| (to_b, bytes)).collect()
         };
         for (to_b, bytes) in arriving {
             if to_b {
@@ -142,12 +134,8 @@ impl Pair {
     }
 
     fn outbound(&mut self) -> Vec<(bool, Segment)> {
-        let mut out: Vec<(bool, Segment)> = self
-            .a
-            .take_segments()
-            .into_iter()
-            .map(|s| (true, s))
-            .collect();
+        let mut out: Vec<(bool, Segment)> =
+            self.a.take_segments().into_iter().map(|s| (true, s)).collect();
         out.extend(self.b.take_segments().into_iter().map(|s| (false, s)));
         out
     }
@@ -174,8 +162,7 @@ impl Pair {
     }
 
     fn arrive(&mut self, to_b: bool, bytes: Vec<u8>) {
-        self.flying
-            .push((self.clock + self.line.delay_ms, to_b, bytes));
+        self.flying.push((self.clock + self.line.delay_ms, to_b, bytes));
     }
 
     fn established(&self) -> bool {
@@ -194,16 +181,9 @@ impl Pair {
 
 #[test]
 fn a_connection_is_made_in_three_segments() {
-    let mut pair = Pair::new(Line {
-        delay_ms: 60,
-        ..Line::default()
-    });
+    let mut pair = Pair::new(Line { delay_ms: 60, ..Line::default() });
     pair.connect();
-    assert_eq!(
-        pair.crossed, 3,
-        "the handshake took {} segments",
-        pair.crossed
-    );
+    assert_eq!(pair.crossed, 3, "the handshake took {} segments", pair.crossed);
     assert_eq!(pair.a.remote, Endpoint::new(B, 80));
     // The listener learnt who was calling from the datagram that carried the
     // SYN, which is the only place that is written down.
@@ -216,18 +196,12 @@ fn data_crosses_both_ways() {
     pair.connect();
 
     assert_eq!(pair.a.send(b"GET / HTTP/1.0\r\n\r\n"), 18);
-    assert!(
-        pair.run(5_000, |p| p.from_b.len() >= 18),
-        "the request never arrived"
-    );
+    assert!(pair.run(5_000, |p| p.from_b.len() >= 18), "the request never arrived");
     assert_eq!(pair.from_b, b"GET / HTTP/1.0\r\n\r\n");
 
     let answer = b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nhi";
     assert_eq!(pair.b.send(answer), answer.len());
-    assert!(
-        pair.run(5_000, |p| p.from_a.len() >= answer.len()),
-        "no answer"
-    );
+    assert!(pair.run(5_000, |p| p.from_a.len() >= answer.len()), "no answer");
     assert_eq!(pair.from_a, answer);
 }
 
@@ -265,10 +239,7 @@ fn a_whole_page_crosses_intact() {
 #[test]
 fn a_page_crosses_a_line_that_loses_segments() {
     let page = a_page();
-    let mut pair = Pair::new(Line {
-        lose_one_in: 7,
-        ..Line::default()
-    });
+    let mut pair = Pair::new(Line { lose_one_in: 7, ..Line::default() });
     pair.connect();
 
     let mut at = 0;
@@ -281,11 +252,7 @@ fn a_page_crosses_a_line_that_loses_segments() {
             break;
         }
     }
-    assert!(
-        pair.lost > 20,
-        "the line did not lose anything: {}",
-        pair.lost
-    );
+    assert!(pair.lost > 20, "the line did not lose anything: {}", pair.lost);
     assert_eq!(pair.from_b.len(), page.len(), "only part of it arrived");
     assert_eq!(pair.from_b, page, "it arrived changed");
 }
@@ -294,10 +261,7 @@ fn a_page_crosses_a_line_that_loses_segments() {
 #[test]
 fn a_page_crosses_a_line_that_reorders_segments() {
     let page = a_page();
-    let mut pair = Pair::new(Line {
-        swap_one_in: 5,
-        ..Line::default()
-    });
+    let mut pair = Pair::new(Line { swap_one_in: 5, ..Line::default() });
     pair.connect();
 
     let mut at = 0;
@@ -335,16 +299,12 @@ fn a_close_from_one_end_is_seen_at_the_other() {
 
     // 3.6.1: the half-closed direction still carries.
     pair.b.send(b"and to you");
-    assert!(
-        pair.run(5_000, |p| p.from_a.len() >= 10),
-        "the other direction stopped"
-    );
+    assert!(pair.run(5_000, |p| p.from_a.len() >= 10), "the other direction stopped");
     assert_eq!(pair.from_a, b"and to you");
 
     pair.b.close();
     assert!(
-        pair.run(10_000, |p| p.a.state == State::TimeWait
-            && p.b.state == State::Closed),
+        pair.run(10_000, |p| p.a.state == State::TimeWait && p.b.state == State::Closed),
         "the close did not finish: a is {} and b is {}",
         pair.a.state.name(),
         pair.b.state.name()
@@ -423,11 +383,7 @@ fn a_far_end_that_vanishes_is_given_up_on() {
         pair.a.state.name()
     );
     // 3.8.3 wants at least a hundred seconds of trying before it gives up.
-    assert!(
-        pair.clock > 100_000,
-        "it gave up after only {} ms",
-        pair.clock
-    );
+    assert!(pair.clock > 100_000, "it gave up after only {} ms", pair.clock);
 }
 
 /// A connection carries what is put on it in both directions at once, which
@@ -470,11 +426,7 @@ fn no_segment_is_larger_than_the_link_below_carries() {
     pair.b.set_receive_mss(1460);
     pair.a.set_send_limit(256);
     pair.connect();
-    assert_eq!(
-        pair.a.status().send_mss,
-        256,
-        "the far end's 1460 was taken as it stood"
-    );
+    assert_eq!(pair.a.status().send_mss, 256, "the far end's 1460 was taken as it stood");
 
     let mut at = 0;
     for _ in 0..20_000 {
@@ -487,8 +439,5 @@ fn no_segment_is_larger_than_the_link_below_carries() {
         }
     }
     assert_eq!(pair.from_b, page, "the page did not arrive whole");
-    assert_eq!(
-        pair.largest_from_a, 256,
-        "a segment was larger than the link carries, or none was full"
-    );
+    assert_eq!(pair.largest_from_a, 256, "a segment was larger than the link carries, or none was full");
 }

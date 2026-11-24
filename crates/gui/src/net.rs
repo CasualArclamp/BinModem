@@ -127,10 +127,7 @@ impl Session {
     }
 
     fn take_typed(&self) -> Vec<u8> {
-        self.typed
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default()
+        self.typed.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
     fn set_state(&self, state: NetState) {
@@ -146,10 +143,7 @@ pub fn spawn(tx: Publisher, control: Arc<Control>, session: Arc<Session>) -> Joi
 }
 
 fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>) {
-    tx.log(
-        Direction::Note,
-        "telnet: no line, no modem, just the terminal",
-    );
+    tx.log(Direction::Note, "telnet: no line, no modem, just the terminal");
     tx.log(Direction::Note, "enter a host above and connect");
 
     let mut socket: Option<TcpStream> = None;
@@ -221,17 +215,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>) {
             // Nothing typed at a closed connection goes anywhere, which is the
             // honest answer: there is no modem here to answer it.
             thread::sleep(READ_TIMEOUT);
-            publish(
-                &tx,
-                &mut next_publish,
-                publish_every,
-                false,
-                rx_bytes,
-                tx_bytes,
-                Leds::default(),
-                false,
-                false,
-            );
+            publish(&tx, &mut next_publish, publish_every, false, rx_bytes, tx_bytes,
+                    Leds::default(), false, false);
             continue;
         };
 
@@ -338,11 +323,7 @@ fn publish(
     }
     *next = Instant::now() + every;
     tx.publish(|f| {
-        f.state = if connected {
-            CallState::Connected
-        } else {
-            CallState::Idle
-        };
+        f.state = if connected { CallState::Connected } else { CallState::Idle };
         f.modulation = "telnet";
         // Not a line rate. There is no line, and a number here would be a
         // guess dressed up as a measurement.
@@ -419,15 +400,16 @@ mod tests {
     ///
     /// A socket hands over whatever happened to have arrived, so no single
     /// read can be expected to contain a whole anything.
-    fn read_until(server: &mut TcpStream, done: impl Fn(&[u8]) -> bool, what: &str) -> Vec<u8> {
+    fn read_until(
+        server: &mut TcpStream,
+        done: impl Fn(&[u8]) -> bool,
+        what: &str,
+    ) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut got = Vec::new();
         let mut buf = [0u8; 512];
         while !done(&got) {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {what}: {got:?}"
-            );
+            assert!(Instant::now() < deadline, "timed out waiting for {what}: {got:?}");
             match server.read(&mut buf) {
                 Ok(0) => panic!("the client hung up waiting for {what}"),
                 Ok(n) => got.extend_from_slice(&buf[..n]),
@@ -463,28 +445,18 @@ mod tests {
         session.connect(&addr.to_string());
 
         let (mut server, _) = listener.accept().expect("accept");
-        server
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
+        server.set_read_timeout(Some(Duration::from_millis(20))).expect("timeout");
 
         // The client opens the negotiation rather than waiting to be asked,
         // because a board that never asks would otherwise leave the
         // connection in seven-bit line mode.
         let greeting = read_until(
             &mut server,
-            |got| {
-                holds(
-                    got,
-                    &[telnet::IAC, telnet::WILL, telnet::option::TERMINAL_TYPE],
-                )
-            },
+            |got| holds(got, &[telnet::IAC, telnet::WILL, telnet::option::TERMINAL_TYPE]),
             "the greeting",
         );
         assert!(
-            holds(
-                &greeting,
-                &[telnet::IAC, telnet::DO, telnet::option::BINARY]
-            ),
+            holds(&greeting, &[telnet::IAC, telnet::DO, telnet::option::BINARY]),
             "did not ask for eight-bit data: {greeting:?}"
         );
 
@@ -516,18 +488,13 @@ mod tests {
         // character there and board art is full of them, so this is the byte
         // most likely to be mangled on the way through.
         server.write_all(b"Welcome").expect("write");
-        server
-            .write_all(&[telnet::IAC, telnet::IAC])
-            .expect("write");
+        server.write_all(&[telnet::IAC, telnet::IAC]).expect("write");
         server.write_all(b"\x1b[0m\r\n").expect("write");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut screen = Vec::new();
         while !holds(&screen, b"Welcome") {
-            assert!(
-                Instant::now() < deadline,
-                "the screen never arrived: {screen:?}"
-            );
+            assert!(Instant::now() < deadline, "the screen never arrived: {screen:?}");
             screen.extend(rx.take_line_data());
             thread::sleep(Duration::from_millis(5));
         }

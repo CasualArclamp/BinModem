@@ -253,9 +253,6 @@ mod tests {
                 assert_eq!(nearest(law, exact + nudge).0, u, "{law:?} above {u}");
             }
         }
-        assert!(
-            nearest(Law::Mu, -1000).1,
-            "a negative sample read as positive"
-        );
+        assert!(nearest(Law::Mu, -1000).1, "a negative sample read as positive");
     }
 }

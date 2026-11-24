@@ -328,11 +328,7 @@ impl Agent {
     }
 
     pub fn status(&self) -> Status {
-        self.shared
-            .status
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.shared.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 }
 
@@ -556,9 +552,7 @@ impl Worker {
         // A router that has been asked to forward the port forwards the
         // same one, so the outside address with this port is where the far
         // end reaches us.
-        let public = account
-            .advertise
-            .map(|address| SocketAddr::new(address, local.port()));
+        let public = account.advertise.map(|address| SocketAddr::new(address, local.port()));
         Self {
             account,
             shared,
@@ -792,7 +786,10 @@ impl Worker {
             // here, which is why this event is the only thing the layer above
             // has to go on.
             Err(e) => {
-                self.event(Event::Failed { code: 0, reason: e });
+                self.event(Event::Failed {
+                    code: 0,
+                    reason: e,
+                });
                 return;
             }
         };
@@ -891,7 +888,9 @@ impl Worker {
             }
         };
         let mut response = self.response_to(&request, 200, "OK");
-        response.headers.set("Contact", self.contact().to_string());
+        response
+            .headers
+            .set("Contact", self.contact().to_string());
         response
             .headers
             .set("Content-Type", sdp::CONTENT_TYPE.to_owned());
@@ -1173,9 +1172,7 @@ impl Worker {
         // the call is being ended, and a 2xx retransmitted at a far end that
         // is about to be told the call is over says nothing useful.
         self.answer = None;
-        let Some(call) = self.call.as_mut() else {
-            return;
-        };
+        let Some(call) = self.call.as_mut() else { return };
         call.cseq += 1;
         let (cseq, call_id) = (call.cseq, call.call_id.clone());
         let (local, remote, target, routes, hop) = (
@@ -1291,9 +1288,7 @@ impl Worker {
             return;
         }
         let now = Instant::now();
-        let Some(pending) = self.invite.as_mut() else {
-            return;
-        };
+        let Some(pending) = self.invite.as_mut() else { return };
         let ready = pending.answered_provisionally;
         // Either way the line must not sit at "cancelling" for the two
         // minutes an unanswered INVITE is given. A cancelled call is settled
@@ -1316,9 +1311,7 @@ impl Worker {
     /// 9.1: a CANCEL is a new transaction that copies the INVITE's branch, so
     /// that the far end knows which request it is cancelling.
     fn send_cancel(&mut self) {
-        let Some(pending) = self.invite.as_mut() else {
-            return;
-        };
+        let Some(pending) = self.invite.as_mut() else { return };
         if pending.cancelled {
             return;
         }
@@ -1326,23 +1319,11 @@ impl Worker {
         let invite = pending.request.clone();
         let to = pending.to;
         let mut headers = Headers::new();
-        headers.push(
-            "Via",
-            invite.headers.get("Via").unwrap_or_default().to_owned(),
-        );
+        headers.push("Via", invite.headers.get("Via").unwrap_or_default().to_owned());
         headers.push("Max-Forwards", "70");
-        headers.push(
-            "From",
-            invite.headers.get("From").unwrap_or_default().to_owned(),
-        );
-        headers.push(
-            "To",
-            invite.headers.get("To").unwrap_or_default().to_owned(),
-        );
-        headers.push(
-            "Call-ID",
-            invite.headers.call_id().unwrap_or_default().to_owned(),
-        );
+        headers.push("From", invite.headers.get("From").unwrap_or_default().to_owned());
+        headers.push("To", invite.headers.get("To").unwrap_or_default().to_owned());
+        headers.push("Call-ID", invite.headers.call_id().unwrap_or_default().to_owned());
         let cseq = invite.headers.cseq().map_or(1, |(n, _)| n);
         headers.push("CSeq", format!("{cseq} CANCEL"));
         headers.push("User-Agent", user_agent());
@@ -1369,13 +1350,8 @@ impl Worker {
     /// is never retransmitted by the transaction layer -- if the far end
     /// resends its 200, we resend the ACK.
     fn send_ack(&mut self, response: &Response) {
-        let Some(call) = self.call.as_ref() else {
-            return;
-        };
-        let (cseq, _) = response
-            .headers
-            .cseq()
-            .unwrap_or((call.cseq, Method::Invite));
+        let Some(call) = self.call.as_ref() else { return };
+        let (cseq, _) = response.headers.cseq().unwrap_or((call.cseq, Method::Invite));
         let mut headers = Headers::new();
         headers.push("Via", self.via(&rand::branch()));
         headers.push("Max-Forwards", "70");
@@ -1402,21 +1378,13 @@ impl Worker {
     /// with the same branch and the original request URI, and it is the
     /// transaction's job rather than the dialog's -- there may be no dialog.
     fn ack_failure(&mut self, response: &Response) {
-        let Some(pending) = self.invite.as_ref() else {
-            return;
-        };
+        let Some(pending) = self.invite.as_ref() else { return };
         let invite = pending.request.clone();
         let to = pending.to;
         let mut headers = Headers::new();
-        headers.push(
-            "Via",
-            invite.headers.get("Via").unwrap_or_default().to_owned(),
-        );
+        headers.push("Via", invite.headers.get("Via").unwrap_or_default().to_owned());
         headers.push("Max-Forwards", "70");
-        headers.push(
-            "From",
-            invite.headers.get("From").unwrap_or_default().to_owned(),
-        );
+        headers.push("From", invite.headers.get("From").unwrap_or_default().to_owned());
         // Their tag, off the response: this ACK has to match the response and
         // not the request.
         headers.push(
@@ -1427,10 +1395,7 @@ impl Worker {
                 .unwrap_or(invite.headers.get("To").unwrap_or_default())
                 .to_owned(),
         );
-        headers.push(
-            "Call-ID",
-            invite.headers.call_id().unwrap_or_default().to_owned(),
-        );
+        headers.push("Call-ID", invite.headers.call_id().unwrap_or_default().to_owned());
         let cseq = invite.headers.cseq().map_or(1, |(n, _)| n);
         headers.push("CSeq", format!("{cseq} ACK"));
         headers.push("User-Agent", user_agent());
@@ -1465,8 +1430,10 @@ impl Worker {
     /// `self.registration`, destroying the authorised REGISTER then in flight.
     /// And a BYE or a CANCEL was honoured for any Call-ID at all.
     fn transaction_for(&self, response: &Response) -> Option<Transaction> {
-        let matches =
-            |slot: &Option<Pending>| slot.as_ref().is_some_and(|p| answers(&p.request, response));
+        let matches = |slot: &Option<Pending>| {
+            slot.as_ref()
+                .is_some_and(|p| answers(&p.request, response))
+        };
         if matches(&self.registration) {
             Some(Transaction::Register)
         } else if matches(&self.invite) {
@@ -1486,11 +1453,7 @@ impl Worker {
             // response to no transaction can still mean is 13.3.1.4's
             // retransmitted 2xx, which is handled where the rest of the INVITE
             // handling is.
-            if response
-                .headers
-                .cseq()
-                .is_some_and(|(_, m)| m == Method::Invite)
-            {
+            if response.headers.cseq().is_some_and(|(_, m)| m == Method::Invite) {
                 self.stray_invite_response(&response);
             }
             return;
@@ -1543,10 +1506,7 @@ impl Worker {
         if !response.is_success() {
             return;
         }
-        let theirs = response
-            .headers
-            .to()
-            .and_then(|t| t.tag().map(str::to_owned));
+        let theirs = response.headers.to().and_then(|t| t.tag().map(str::to_owned));
         let ours = self.call.as_ref().is_some_and(|call| {
             call.established
                 && Some(call.call_id.as_str()) == response.headers.call_id()
@@ -1568,9 +1528,7 @@ impl Worker {
         ) else {
             return;
         };
-        let Ok(port) = rport.parse::<u16>() else {
-            return;
-        };
+        let Ok(port) = rport.parse::<u16>() else { return };
         let Ok(ip) = received.parse::<std::net::IpAddr>() else {
             return;
         };
@@ -1606,8 +1564,7 @@ impl Worker {
             // refresh and the next is a telephone that cannot be called and
             // does not know it.
             let refresh = expires.saturating_mul(9) / 10;
-            self.register_at =
-                Some(Instant::now() + Duration::from_secs(u64::from(refresh.max(10))));
+            self.register_at = Some(Instant::now() + Duration::from_secs(u64::from(refresh.max(10))));
             self.event(Event::Registered { expires });
         } else {
             self.registered_until = None;
@@ -1744,9 +1701,7 @@ impl Worker {
             .collect();
         let to = response.headers.to();
         let cseq = response.headers.cseq().map(|(n, _)| n);
-        let Some(call) = self.call.as_mut() else {
-            return;
-        };
+        let Some(call) = self.call.as_mut() else { return };
         if let Some(to) = to {
             call.remote = to;
         }
@@ -1783,15 +1738,13 @@ impl Worker {
         }
         let text = String::from_utf8_lossy(&response.body);
         match sdp::Sdp::parse(&text) {
-            Ok(answer) => {
-                match sdp::read_answer_with(&answer, &self.account.laws, self.account.linear) {
-                    Ok(negotiated) => Some(negotiated),
-                    Err(e) => {
-                        self.note(format!("sip: the answer will not do: {e}"));
-                        None
-                    }
+            Ok(answer) => match sdp::read_answer_with(&answer, &self.account.laws, self.account.linear) {
+                Ok(negotiated) => Some(negotiated),
+                Err(e) => {
+                    self.note(format!("sip: the answer will not do: {e}"));
+                    None
                 }
-            }
+            },
             Err(e) => {
                 self.note(format!("sip: the answer would not parse: {e}"));
                 None
@@ -1890,10 +1843,7 @@ impl Worker {
             .as_ref()
             .is_some_and(|c| Some(c.call_id.as_str()) == request.headers.call_id());
         if same_call {
-            let theirs = request
-                .headers
-                .to()
-                .and_then(|t| t.tag().map(str::to_owned));
+            let theirs = request.headers.to().and_then(|t| t.tag().map(str::to_owned));
             let established = self.call.as_ref().is_some_and(|c| c.established);
             let ours = self
                 .call
@@ -1983,9 +1933,7 @@ impl Worker {
             let target = contact.uri;
             // Only when there is no route set: with one, the first route is
             // where the datagrams go whatever the target says (12.2.1.1).
-            let hop = (!routed)
-                .then(|| resolve(&target.socket_address()))
-                .and_then(Result::ok);
+            let hop = (!routed).then(|| resolve(&target.socket_address())).and_then(Result::ok);
             if let Some(call) = self.call.as_mut() {
                 call.target = target;
                 if let Some(hop) = hop {
@@ -2120,10 +2068,7 @@ impl Worker {
         request.headers.set(challenge.header_name(), credentials);
         // 8.1.3.5: a new branch and the next sequence number, because this is
         // a new transaction rather than a retransmission of the old one.
-        let (cseq, _) = request
-            .headers
-            .cseq()
-            .unwrap_or((1, request.method.clone()));
+        let (cseq, _) = request.headers.cseq().unwrap_or((1, request.method.clone()));
         let cseq = cseq + 1;
         request.headers.set("CSeq", format!("{cseq} {method}"));
         request.headers.set("Via", self.via(&rand::branch()));
@@ -2206,10 +2151,7 @@ impl Worker {
             } else if retransmits && now >= pending.next {
                 pending.interval = (pending.interval * 2).min(T2);
                 pending.next = now + pending.interval;
-                let (bytes, to) = (
-                    Message::Request(pending.request.clone()).to_bytes(),
-                    pending.to,
-                );
+                let (bytes, to) = (Message::Request(pending.request.clone()).to_bytes(), pending.to);
                 let _ = self.link.send(&bytes, to);
             }
         }
@@ -2244,10 +2186,7 @@ impl Worker {
                 // ceiling, because the far end may be ringing a telephone.
                 pending.interval *= 2;
                 pending.next = now + pending.interval;
-                let (bytes, to) = (
-                    Message::Request(pending.request.clone()).to_bytes(),
-                    pending.to,
-                );
+                let (bytes, to) = (Message::Request(pending.request.clone()).to_bytes(), pending.to);
                 let _ = self.link.send(&bytes, to);
             }
         }
@@ -2263,10 +2202,7 @@ impl Worker {
             } else if retransmits && now >= pending.next {
                 pending.interval = (pending.interval * 2).min(T2);
                 pending.next = now + pending.interval;
-                let (bytes, to) = (
-                    Message::Request(pending.request.clone()).to_bytes(),
-                    pending.to,
-                );
+                let (bytes, to) = (Message::Request(pending.request.clone()).to_bytes(), pending.to);
                 let _ = self.link.send(&bytes, to);
             }
         }
@@ -2289,10 +2225,7 @@ impl Worker {
             } else if retransmits && now >= pending.next {
                 pending.interval = (pending.interval * 2).min(T2);
                 pending.next = now + pending.interval;
-                let (bytes, to) = (
-                    Message::Request(pending.request.clone()).to_bytes(),
-                    pending.to,
-                );
+                let (bytes, to) = (Message::Request(pending.request.clone()).to_bytes(), pending.to);
                 let _ = self.link.send(&bytes, to);
             }
         }
@@ -2327,8 +2260,7 @@ impl Worker {
             }
         }
 
-        self.answered
-            .retain(|(.., at)| now.duration_since(*at) < ABSORB);
+        self.answered.retain(|(.., at)| now.duration_since(*at) < ABSORB);
         self.provisional
             .retain(|(.., at)| now.duration_since(*at) < ABSORB);
     }
@@ -2366,14 +2298,8 @@ impl Worker {
         if Some(call.call_id.as_str()) != request.headers.call_id() {
             return false;
         }
-        let theirs = request
-            .headers
-            .from()
-            .and_then(|a| a.tag().map(str::to_owned));
-        let ours = request
-            .headers
-            .to()
-            .and_then(|a| a.tag().map(str::to_owned));
+        let theirs = request.headers.from().and_then(|a| a.tag().map(str::to_owned));
+        let ours = request.headers.to().and_then(|a| a.tag().map(str::to_owned));
         tags_agree(call.remote.tag(), theirs.as_deref())
             && tags_agree(call.local.tag(), ours.as_deref())
     }
@@ -2427,9 +2353,7 @@ impl Worker {
             response
                 .headers
                 .push("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE");
-            response
-                .headers
-                .push("Accept", sdp::CONTENT_TYPE.to_owned());
+            response.headers.push("Accept", sdp::CONTENT_TYPE.to_owned());
         }
         if (180..300).contains(&code) {
             response.headers.push("Contact", self.contact().to_string());
@@ -2557,7 +2481,10 @@ impl Worker {
             .map(|at| at.saturating_duration_since(Instant::now()).as_secs() as u32)
             .unwrap_or(0);
         status.public = self.public.map(|a| a.to_string());
-        status.peer = self.call.as_ref().map(|c| c.remote.uri.to_string());
+        status.peer = self
+            .call
+            .as_ref()
+            .map(|c| c.remote.uri.to_string());
         status.caller = self.call.as_ref().map(|c| caller_of(&c.remote));
     }
 }
@@ -2566,17 +2493,8 @@ impl Worker {
 /// host where there is no user part, with the display name in front of it
 /// when there is one that says something more.
 pub fn caller_of(address: &Address) -> String {
-    let number = address
-        .uri
-        .user
-        .clone()
-        .unwrap_or_else(|| address.uri.host.clone());
-    match address
-        .display
-        .as_deref()
-        .map(str::trim)
-        .map(|d| d.trim_matches('"').trim())
-    {
+    let number = address.uri.user.clone().unwrap_or_else(|| address.uri.host.clone());
+    match address.display.as_deref().map(str::trim).map(|d| d.trim_matches('"').trim()) {
         Some(name) if !name.is_empty() && name != number => format!("{name} <{number}>"),
         _ => number,
     }
@@ -2775,9 +2693,7 @@ fn expires_of(response: &Response) -> Option<u32> {
 /// and these are the ones a trunk actually sends.
 fn describe(code: u16, reason: &str) -> String {
     let sense = match code {
-        403 => {
-            "the trunk refused the call: the number, the caller ID or the account is not allowed to dial it"
-        }
+        403 => "the trunk refused the call: the number, the caller ID or the account is not allowed to dial it",
         404 => "there is no such number",
         408 => "nobody answered the request",
         480 => "the far end is not available",
@@ -2806,11 +2722,7 @@ mod tests {
         a.display = Some("\"Front desk\"".to_owned());
         assert_eq!(caller_of(&a), "Front desk <0412345678>");
         a.display = Some("0412345678".to_owned());
-        assert_eq!(
-            caller_of(&a),
-            "0412345678",
-            "a name that is the number again"
-        );
+        assert_eq!(caller_of(&a), "0412345678", "a name that is the number again");
         let host = Address::new(Uri::parse("sip:pbx.example").unwrap());
         assert_eq!(caller_of(&host), "pbx.example");
     }
@@ -2851,10 +2763,7 @@ mod tests {
 
     #[test]
     fn a_registrar_setting_gives_up_its_host() {
-        assert_eq!(
-            split_host("sip.example.net:5070".to_owned()),
-            "sip.example.net"
-        );
+        assert_eq!(split_host("sip.example.net:5070".to_owned()), "sip.example.net");
         assert_eq!(split_host("sip.example.net".to_owned()), "sip.example.net");
     }
 
@@ -2862,10 +2771,7 @@ mod tests {
     /// against, and nothing else.
     fn request(method: Method, call_id: &str, cseq: u32, branch: &str) -> Request {
         let mut headers = Headers::new();
-        headers.push(
-            "Via",
-            format!("SIP/2.0/UDP 192.0.2.4:5060;rport;branch={branch}"),
-        );
+        headers.push("Via", format!("SIP/2.0/UDP 192.0.2.4:5060;rport;branch={branch}"));
         headers.push("Call-ID", call_id.to_owned());
         headers.push("CSeq", format!("{cseq} {method}"));
         Request {
@@ -2880,10 +2786,7 @@ mod tests {
     /// which request it is answering settable one at a time.
     fn response(code: u16, call_id: &str, cseq: u32, method: Method, branch: &str) -> Response {
         let mut headers = Headers::new();
-        headers.push(
-            "Via",
-            format!("SIP/2.0/UDP 192.0.2.4:5060;rport;branch={branch}"),
-        );
+        headers.push("Via", format!("SIP/2.0/UDP 192.0.2.4:5060;rport;branch={branch}"));
         headers.push("Call-ID", call_id.to_owned());
         headers.push("CSeq", format!("{cseq} {method}"));
         Response {
@@ -3093,8 +2996,7 @@ mod tests {
         let far = UdpSocket::bind("127.0.0.1:0").expect("the far end's socket");
         // Generous: everything here crosses the loopback and arrives at once,
         // and the only reason to wait at all is a scheduler that is busy.
-        far.set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
+        far.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
         let hop = far.local_addr().unwrap();
         let shared = Arc::new(Shared {
             commands: Mutex::new(VecDeque::new()),
@@ -3163,12 +3065,8 @@ mod tests {
         let _ = said(&worker);
 
         let mut again = response(200, "call-6", 2, Method::Invite, "z9hG4bKsix");
-        again
-            .headers
-            .push("To", "<sip:0312345678@trunk.invalid>;tag=theirs");
-        again
-            .headers
-            .push("Contact", "<sip:0312345678@127.0.0.1:5060>");
+        again.headers.push("To", "<sip:0312345678@trunk.invalid>;tag=theirs");
+        again.headers.push("Contact", "<sip:0312345678@127.0.0.1:5060>");
         worker.handle_response(again, hop);
 
         let answer = heard(&far).expect("the retransmitted 200 was not acknowledged at all");
@@ -3252,10 +3150,7 @@ mod tests {
 
         worker.place_call("0312345678");
         let sent = heard(&far).expect("no INVITE went out at all");
-        let invite = sent
-            .as_request()
-            .expect("the INVITE was not a request")
-            .clone();
+        let invite = sent.as_request().expect("the INVITE was not a request").clone();
         assert_eq!(invite.method, Method::Invite);
         let call_id = invite.headers.call_id().expect("the INVITE had no Call-ID");
         let branch = invite.headers.branch().expect("the INVITE had no branch");
@@ -3266,10 +3161,7 @@ mod tests {
             heard(&far).is_none(),
             "a CANCEL went out before any provisional response had arrived (9.1)"
         );
-        assert!(
-            worker.cancel_wanted,
-            "the hang-up was forgotten instead of kept"
-        );
+        assert!(worker.cancel_wanted, "the hang-up was forgotten instead of kept");
         assert!(
             worker
                 .invite
@@ -3398,10 +3290,7 @@ mod tests {
 
         worker.end_call();
         let sent = heard(&far).expect("no BYE went out at all");
-        assert_eq!(
-            sent.as_request().map(|r| r.method.clone()),
-            Some(Method::Bye)
-        );
+        assert_eq!(sent.as_request().map(|r| r.method.clone()), Some(Method::Bye));
         assert!(
             worker.bye.is_some(),
             "the BYE has no transaction behind it to send it again (17.1.2.2)"
@@ -3445,16 +3334,9 @@ mod tests {
 
         worker.end_call();
         let sent = heard(&far).expect("no BYE went out at all");
-        let bye = sent
-            .as_request()
-            .expect("the BYE was not a request")
-            .clone();
+        let bye = sent.as_request().expect("the BYE was not a request").clone();
         let (cseq, _) = bye.headers.cseq().expect("the BYE had no CSeq");
-        let branch = bye
-            .headers
-            .branch()
-            .expect("the BYE had no branch")
-            .to_owned();
+        let branch = bye.headers.branch().expect("the BYE had no branch").to_owned();
 
         worker.place_call("0312345678");
         let _ = heard(&far).expect("the redial never went out");
@@ -3504,10 +3386,7 @@ mod tests {
 
         worker.end_call();
         let sent = heard(&far).expect("no BYE went out at all");
-        assert_eq!(
-            sent.as_request().map(|r| r.method.clone()),
-            Some(Method::Bye)
-        );
+        assert_eq!(sent.as_request().map(|r| r.method.clone()), Some(Method::Bye));
         worker.place_call("0312345678");
         let sent = heard(&far).expect("the redial never went out");
         assert_eq!(
@@ -3556,10 +3435,7 @@ mod tests {
 
         worker.place_call("0312345678");
         let sent = heard(&far).expect("no INVITE went out at all");
-        let invite = sent
-            .as_request()
-            .expect("the INVITE was not a request")
-            .clone();
+        let invite = sent.as_request().expect("the INVITE was not a request").clone();
         let call_id = invite.headers.call_id().expect("no Call-ID").to_owned();
         let branch = invite.headers.branch().expect("no branch").to_owned();
 
@@ -3567,10 +3443,7 @@ mod tests {
         worker.handle_response(response(180, &call_id, 1, Method::Invite, &branch), hop);
         worker.end_call();
         let sent = heard(&far).expect("the CANCEL never went out");
-        assert_eq!(
-            sent.as_request().map(|r| r.method.clone()),
-            Some(Method::Cancel)
-        );
+        assert_eq!(sent.as_request().map(|r| r.method.clone()), Some(Method::Cancel));
 
         // And the next number straight after it.
         worker.place_call("0398765432");
@@ -3600,7 +3473,10 @@ mod tests {
 
         // The 487 settles it, and the number that was waiting goes out.
         let _ = said(&worker);
-        worker.handle_response(response(487, &call_id, 1, Method::Invite, &branch), hop);
+        worker.handle_response(
+            response(487, &call_id, 1, Method::Invite, &branch),
+            hop,
+        );
         worker.service_timers();
         let out = everything(&far);
         assert!(
@@ -3678,10 +3554,7 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the number was dropped in silence: {events:#?}"));
-        assert_eq!(
-            refusal.0, 0,
-            "nothing left this machine, so there is no code"
-        );
+        assert_eq!(refusal.0, 0, "nothing left this machine, so there is no code");
         assert!(
             refusal.1.contains("0398765432"),
             "the refusal does not say what was not dialled: {}",
@@ -3701,20 +3574,9 @@ mod tests {
 
         worker.place_call("0312345678");
         let sent = heard(&far).expect("no INVITE went out at all");
-        let invite = sent
-            .as_request()
-            .expect("the INVITE was not a request")
-            .clone();
-        let call_id = invite
-            .headers
-            .call_id()
-            .expect("the INVITE had no Call-ID")
-            .to_owned();
-        let branch = invite
-            .headers
-            .branch()
-            .expect("the INVITE had no branch")
-            .to_owned();
+        let invite = sent.as_request().expect("the INVITE was not a request").clone();
+        let call_id = invite.headers.call_id().expect("the INVITE had no Call-ID").to_owned();
+        let branch = invite.headers.branch().expect("the INVITE had no branch").to_owned();
         let _ = said(&worker);
 
         // ATH, and then the caller's loop asking again nine more times before
@@ -3811,12 +3673,8 @@ mod tests {
     fn record_route_is_echoed_in_the_answer_to_an_invite() {
         let (worker, _far, _hop) = worker_and_far_end();
         let mut invite = request(Method::Invite, "call-5", 1, "z9hG4bKfive");
-        invite
-            .headers
-            .push("Record-Route", "<sip:edge.example.net;lr>");
-        invite
-            .headers
-            .push("Record-Route", "<sip:core.example.net;lr>");
+        invite.headers.push("Record-Route", "<sip:edge.example.net;lr>");
+        invite.headers.push("Record-Route", "<sip:core.example.net;lr>");
 
         let answer = worker.response_to(&invite, 200, "OK");
         let routes: Vec<&str> = answer.headers.all("Record-Route").collect();
@@ -3828,32 +3686,11 @@ mod tests {
 
         // A 100 is not the response that makes a dialog, and neither is a
         // failure, so neither carries them.
-        assert_eq!(
-            worker
-                .response_to(&invite, 100, "Trying")
-                .headers
-                .all("Record-Route")
-                .count(),
-            0
-        );
-        assert_eq!(
-            worker
-                .response_to(&invite, 486, "Busy Here")
-                .headers
-                .all("Record-Route")
-                .count(),
-            0
-        );
+        assert_eq!(worker.response_to(&invite, 100, "Trying").headers.all("Record-Route").count(), 0);
+        assert_eq!(worker.response_to(&invite, 486, "Busy Here").headers.all("Record-Route").count(), 0);
 
         let bye = request(Method::Bye, "call-5", 2, "z9hG4bKsix");
-        assert_eq!(
-            worker
-                .response_to(&bye, 200, "OK")
-                .headers
-                .all("Record-Route")
-                .count(),
-            0
-        );
+        assert_eq!(worker.response_to(&bye, 200, "OK").headers.all("Record-Route").count(), 0);
     }
 
     // ---- over TCP ------------------------------------------------------
@@ -3970,9 +3807,7 @@ mod tests {
                         take("Call-ID"),
                         take("CSeq"),
                     );
-                    stream
-                        .write_all(ok.as_bytes())
-                        .expect("the 200 would not go");
+                    stream.write_all(ok.as_bytes()).expect("the 200 would not go");
                     answered = true;
                 }
             }

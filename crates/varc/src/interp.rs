@@ -71,10 +71,7 @@ const LEN: usize = 2 * HALF + 8;
 
 impl std::fmt::Debug for Interp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Interp")
-            .field("step", &self.step)
-            .field("behind", &self.behind)
-            .finish_non_exhaustive()
+        f.debug_struct("Interp").field("step", &self.step).field("behind", &self.behind).finish_non_exhaustive()
     }
 }
 
@@ -97,17 +94,9 @@ impl Interp {
                 // Tap j sits at offset j - (HALF - 1) from the sample at or
                 // before the output point.
                 let x = j as f64 - (HALF as f64 - 1.0) - frac;
-                let sinc = if x.abs() < 1e-12 {
-                    1.0
-                } else {
-                    (PI * x).sin() / (PI * x)
-                };
+                let sinc = if x.abs() < 1e-12 { 1.0 } else { (PI * x).sin() / (PI * x) };
                 let r = x / HALF as f64;
-                let window = if r.abs() >= 1.0 {
-                    0.0
-                } else {
-                    bessel_i0(BETA * (1.0 - r * r).sqrt()) / norm
-                };
+                let window = if r.abs() >= 1.0 { 0.0 } else { bessel_i0(BETA * (1.0 - r * r).sqrt()) / norm };
                 *tap = sinc * window;
                 sum += *tap;
             }
@@ -115,13 +104,7 @@ impl Interp {
                 *tap /= sum;
             }
         }
-        Self {
-            table,
-            history: vec![0.0; 2 * LEN],
-            at: 0,
-            step: 1.0,
-            behind: HALF as f64,
-        }
+        Self { table, history: vec![0.0; 2 * LEN], at: 0, step: 1.0, behind: HALF as f64 }
     }
 
     /// The delay through the resampler at a ratio of one, in samples.
@@ -243,10 +226,7 @@ mod tests {
         for &freq in &[0.01, 0.1, 0.25, 0.4] {
             for &nudge in &[0.0, 0.25, 0.5, 0.731] {
                 let db = residue(freq, 0.0, nudge);
-                assert!(
-                    db < -95.0,
-                    "{freq} of the rate, {nudge} of a sample: {db:.1} dB"
-                );
+                assert!(db < -95.0, "{freq} of the rate, {nudge} of a sample: {db:.1} dB");
             }
         }
     }

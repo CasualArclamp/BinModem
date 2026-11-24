@@ -81,10 +81,7 @@ const BANDWIDTH: f64 = 60.0;
 fn capture() -> Option<(Vec<f32>, f64)> {
     let path = std::env::var("V32_CAPTURE").ok()?;
     let wav = line::wav::read(&path).expect("could not read the capture");
-    assert_eq!(
-        wav.sample_rate as f64, FS,
-        "the detectors are built for 16 kHz"
-    );
+    assert_eq!(wav.sample_rate as f64, FS, "the detectors are built for 16 kHz");
     let offset: f64 = std::env::var("V32_OFFSET")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -117,14 +114,8 @@ fn probe_carrier_offset() {
     };
     let mut tones = [
         ("carrier 1800", ToneDetector::new(CARRIER, BANDWIDTH, FS)),
-        (
-            "lower 600",
-            ToneDetector::new(CARRIER - SIDEBAND, BANDWIDTH, FS),
-        ),
-        (
-            "upper 3000",
-            ToneDetector::new(CARRIER + SIDEBAND, BANDWIDTH, FS),
-        ),
+        ("lower 600", ToneDetector::new(CARRIER - SIDEBAND, BANDWIDTH, FS)),
+        ("upper 3000", ToneDetector::new(CARRIER + SIDEBAND, BANDWIDTH, FS)),
     ];
 
     // A second at a time, because the interesting stretches last seconds and
@@ -182,18 +173,9 @@ fn probe_replay_reversals() {
     // The three the start-up watches: the carrier itself, and the two
     // sidebands whose phase carries the alternation.
     let mut detectors = [
-        (
-            "carrier 1800",
-            ReversalDetector::new(CARRIER, BANDWIDTH, THRESHOLD, FS),
-        ),
-        (
-            "lower 600",
-            ReversalDetector::new(CARRIER - SIDEBAND, BANDWIDTH, THRESHOLD, FS),
-        ),
-        (
-            "upper 3000",
-            ReversalDetector::new(CARRIER + SIDEBAND, BANDWIDTH, THRESHOLD, FS),
-        ),
+        ("carrier 1800", ReversalDetector::new(CARRIER, BANDWIDTH, THRESHOLD, FS)),
+        ("lower 600", ReversalDetector::new(CARRIER - SIDEBAND, BANDWIDTH, THRESHOLD, FS)),
+        ("upper 3000", ReversalDetector::new(CARRIER + SIDEBAND, BANDWIDTH, THRESHOLD, FS)),
     ];
 
     println!(

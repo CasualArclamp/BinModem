@@ -74,14 +74,8 @@ fn main() -> ExitCode {
             // Super G3 as well.
             "--fax" => {
                 fax = Some(match value().as_str() {
-                    "g3" => Fax {
-                        v34: false,
-                        pages: 1,
-                    },
-                    "v34" => Fax {
-                        v34: true,
-                        pages: 1,
-                    },
+                    "g3" => Fax { v34: false, pages: 1 },
+                    "v34" => Fax { v34: true, pages: 1 },
                     other => {
                         eprintln!("--fax is g3 or v34, not {other}");
                         return ExitCode::FAILURE;
@@ -195,27 +189,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let board = match bbs
-        .as_deref()
-        .map(|dir| modem::bbs::Board::open("Arclamp DX BBS", dir))
-        .transpose()
-    {
+    let board = match bbs.as_deref().map(|dir| modem::bbs::Board::open("Arclamp DX BBS", dir)).transpose() {
         Ok(board) => board,
         Err(e) => {
             eprintln!("--bbs: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let options = FaxOptions {
-        page: custom,
-        offer,
-        ecm,
-        jbig,
-        board,
-    };
-    run(
-        &line, typed, send, hold, seconds, fax, record, answer, memos, drive, options,
-    )
+    let options = FaxOptions { page: custom, offer, ecm, jbig, board };
+    run(&line, typed, send, hold, seconds, fax, record, answer, memos, drive, options)
 }
 
 /// A fax to send instead of a data call.
@@ -260,29 +242,15 @@ fn read_pbm(path: &std::path::Path, fine: bool) -> Result<fax::page::Page, Strin
     let width: usize = fields.get(1).and_then(|w| w.parse().ok()).unwrap_or(0);
     let height: usize = fields.get(2).and_then(|h| h.parse().ok()).unwrap_or(0);
     if fields.first().map(String::as_str) != Some("P4") || width != fax::page::WIDTH {
-        return Err(format!(
-            "{}: wants a P4 PBM {} pels wide",
-            path.display(),
-            fax::page::WIDTH
-        ));
+        return Err(format!("{}: wants a P4 PBM {} pels wide", path.display(), fax::page::WIDTH));
     }
     let stride = width.div_ceil(8);
-    let data = bytes
-        .get(at..at + stride * height)
-        .ok_or_else(|| format!("{}: cut short", path.display()))?;
+    let data = bytes.get(at..at + stride * height).ok_or_else(|| format!("{}: cut short", path.display()))?;
     let lines = data
         .chunks(stride)
-        .map(|row| {
-            (0..width)
-                .map(|x| row[x / 8] >> (7 - x % 8) & 1 == 1)
-                .collect()
-        })
+        .map(|row| (0..width).map(|x| row[x / 8] >> (7 - x % 8) & 1 == 1).collect())
         .collect();
-    let resolution = if fine {
-        fax::page::Resolution::Fine
-    } else {
-        fax::page::Resolution::Standard
-    };
+    let resolution = if fine { fax::page::Resolution::Fine } else { fax::page::Resolution::Standard };
     Ok(fax::page::Page { lines, resolution })
 }
 
@@ -311,10 +279,7 @@ fn test_page(sheet: usize) -> fax::page::Page {
                 .collect()
         })
         .collect();
-    fax::page::Page {
-        lines,
-        resolution: fax::page::Resolution::Standard,
-    }
+    fax::page::Page { lines, resolution: fax::page::Resolution::Standard }
 }
 
 // One argument for each thing the command line can ask for.
@@ -521,10 +486,7 @@ fn run(
             let now = started.elapsed().as_secs_f64();
             if let Some((name, data)) = b.take_download() {
                 let rate = modem.transmit_rate().unwrap_or(2400);
-                note(&format!(
-                    "bbs: sending {name} ({} bytes) by ZMODEM",
-                    data.len()
-                ));
+                note(&format!("bbs: sending {name} ({} bytes) by ZMODEM", data.len()));
                 let info = transfer::zmodem::FileInfo {
                     name,
                     length: Some(data.len() as u64),
@@ -532,11 +494,7 @@ fn run(
                     mode: 0o644,
                 };
                 let bytes = data.len();
-                download = Some((
-                    transfer::zmodem::Sender::new(info, data, rate),
-                    bytes,
-                    Instant::now(),
-                ));
+                download = Some((transfer::zmodem::Sender::new(info, data, rate), bytes, Instant::now()));
                 last_tick = Instant::now();
             }
             if let Some((sender, bytes, since)) = download.as_mut() {
@@ -555,9 +513,7 @@ fn run(
                 use transfer::zmodem::State as Z;
                 if let state @ (Z::Done | Z::Failed(_)) = sender.state() {
                     let secs = since.elapsed().as_secs_f64();
-                    note(&format!(
-                        "bbs: the download ended {state:?} after {secs:.1} s"
-                    ));
+                    note(&format!("bbs: the download ended {state:?} after {secs:.1} s"));
                     finished = Some((Instant::now(), *bytes, secs, state == Z::Done));
                     download = None;
                 }
@@ -596,13 +552,9 @@ fn run(
                 call.sheet(),
                 call.sheets(),
                 call.rate(),
-                call.symbol_rate()
-                    .map(|b| format!(" on {b} baud"))
-                    .unwrap_or_default(),
+                call.symbol_rate().map(|b| format!(" on {b} baud")).unwrap_or_default(),
                 if call.error_correction() { ", ECM" } else { "" },
-                call.trouble()
-                    .map(|t| format!(" -- {t}"))
-                    .unwrap_or_default(),
+                call.trouble().map(|t| format!(" -- {t}")).unwrap_or_default(),
             );
             fax_awaited_receipt |= call.phase() == fax::call::Phase::AwaitingReceipt;
             fax_last = call.phase_name();
@@ -623,21 +575,9 @@ fn run(
                     } else {
                         "no error control"
                     },
-                    if modem.compressing() {
-                        " with compression"
-                    } else {
-                        ""
-                    },
-                    if modem.quick_connected().is_some() {
-                        ", short phase 1"
-                    } else {
-                        ""
-                    },
-                    if modem.short_phase2() {
-                        ", short phase 2"
-                    } else {
-                        ""
-                    }
+                    if modem.compressing() { " with compression" } else { "" },
+                    if modem.quick_connected().is_some() { ", short phase 1" } else { "" },
+                    if modem.short_phase2() { ", short phase 2" } else { "" }
                 ),
                 None => String::new(),
             };
@@ -692,9 +632,7 @@ fn run(
         }
     }
     let stats = line.stats();
-    note(&format!(
-        "{received} octets came to the terminal; line: {stats:?}"
-    ));
+    note(&format!("{received} octets came to the terminal; line: {stats:?}"));
     if faxing {
         // The last thing the call was doing says how it ended; the far end's
         // own log is the proof that the page arrived.
@@ -702,15 +640,7 @@ fn run(
             "fax: ended in \"{fax_last}\"; a page was {}sent to its end",
             if fax_awaited_receipt { "" } else { "not " }
         ));
-        return if fax_awaited_receipt {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        return if fax_awaited_receipt { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
-    if reached_data {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    if reached_data { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }

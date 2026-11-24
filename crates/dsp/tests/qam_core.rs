@@ -81,24 +81,14 @@ impl Random {
 
 fn unit(points: Vec<Complex>) -> Constellation {
     let power = points.iter().map(|p| p.norm_sqr()).sum::<f64>() / points.len() as f64;
-    Constellation::new(
-        points
-            .into_iter()
-            .map(|p| p.scale(1.0 / power.sqrt()))
-            .collect(),
-    )
+    Constellation::new(points.into_iter().map(|p| p.scale(1.0 / power.sqrt())).collect())
 }
 
 /// V.32's synchronising states A, B, C and D (spec.md 2.1): turned 26.57
 /// degrees from the axes.
 fn states() -> [Complex; 4] {
     let r = 10f64.sqrt();
-    [
-        Complex::new(-3.0 / r, -1.0 / r),
-        Complex::new(1.0 / r, -3.0 / r),
-        Complex::new(3.0 / r, 1.0 / r),
-        Complex::new(-1.0 / r, 3.0 / r),
-    ]
+    [Complex::new(-3.0 / r, -1.0 / r), Complex::new(1.0 / r, -3.0 / r), Complex::new(3.0 / r, 1.0 / r), Complex::new(-1.0 / r, 3.0 / r)]
 }
 
 fn four() -> Constellation {
@@ -107,11 +97,7 @@ fn four() -> Constellation {
 
 fn sixteen() -> Constellation {
     let odd = [-3.0, -1.0, 1.0, 3.0];
-    unit(
-        odd.iter()
-            .flat_map(|&x| odd.iter().map(move |&y| Complex::new(x, y)))
-            .collect(),
-    )
+    unit(odd.iter().flat_map(|&x| odd.iter().map(move |&y| Complex::new(x, y))).collect())
 }
 
 /// The odd grid out to `reach`, less its corners beyond `corner`, turned 45
@@ -140,12 +126,7 @@ fn cross128() -> Constellation {
 }
 
 fn tables() -> Vec<(&'static str, Constellation)> {
-    vec![
-        ("4", four()),
-        ("16", sixteen()),
-        ("32", cross32()),
-        ("128", cross128()),
-    ]
+    vec![("4", four()), ("16", sixteen()), ("32", cross32()), ("128", cross128())]
 }
 
 // ---------------------------------------------------------------------------
@@ -205,12 +186,7 @@ struct Far {
 
 impl Default for Far {
     fn default() -> Self {
-        Self {
-            clock: 1.0,
-            offset_hz: 0.0,
-            delay: 0.0,
-            jump: None,
-        }
+        Self { clock: 1.0, offset_hz: 0.0, delay: 0.0, jump: None }
     }
 }
 
@@ -292,19 +268,12 @@ fn startup(data: &[Complex], seed: u64) -> Sent {
     let data_start = symbols.len();
     symbols.extend_from_slice(data);
     symbols.extend(std::iter::repeat_n(Complex::ZERO, 40));
-    Sent {
-        symbols,
-        trn,
-        s_bar,
-        data: data_start,
-    }
+    Sent { symbols, trn, s_bar, data: data_start }
 }
 
 fn random_data(table: &Constellation, n: usize, seed: u64) -> Vec<Complex> {
     let mut random = Random::new(seed);
-    (0..n)
-        .map(|_| table.points()[random.below(table.len())])
-        .collect()
+    (0..n).map(|_| table.points()[random.below(table.len())]).collect()
 }
 
 /// The half-symbol sample the receiver will have centred on symbol `k`,
@@ -372,16 +341,8 @@ impl Listener {
         Training {
             targets: self.trn.clone(),
             start: at + 2 * S_BAR_LENGTH as u64,
-            first: Window {
-                align: (16, 256),
-                solve: (16, 512),
-                search: 8,
-            },
-            retry: Some(Window {
-                align: (640, 1152),
-                solve: (640, 1152),
-                search: 200,
-            }),
+            first: Window { align: (16, 256), solve: (16, 512), search: 8 },
+            retry: Some(Window { align: (640, 1152), solve: (640, 1152), search: 200 }),
             turn: self.from_s.then_some(turn),
             drift: self.from_s.then_some(drift),
             accept_db: 12.0,
@@ -423,11 +384,7 @@ impl Listener {
             if let Some(index) = &mut self.index {
                 *index += 1;
             }
-            self.records.push(Record {
-                at: self.fed,
-                error: (point.z - point.nearest).norm_sqr(),
-                lost: self.core.is_lost(),
-            });
+            self.records.push(Record { at: self.fed, error: (point.z - point.nearest).norm_sqr(), lost: self.core.is_lost() });
         }
     }
 
@@ -443,12 +400,7 @@ impl Listener {
 
     /// Signal to noise over the records fed between samples `from` and `to`.
     fn snr_between(&self, from: usize, to: usize) -> f64 {
-        let chosen: Vec<f64> = self
-            .records
-            .iter()
-            .filter(|r| r.at >= from && r.at < to)
-            .map(|r| r.error)
-            .collect();
+        let chosen: Vec<f64> = self.records.iter().filter(|r| r.at >= from && r.at < to).map(|r| r.error).collect();
         if chosen.is_empty() {
             return f64::NEG_INFINITY;
         }
@@ -464,14 +416,7 @@ fn sample_of(k: usize, far: Far) -> usize {
 /// A whole start-up and `data_symbols` of data on `table`, heard through a
 /// line `far` with `snr_db` of noise: the listener as it ends, and what was
 /// sent.
-fn call(
-    options: Options,
-    table: &Constellation,
-    far: Far,
-    snr_db: f64,
-    data_symbols: usize,
-    seed: u64,
-) -> (Listener, Sent) {
+fn call(options: Options, table: &Constellation, far: Far, snr_db: f64, data_symbols: usize, seed: u64) -> (Listener, Sent) {
     let data = random_data(table, data_symbols, seed);
     let sent = startup(&data, seed);
     let mut samples = modulate(&sent.symbols, far);
@@ -487,10 +432,7 @@ fn tracked_db(listener: &Listener, sent: &Sent, far: Far, skip: usize) -> f64 {
     let end = sent.symbols.len() - 40;
     // A symbol is settled about nine symbols after its centre goes by.
     let lag = 10;
-    listener.snr_between(
-        sample_of(sent.data + skip + lag, far),
-        sample_of(end - 60 + lag, far),
-    )
+    listener.snr_between(sample_of(sent.data + skip + lag, far), sample_of(end - 60 + lag, far))
 }
 
 /// A listener that has trained and gone `into` symbols into data, sharable
@@ -504,15 +446,7 @@ struct Prefix {
     far: Far,
 }
 
-fn prefix(
-    options: Options,
-    table: &Constellation,
-    far: Far,
-    snr_db: f64,
-    data_symbols: usize,
-    into: usize,
-    seed: u64,
-) -> Prefix {
+fn prefix(options: Options, table: &Constellation, far: Far, snr_db: f64, data_symbols: usize, into: usize, seed: u64) -> Prefix {
     let data = random_data(table, data_symbols, seed);
     let sent = startup(&data, seed);
     let mut samples = modulate(&sent.symbols, far);
@@ -520,24 +454,14 @@ fn prefix(
     let mut listener = Listener::new(options, sent.trn.clone(), table.clone());
     let at = sample_of(sent.data + into, far);
     listener.feed_all(&samples[..at]);
-    assert!(
-        listener.core.is_tracking() && listener.switched,
-        "not tracking data by symbol {into} of it"
-    );
-    Prefix {
-        listener,
-        samples,
-        at,
-        sent,
-        far,
-    }
+    assert!(listener.core.is_tracking() && listener.switched, "not tracking data by symbol {into} of it");
+    Prefix { listener, samples, at, sent, far }
 }
 
 impl Prefix {
     /// Signal to noise over the `symbols` before the prefix ends.
     fn before_db(&self, symbols: usize) -> f64 {
-        self.listener
-            .snr_between(self.at - sample_of(symbols, Far::default()), self.at)
+        self.listener.snr_between(self.at - sample_of(symbols, Far::default()), self.at)
     }
 }
 
@@ -569,11 +493,7 @@ fn concealment(before: &[f64]) -> Vec<f64> {
         .enumerate()
         .map(|(i, x)| {
             let edge = i.min(n - 1 - i);
-            if edge < fade {
-                x * edge as f64 / fade as f64
-            } else {
-                *x
-            }
+            if edge < fade { x * edge as f64 / fade as f64 } else { *x }
         })
         .collect()
 }
@@ -591,20 +511,11 @@ fn nearest_by_lattice_is_nearest_by_search() {
         for i in 0..200_000 {
             // Near the points, all over the plane round them, and far out.
             let z = match i % 3 {
-                0 => {
-                    table.points()[random.below(table.len())]
-                        + Complex::new(random.gaussian(), random.gaussian()).scale(0.2)
-                }
+                0 => table.points()[random.below(table.len())] + Complex::new(random.gaussian(), random.gaussian()).scale(0.2),
                 1 => Complex::new(random.uniform() - 0.5, random.uniform() - 0.5).scale(4.0 * peak),
-                _ => {
-                    Complex::new(random.uniform() - 0.5, random.uniform() - 0.5).scale(40.0 * peak)
-                }
+                _ => Complex::new(random.uniform() - 0.5, random.uniform() - 0.5).scale(40.0 * peak),
             };
-            assert_eq!(
-                table.nearest(z),
-                table.nearest_exhaustive(z),
-                "{name}: at {z:?}"
-            );
+            assert_eq!(table.nearest(z), table.nearest_exhaustive(z), "{name}: at {z:?}");
             checked += 1;
         }
         eprintln!(
@@ -623,15 +534,8 @@ fn the_defaults_are_v34s_receiver() {
     let options = Options::default();
     assert_eq!(options, Options::v34());
     assert!(!options.resync_margin && !options.resync_gain && !options.resync_derotate);
-    assert!(
-        !options.agc && !options.relative_gate && !options.rewind_safely && !options.extrapolate
-    );
-    assert!(
-        !options.discriminator
-            && !options.unweighted_phase
-            && !options.level_gate
-            && !options.anchor
-    );
+    assert!(!options.agc && !options.relative_gate && !options.rewind_safely && !options.extrapolate);
+    assert!(!options.discriminator && !options.unweighted_phase && !options.level_gate && !options.anchor);
     assert!(options.turn_limit_hz.is_infinite());
     assert_eq!(band().cutoff, 1620.0);
 }
@@ -643,10 +547,7 @@ fn a_clean_line_trains_and_tracks_above_50_db() {
         let (listener, sent) = call(Options::fixed(), &table, far, f64::INFINITY, 3000, 11);
         let trained = listener.trained_db();
         let tracked = tracked_db(&listener, &sent, far, 1000);
-        eprintln!(
-            "clean, {name:>3} points: trained {trained:.1} dB, tracked {tracked:.1} dB, via {:?}",
-            listener.trained.map(|t| t.1)
-        );
+        eprintln!("clean, {name:>3} points: trained {trained:.1} dB, tracked {tracked:.1} dB, via {:?}", listener.trained.map(|t| t.1));
         assert!(trained >= 50.0, "{name}: trained to {trained:.1} dB");
         assert!(tracked >= 50.0, "{name}: tracked at {tracked:.1} dB");
     }
@@ -661,10 +562,7 @@ fn thirty_db_trains_to_28_5_and_tracks_within_a_decibel() {
         let tracked = tracked_db(&listener, &sent, far, 500);
         eprintln!("30 dB, {name:>3} points: trained {trained:.2} dB, tracked {tracked:.2} dB");
         assert!(trained >= 28.5, "{name}: trained to {trained:.2} dB");
-        assert!(
-            (tracked - 30.0).abs() <= 1.0,
-            "{name}: tracked at {tracked:.2} dB"
-        );
+        assert!((tracked - 30.0).abs() <= 1.0, "{name}: tracked at {tracked:.2} dB");
     }
 }
 
@@ -672,32 +570,18 @@ fn thirty_db_trains_to_28_5_and_tracks_within_a_decibel() {
 fn three_and_seven_hertz_either_way_at_35_db() {
     for (name, table) in tables() {
         for offset in [-7.0, -3.0, 3.0, 7.0] {
-            let far = Far {
-                offset_hz: offset,
-                ..Far::default()
-            };
+            let far = Far { offset_hz: offset, ..Far::default() };
             let (listener, sent) = call(Options::fixed(), &table, far, 35.0, 2500, 13);
             let trained = listener.trained_db();
             let tracked = tracked_db(&listener, &sent, far, 500);
-            let heard = listener
-                .reversal
-                .map_or(f64::NAN, |(_, turn, _)| turn * BAUD / TAU);
+            let heard = listener.reversal.map_or(f64::NAN, |(_, turn, _)| turn * BAUD / TAU);
             eprintln!(
                 "{offset:+} Hz, {name:>3} points: S read {heard:+.3} Hz, trained {trained:.1} dB, tracked {tracked:.1} dB, loop at {:+.3} Hz",
                 listener.core.offset_hz()
             );
-            assert!(
-                (heard - offset).abs() <= 0.1,
-                "{name} {offset} Hz: S read {heard} Hz"
-            );
-            assert!(
-                trained >= 33.0,
-                "{name} {offset} Hz: trained to {trained:.1} dB"
-            );
-            assert!(
-                tracked >= 33.0,
-                "{name} {offset} Hz: tracked at {tracked:.1} dB"
-            );
+            assert!((heard - offset).abs() <= 0.1, "{name} {offset} Hz: S read {heard} Hz");
+            assert!(trained >= 33.0, "{name} {offset} Hz: trained to {trained:.1} dB");
+            assert!(tracked >= 33.0, "{name} {offset} Hz: tracked at {tracked:.1} dB");
         }
     }
 }
@@ -706,10 +590,7 @@ fn three_and_seven_hertz_either_way_at_35_db() {
 fn two_hundred_and_a_thousand_ppm_either_way() {
     for (name, table) in tables() {
         for ppm in [-1000.0, -200.0, 200.0, 1000.0] {
-            let far = Far {
-                clock: 1.0 + ppm * 1e-6,
-                ..Far::default()
-            };
+            let far = Far { clock: 1.0 + ppm * 1e-6, ..Far::default() };
             let (listener, sent) = call(Options::fixed(), &table, far, 35.0, 6000, 14);
             let trained = listener.trained_db();
             let tracked = tracked_db(&listener, &sent, far, 3000);
@@ -720,20 +601,11 @@ fn two_hundred_and_a_thousand_ppm_either_way() {
                 listener.trained.map(|t| t.1),
                 listener.core.slips()
             );
-            assert!(
-                trained >= 33.0,
-                "{name} {ppm} ppm: trained to {trained:.1} dB"
-            );
-            assert!(
-                tracked >= 33.0,
-                "{name} {ppm} ppm: tracked at {tracked:.1} dB"
-            );
+            assert!(trained >= 33.0, "{name} {ppm} ppm: trained to {trained:.1} dB");
+            assert!(tracked >= 33.0, "{name} {ppm} ppm: tracked at {tracked:.1} dB");
             // A far clock fast by `ppm` makes our half symbols that much
             // shorter.
-            assert!(
-                (drift + ppm).abs() <= 0.03 * ppm.abs(),
-                "{name} {ppm} ppm: drift read {drift:.1} ppm"
-            );
+            assert!((drift + ppm).abs() <= 0.03 * ppm.abs(), "{name} {ppm} ppm: drift read {drift:.1} ppm");
         }
     }
 }
@@ -743,15 +615,7 @@ fn two_hundred_and_a_thousand_ppm_either_way() {
 /// until 48 in a row are clean again, counted from where the line is whole
 /// again -- for an insertion, the end of what was made up.
 fn every_slip(name: &str, table: &Constellation, inserted: bool) {
-    let p = prefix(
-        Options::fixed(),
-        table,
-        Far::default(),
-        35.0,
-        3000,
-        1000,
-        31,
-    );
+    let p = prefix(Options::fixed(), table, Far::default(), 35.0, 3000, 1000, 31);
     let before = p.before_db(500);
     let good = table.d2min() / 16.0;
     let (mut worst, mut resynced, mut failed) = ((0, 0), 0, Vec::new());
@@ -768,8 +632,7 @@ fn every_slip(name: &str, table: &Constellation, inserted: bool) {
         listener.feed_all(&tail);
         let whole = p.at + if inserted { n } else { 0 };
         let back = recovery(&listener.records, whole, good, 48);
-        let after =
-            listener.snr_between(listener.fed - sample_of(200, Far::default()), listener.fed);
+        let after = listener.snr_between(listener.fed - sample_of(200, Far::default()), listener.fed);
         resynced += usize::from(listener.core.slips() > slips);
         match back {
             Some(symbols) if symbols <= 150 && after >= before - 2.0 => {
@@ -787,10 +650,7 @@ fn every_slip(name: &str, table: &Constellation, inserted: bool) {
         worst.0,
         worst.1
     );
-    assert!(
-        failed.is_empty(),
-        "{name} points, {kind}: not back within 150 symbols at (length, symbols, dB after) {failed:?}"
-    );
+    assert!(failed.is_empty(), "{name} points, {kind}: not back within 150 symbols at (length, symbols, dB after) {failed:?}");
 }
 
 #[test]
@@ -816,15 +676,10 @@ fn every_drop_on_the_128_point_cross_is_recovered() {
 /// The line from where a prefix ends to sample `to`, its symbol clock jumped
 /// by `jump` symbols from there and its carrier not.
 fn jumped(p: &Prefix, jump: f64, to: usize) -> Vec<f64> {
-    let far = Far {
-        jump: Some((p.at, jump)),
-        ..p.far
-    };
+    let far = Far { jump: Some((p.at, jump)), ..p.far };
     let mut random = Random::new(0x1eaf);
     let sigma = noise_sigma(35.0);
-    (p.at..to)
-        .map(|n| line_sample(&p.sent.symbols, far, n) + sigma * random.gaussian())
-        .collect()
+    (p.at..to).map(|n| line_sample(&p.sent.symbols, far, n) + sigma * random.gaussian()).collect()
 }
 
 #[test]
@@ -832,15 +687,7 @@ fn a_timing_jump_of_a_quarter_to_a_third_of_a_symbol_is_recovered() {
     // The band V.34's plain resync could never reach on sixteen points
     // (core.md E3e, E3f), and the constellations either side of it.
     for (name, table) in [("4", four()), ("16", sixteen()), ("128", cross128())] {
-        let p = prefix(
-            Options::fixed(),
-            &table,
-            Far::default(),
-            35.0,
-            3000,
-            1000,
-            32,
-        );
+        let p = prefix(Options::fixed(), &table, Far::default(), 35.0, 3000, 1000, 32);
         let good = table.d2min() / 16.0;
         let mut line = String::new();
         for step in 0..=4 {
@@ -849,10 +696,7 @@ fn a_timing_jump_of_a_quarter_to_a_third_of_a_symbol_is_recovered() {
             listener.feed_all(&jumped(&p, jump, p.at + 2400));
             let back = recovery(&listener.records, p.at, good, 48);
             line += &format!(" +{jump:.3}: {back:?}");
-            assert!(
-                back.is_some_and(|b| b <= 150),
-                "{name} points, +{jump} symbol: back after {back:?} symbols"
-            );
+            assert!(back.is_some_and(|b| b <= 150), "{name} points, +{jump} symbol: back after {back:?} symbols");
         }
         eprintln!("{name:>3} points, symbols until clean after a jump of:{line}");
     }
@@ -866,11 +710,7 @@ fn stepped(p: &Prefix, step_db: f64, ramp: f64, seconds: f64) -> Vec<f64> {
     let end = (p.at + (seconds * FS) as usize).min(p.samples.len());
     (p.at..end)
         .map(|n| {
-            let done = if length == 0 {
-                1.0
-            } else {
-                ((n - p.at) as f64 / length as f64).min(1.0)
-            };
+            let done = if length == 0 { 1.0 } else { ((n - p.at) as f64 / length as f64).min(1.0) };
             p.samples[n] * 10f64.powf(step_db * done / 20.0)
         })
         .collect()
@@ -879,15 +719,7 @@ fn stepped(p: &Prefix, step_db: f64, ramp: f64, seconds: f64) -> Vec<f64> {
 #[test]
 fn gain_steps_and_ramps_are_followed_without_a_false_lock() {
     for (name, table) in [("16", sixteen()), ("128", cross128())] {
-        let p = prefix(
-            Options::fixed(),
-            &table,
-            Far::default(),
-            35.0,
-            6000,
-            1000,
-            33,
-        );
+        let p = prefix(Options::fixed(), &table, Far::default(), 35.0, 6000, 1000, 33);
         let before = p.before_db(500);
         let good = table.d2min() / 16.0;
         for step_db in [-6.0, -3.0, 3.0, 6.0] {
@@ -905,14 +737,8 @@ fn gain_steps_and_ramps_are_followed_without_a_false_lock() {
                     seconds.map_or("never".into(), |s| format!("{s:.3} s")),
                     listener.core.slips() - slips
                 );
-                assert!(
-                    seconds.is_some_and(|s| s <= 0.5),
-                    "{name} points, {step_db} dB over {ramp} s: back after {seconds:?} s"
-                );
-                assert!(
-                    after >= before - 1.0,
-                    "{name} points, {step_db} dB over {ramp} s: {after:.1} dB after, {before:.1} before"
-                );
+                assert!(seconds.is_some_and(|s| s <= 0.5), "{name} points, {step_db} dB over {ramp} s: back after {seconds:?} s");
+                assert!(after >= before - 1.0, "{name} points, {step_db} dB over {ramp} s: {after:.1} dB after, {before:.1} before");
             }
             eprintln!("{name:>3} points, {step_db:+} dB ({before:.1} dB before):{line}");
         }
@@ -951,26 +777,10 @@ fn only_s_is_taken_for_s_and_s_bar_is_placed_to_a_half_symbol() {
     // (V.32 5.4.1, 5.4.2), and a broadband signal like the optional echo
     // canceller training (5.4 Note 3): random sixteen-point symbols.
     let aa: Vec<Complex> = [quiet(100), vec![a; 600], vec![c; 300], quiet(100)].concat();
-    let ac: Vec<Complex> = [
-        quiet(100),
-        (0..600).map(|n| if n % 2 == 0 { a } else { c }).collect(),
-        (0..300).map(|n| if n % 2 == 0 { c } else { a }).collect(),
-        quiet(100),
-    ]
-    .concat();
-    let broadband: Vec<Complex> = [
-        quiet(100),
-        (0..2400)
-            .map(|_| sixteen.points()[random.below(16)])
-            .collect(),
-        quiet(100),
-    ]
-    .concat();
-    for (name, symbols) in [
-        ("AA then CC", &aa),
-        ("AC then CA", &ac),
-        ("a broadband sequence", &broadband),
-    ] {
+    let ac: Vec<Complex> =
+        [quiet(100), (0..600).map(|n| if n % 2 == 0 { a } else { c }).collect(), (0..300).map(|n| if n % 2 == 0 { c } else { a }).collect(), quiet(100)].concat();
+    let broadband: Vec<Complex> = [quiet(100), (0..2400).map(|_| sixteen.points()[random.below(16)]).collect(), quiet(100)].concat();
+    for (name, symbols) in [("AA then CC", &aa), ("AC then CA", &ac), ("a broadband sequence", &broadband)] {
         let mut samples = modulate(symbols, Far::default());
         add_noise(&mut samples, 30.0, 42);
         let (s, reversals) = hunted(Options::fixed(), &samples);
@@ -990,10 +800,7 @@ fn only_s_is_taken_for_s_and_s_bar_is_placed_to_a_half_symbol() {
     for edges_db in [2.0, 3.0, 7.0] {
         let g = 10f64.powf(-(edges_db - 3.0) / 20.0);
         let line = |k: usize, point: Complex| {
-            let (dc, edge) = (
-                point * Complex::new(0.5, 0.5),
-                point * Complex::new(0.5, -0.5),
-            );
+            let (dc, edge) = (point * Complex::new(0.5, 0.5), point * Complex::new(0.5, -0.5));
             dc + edge.scale(if k.is_multiple_of(2) { g } else { -g })
         };
         let data = random_data(&four(), 400, 43);
@@ -1004,36 +811,22 @@ fn only_s_is_taken_for_s_and_s_bar_is_placed_to_a_half_symbol() {
         }
         for delay in [0.0, 1.3, 2.6, 3.9, 5.2] {
             for offset in [-7.0, 0.0, 7.0] {
-                let far = Far {
-                    delay,
-                    offset_hz: offset,
-                    ..Far::default()
-                };
+                let far = Far { delay, offset_hz: offset, ..Far::default() };
                 let mut samples = modulate(&sent.symbols, far);
                 add_noise(&mut samples, 20.0, 44 + delay as u64);
                 let (_, reversals) = hunted(Options::fixed(), &samples);
                 // S-bar begins half a symbol before its first symbol's centre.
                 let expected = half_of_symbol(sent.s_bar, far) - 1.0;
-                assert_eq!(
-                    reversals.len(),
-                    1,
-                    "edges {edges_db} dB, delay {delay}, {offset} Hz: {reversals:?}"
-                );
+                assert_eq!(reversals.len(), 1, "edges {edges_db} dB, delay {delay}, {offset} Hz: {reversals:?}");
                 let off = reversals[0].0 as f64 - expected;
                 worst = worst.max(off.abs());
                 cases += 1;
-                assert!(
-                    off.abs() <= 1.0,
-                    "edges {edges_db} dB, delay {delay}, {offset} Hz: S-bar at {} against {expected:.2}",
-                    reversals[0].0
-                );
+                assert!(off.abs() <= 1.0, "edges {edges_db} dB, delay {delay}, {offset} Hz: S-bar at {} against {expected:.2}", reversals[0].0);
             }
         }
     }
     let _ = (b, d);
-    eprintln!(
-        "S with its edges 2, 3 and 7 dB down, 5 arrival phases, 0 and 7 Hz either way, at 20 dB: {cases} found, S-bar at most {worst:.2} half symbols out"
-    );
+    eprintln!("S with its edges 2, 3 and 7 dB down, 5 arrival phases, 0 and 7 Hz either way, at 20 dB: {cases} found, S-bar at most {worst:.2} half symbols out");
 }
 
 #[test]
@@ -1043,11 +836,7 @@ fn a_silent_far_end_after_training_starts_no_storm_of_resyncs() {
         for (label, options) in [("fixed", Options::fixed()), ("V.34", Options::v34())] {
             let p = prefix(options, &table, Far::default(), 35.0, 8000, 1000, 51);
             let mut listener = p.listener.clone();
-            let (slips, resyncs, gain) = (
-                listener.core.slips(),
-                listener.core.resyncs(),
-                listener.core.gain_db(),
-            );
+            let (slips, resyncs, gain) = (listener.core.slips(), listener.core.resyncs(), listener.core.gain_db());
             // Two seconds of the line with nothing but its noise on it.
             let mut quiet = vec![0.0; 2 * FS as usize];
             add_noise(&mut quiet, 35.0, 52);
@@ -1065,14 +854,8 @@ fn a_silent_far_end_after_training_starts_no_storm_of_resyncs() {
             if label == "fixed" {
                 assert!(lost, "{name}: silence not seen");
                 assert_eq!((tried, slipped), (0, 0), "{name}: resyncs on silence");
-                assert!(
-                    moved.abs() < 0.1,
-                    "{name}: the gain wound {moved} dB on silence"
-                );
-                assert!(
-                    back.is_some_and(|b| b <= 200),
-                    "{name}: not found again, {back:?}"
-                );
+                assert!(moved.abs() < 0.1, "{name}: the gain wound {moved} dB on silence");
+                assert!(back.is_some_and(|b| b <= 200), "{name}: not found again, {back:?}");
             }
         }
         eprintln!("{name:>3} points: {}", results.join("; "));
@@ -1081,16 +864,11 @@ fn a_silent_far_end_after_training_starts_no_storm_of_resyncs() {
 
 #[test]
 fn blind_starts_find_four_points_at_eight_arrival_phases_and_sixteen_and_the_32_cross() {
-    let mut cases: Vec<(String, Constellation, f64)> = (0..8)
-        .map(|k| (format!("4 points, phase {k}"), four(), f64::from(k)))
-        .collect();
+    let mut cases: Vec<(String, Constellation, f64)> = (0..8).map(|k| (format!("4 points, phase {k}"), four(), f64::from(k))).collect();
     cases.push(("16 points".into(), sixteen(), 0.0));
     cases.push(("32-point cross".into(), cross32(), 0.0));
     for (name, table, delay) in cases {
-        let far = Far {
-            delay,
-            ..Far::default()
-        };
+        let far = Far { delay, ..Far::default() };
         let lead = 100;
         let data = random_data(&table, 2400, 61);
         let symbols = [vec![Complex::ZERO; lead], data].concat();
@@ -1104,11 +882,7 @@ fn blind_starts_find_four_points_at_eight_arrival_phases_and_sixteen_and_the_32_
         for (n, &x) in samples.iter().enumerate() {
             core.feed(x);
             while let Some(heard) = core.heard() {
-                if let Heard::Trained {
-                    snr_db,
-                    via: Via::Blind,
-                } = heard
-                {
+                if let Heard::Trained { snr_db, via: Via::Blind } = heard {
                     found = Some((n, snr_db));
                 }
             }
@@ -1119,21 +893,10 @@ fn blind_starts_find_four_points_at_eight_arrival_phases_and_sixteen_and_the_32_
         }
         let (at, snr) = found.unwrap_or_else(|| panic!("{name}: never found"));
         let symbols_in = (at as f64 - sample_of(lead, far) as f64) / (FS / BAUD);
-        let late: Vec<f64> = errors
-            .iter()
-            .filter(|(n, _)| *n > samples.len() - sample_of(1040, far))
-            .map(|e| e.1)
-            .collect();
-        let tracked = -10.0
-            * (late[..late.len() - 40].iter().sum::<f64>() / (late.len() - 40) as f64).log10();
-        eprintln!(
-            "blind, {name}: found {symbols_in:.0} symbols in at {snr:.1} dB, tracked {tracked:.1} dB, stage {:?}",
-            core.stage()
-        );
-        assert!(
-            symbols_in <= 200.0,
-            "{name}: found {symbols_in:.0} symbols in"
-        );
+        let late: Vec<f64> = errors.iter().filter(|(n, _)| *n > samples.len() - sample_of(1040, far)).map(|e| e.1).collect();
+        let tracked = -10.0 * (late[..late.len() - 40].iter().sum::<f64>() / (late.len() - 40) as f64).log10();
+        eprintln!("blind, {name}: found {symbols_in:.0} symbols in at {snr:.1} dB, tracked {tracked:.1} dB, stage {:?}", core.stage());
+        assert!(symbols_in <= 200.0, "{name}: found {symbols_in:.0} symbols in");
         assert!(tracked >= 28.5, "{name}: tracked at {tracked:.1} dB");
         assert_eq!(core.stage(), Stage::Tracking);
     }
@@ -1145,10 +908,7 @@ fn ten_minutes_at_200_ppm_hold_the_signal_to_noise_and_the_taps_centred() {
     // equaliser's weight to its middle but the anchor (core.md N6). The
     // 128-point cross at 30 dB, the far clock 200 ppm fast.
     let table = cross128();
-    let far = Far {
-        clock: 1.0 + 200e-6,
-        ..Far::default()
-    };
+    let far = Far { clock: 1.0 + 200e-6, ..Far::default() };
     let minutes = 10.0;
     let data = random_data(&table, (minutes * 60.0 * BAUD) as usize, 71);
     let sent = startup(&data, 71);
@@ -1163,8 +923,7 @@ fn ten_minutes_at_200_ppm_hold_the_signal_to_noise_and_the_taps_centred() {
     }
     let mut core = listener.core;
     let block = (10.0 * FS) as usize;
-    let (mut sum, mut count, mut blocks, mut centroids) =
-        (0.0, 0usize, Vec::new(), (f64::MAX, f64::MIN));
+    let (mut sum, mut count, mut blocks, mut centroids) = (0.0, 0usize, Vec::new(), (f64::MAX, f64::MIN));
     let mut start = n;
     while n < length {
         core.feed(line_sample(&sent.symbols, far, n) + sigma * random.gaussian());
@@ -1182,9 +941,7 @@ fn ten_minutes_at_200_ppm_hold_the_signal_to_noise_and_the_taps_centred() {
         }
     }
     let first = blocks[0];
-    let (low, high) = blocks
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(l, h), &b| (l.min(b), h.max(b)));
+    let (low, high) = blocks.iter().fold((f64::MAX, f64::MIN), |(l, h), &b| (l.min(b), h.max(b)));
     eprintln!(
         "{minutes} minutes at 200 ppm, 128 points, 30 dB: {} blocks of 10 s from {low:.2} to {high:.2} dB (first {first:.2}); taps' centroid {:+.2} to {:+.2} half symbols; drift read {:+.1} ppm; {} slips, {} resyncs",
         blocks.len(),
@@ -1194,16 +951,8 @@ fn ten_minutes_at_200_ppm_hold_the_signal_to_noise_and_the_taps_centred() {
         core.slips(),
         core.resyncs()
     );
-    assert!(
-        blocks.iter().all(|b| (b - first).abs() <= 0.5),
-        "signal to noise by 10 s: {blocks:.2?}"
-    );
-    assert!(
-        centroids.0 >= -2.0 && centroids.1 <= 2.0,
-        "taps' centroid from {} to {}",
-        centroids.0,
-        centroids.1
-    );
+    assert!(blocks.iter().all(|b| (b - first).abs() <= 0.5), "signal to noise by 10 s: {blocks:.2?}");
+    assert!(centroids.0 >= -2.0 && centroids.1 <= 2.0, "taps' centroid from {} to {}", centroids.0, centroids.1);
 }
 
 #[test]
@@ -1211,14 +960,7 @@ fn an_s_that_ends_without_s_bar_says_where_it_ended() {
     // For a driver to train anyway where S ended, as design.md 3.2 has a
     // hunt that lapses do: a slip across the join can hide S-bar.
     let [a, b, _, _] = states();
-    let symbols = [
-        vec![Complex::ZERO; 100],
-        (0..S_LENGTH)
-            .map(|n| if n % 2 == 0 { a } else { b })
-            .collect(),
-        vec![Complex::ZERO; 600],
-    ]
-    .concat();
+    let symbols = [vec![Complex::ZERO; 100], (0..S_LENGTH).map(|n| if n % 2 == 0 { a } else { b }).collect(), vec![Complex::ZERO; 600]].concat();
     let far = Far::default();
     let mut samples = modulate(&symbols, far);
     add_noise(&mut samples, 25.0, 92);
@@ -1237,16 +979,10 @@ fn an_s_that_ends_without_s_bar_says_where_it_ended() {
         }
     }
     let end = half_of_symbol(100 + S_LENGTH, far) - 1.0;
-    eprintln!(
-        "S heard {s} times, lapsed at {lapsed:?} against S's end at {end:.1}, {reversed} reversals"
-    );
+    eprintln!("S heard {s} times, lapsed at {lapsed:?} against S's end at {end:.1}, {reversed} reversals");
     assert_eq!((s, reversed), (1, 0));
     assert_eq!(lapsed.len(), 1);
-    assert!(
-        (lapsed[0] as f64 - end).abs() <= 4.0,
-        "lapsed at {} against {end:.1}",
-        lapsed[0]
-    );
+    assert!((lapsed[0] as f64 - end).abs() <= 4.0, "lapsed at {} against {end:.1}", lapsed[0]);
 }
 
 #[test]
@@ -1255,15 +991,7 @@ fn a_training_that_fits_nothing_falls_back_on_the_taps_it_had() {
     // line the first one trained on: the old taps, a resync search on the
     // newest symbols, and tracking again (design.md 3.2).
     for (name, table) in [("16", sixteen()), ("128", cross128())] {
-        let p = prefix(
-            Options::fixed(),
-            &table,
-            Far::default(),
-            30.0,
-            8000,
-            1000,
-            93,
-        );
+        let p = prefix(Options::fixed(), &table, Far::default(), 30.0, 8000, 1000, 93);
         let mut listener = p.listener.clone();
         let mut wrong = listener.training(p.at as u64 / 3, 0.0, 0.0);
         let mut random = Random::new(94);
@@ -1277,15 +1005,8 @@ fn a_training_that_fits_nothing_falls_back_on_the_taps_it_had() {
         let fed = listener.fed;
         listener.feed_all(&p.samples[p.at..p.at + 3 * FS as usize / 2]);
         let back = recovery(&listener.records, fed, table.d2min() / 16.0, 48);
-        eprintln!(
-            "{name:>3} points: a training on the wrong sequence came to {:?}; then clean {back:?} symbols after",
-            listener.trained
-        );
-        assert!(
-            matches!(listener.trained, Some((_, Via::Fallback))),
-            "{name}: {:?}",
-            listener.trained
-        );
+        eprintln!("{name:>3} points: a training on the wrong sequence came to {:?}; then clean {back:?} symbols after", listener.trained);
+        assert!(matches!(listener.trained, Some((_, Via::Fallback))), "{name}: {:?}", listener.trained);
         assert!(back.is_some(), "{name}: not tracking after the fallback");
     }
 }
@@ -1307,13 +1028,7 @@ fn the_v34_defaults_keep_v34s_measured_defects() {
         listener.from_s = false;
         let at = sample_of(sent.data + 1000, far);
         listener.feed_all(&samples[..at]);
-        let p = Prefix {
-            listener,
-            samples,
-            at,
-            sent,
-            far,
-        };
+        let p = Prefix { listener, samples, at, sent, far };
         // A timing jump of 0.3 symbol, in the look-ahead hole.
         let mut jumped_listener = p.listener.clone();
         jumped_listener.feed_all(&jumped(&p, 0.3, p.at + 8000));
@@ -1322,17 +1037,13 @@ fn the_v34_defaults_keep_v34s_measured_defects() {
         let mut stepped_listener = p.listener.clone();
         stepped_listener.feed_all(&stepped(&p, 3.0, 0.0, 0.5));
         let after_step = recovery(&stepped_listener.records, p.at, good, 48);
-        eprintln!(
-            "{label}: back {after_jump:?} symbols after a 0.3-symbol timing jump, {after_step:?} after a 3 dB step (of 1200)"
-        );
+        eprintln!("{label}: back {after_jump:?} symbols after a 0.3-symbol timing jump, {after_step:?} after a 3 dB step (of 1200)");
         if label == "V.34" {
-            assert!(
-                after_jump.is_none(),
-                "V.34's defaults found the jump the look-ahead hole hides"
-            );
+            assert!(after_jump.is_none(), "V.34's defaults found the jump the look-ahead hole hides");
             assert!(after_step.is_none(), "V.34's defaults followed a 3 dB step");
         } else {
             assert!(after_jump.is_some_and(|b| b <= 150) && after_step.is_some_and(|b| b <= 150));
         }
     }
 }
+

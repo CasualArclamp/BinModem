@@ -33,10 +33,7 @@ const FLAG: u8 = 0x7e;
 /// 0xff, 0x03 and 0xc021. RFC 1662 7.1 has the default map escape every
 /// control character, so the 0x03 normally arrives as 0x7d 0x23 -- but not
 /// every sender escapes before it has been asked to, and both are accepted.
-const LCP_OPENINGS: [&[u8]; 2] = [
-    &[FLAG, 0xff, 0x7d, 0x23, 0xc0, 0x21],
-    &[FLAG, 0xff, 0x03, 0xc0, 0x21],
-];
+const LCP_OPENINGS: [&[u8]; 2] = [&[FLAG, 0xff, 0x7d, 0x23, 0xc0, 0x21], &[FLAG, 0xff, 0x03, 0xc0, 0x21]];
 
 /// What a [`PppWatch`] made of some octets.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -81,10 +78,7 @@ impl PppWatch {
             if LCP_OPENINGS.contains(&self.held.as_slice()) {
                 let mut early = std::mem::take(&mut self.held);
                 early.extend_from_slice(&bytes[i + 1..]);
-                return Watched {
-                    text,
-                    ppp: Some(early),
-                };
+                return Watched { text, ppp: Some(early) };
             }
             if !LCP_OPENINGS.iter().any(|o| o.starts_with(&self.held)) {
                 text.append(&mut self.held);
@@ -111,20 +105,14 @@ mod tests {
             let mut typed = b"guest\r".to_vec();
             typed.extend_from_slice(&PPPD[..split]);
             let first = watch.feed(&typed);
-            assert_eq!(
-                first.text, b"guest\r",
-                "split {split}: part of the frame was let through as text"
-            );
+            assert_eq!(first.text, b"guest\r", "split {split}: part of the frame was let through as text");
             let early = match first.ppp {
                 // Recognised already: what arrives after it is the link's.
                 Some(mut early) => {
                     early.extend_from_slice(&PPPD[split..]);
                     early
                 }
-                None => watch
-                    .feed(&PPPD[split..])
-                    .ppp
-                    .unwrap_or_else(|| panic!("missed at split {split}")),
+                None => watch.feed(&PPPD[split..]).ppp.unwrap_or_else(|| panic!("missed at split {split}")),
             };
             assert_eq!(early, PPPD, "split {split}");
         }
@@ -134,22 +122,11 @@ mod tests {
     fn a_tilde_in_ordinary_typing_is_not_ppp() {
         let mut watch = PppWatch::default();
         let typing = b"cd ~/mail\r~~~ password~!\r";
-        assert_eq!(
-            watch.feed(typing),
-            Watched {
-                text: typing.to_vec(),
-                ppp: None
-            }
-        );
+        assert_eq!(watch.feed(typing), Watched { text: typing.to_vec(), ppp: None });
         // A tilde last is held for one octet, and then let go.
         assert_eq!(watch.feed(b"abc~").text, b"abc");
         assert_eq!(watch.feed(b"\r").text, b"~\r");
         // And an unescaped opening is taken too.
-        assert!(
-            watch
-                .feed(&[0x7e, 0xff, 0x03, 0xc0, 0x21, 0x01])
-                .ppp
-                .is_some()
-        );
+        assert!(watch.feed(&[0x7e, 0xff, 0x03, 0xc0, 0x21, 0x01]).ppp.is_some());
     }
 }

@@ -45,7 +45,8 @@ pub fn rrc_at(t: f64, beta: f64) -> f64 {
             return beta / 2f64.sqrt() * (a + b);
         }
     }
-    let num = (PI * t * (1.0 - beta)).sin() + 4.0 * beta * t * (PI * t * (1.0 + beta)).cos();
+    let num = (PI * t * (1.0 - beta)).sin()
+        + 4.0 * beta * t * (PI * t * (1.0 + beta)).cos();
     let den = PI * t * (1.0 - (4.0 * beta * t).powi(2));
     num / den
 }
@@ -126,10 +127,7 @@ pub fn fir_lowpass_kaiser(pass: f64, stop: f64, stopband_db: f64, fs: f64) -> Ve
     } else {
         0.5842 * (a - 21.0).powf(0.4) + 0.07886 * (a - 21.0)
     };
-    let n = ((a - 8.0) / (2.285 * (2.0 * PI * transition)))
-        .ceil()
-        .max(3.0) as usize
-        | 1;
+    let n = ((a - 8.0) / (2.285 * (2.0 * PI * transition))).ceil().max(3.0) as usize | 1;
 
     // Halfway between the two edges, which is where a windowed sinc sits 6 dB
     // down: the passband edge and the stopband edge come out either side of it.
@@ -167,11 +165,7 @@ pub struct Fir {
 impl Fir {
     pub fn new(taps: Vec<f64>) -> Self {
         let n = taps.len();
-        Self {
-            taps,
-            history: vec![0.0; n],
-            pos: 0,
-        }
+        Self { taps, history: vec![0.0; n], pos: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -217,10 +211,7 @@ pub struct ComplexFir {
 
 impl ComplexFir {
     pub fn new(taps: Vec<f64>) -> Self {
-        Self {
-            re: Fir::new(taps.clone()),
-            im: Fir::new(taps),
-        }
+        Self { re: Fir::new(taps.clone()), im: Fir::new(taps) }
     }
 
     #[inline]
@@ -423,10 +414,7 @@ mod tests {
         let fs = 16_000.0;
         let wide = fir_lowpass_kaiser(500.0, 1500.0, 80.0, fs);
         let narrow = fir_lowpass_kaiser(500.0, 600.0, 80.0, fs);
-        assert!(
-            narrow.len() > wide.len() * 4,
-            "a tenth the transition cost too little"
-        );
+        assert!(narrow.len() > wide.len() * 4, "a tenth the transition cost too little");
     }
 
     #[test]
@@ -532,13 +520,7 @@ mod tests {
         // A repeating but not trivially periodic pattern, so the loop sees
         // transitions to work from without the sequence helping it.
         let symbols: Vec<f64> = (0..count + 16)
-            .map(|i: usize| {
-                if (i * 7 + i / 3).is_multiple_of(2) {
-                    1.0
-                } else {
-                    -1.0
-                }
-            })
+            .map(|i: usize| if (i * 7 + i / 3).is_multiple_of(2) { 1.0 } else { -1.0 })
             .collect();
         let at = |t: f64| -> f64 {
             symbols

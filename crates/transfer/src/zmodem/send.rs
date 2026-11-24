@@ -444,10 +444,7 @@ impl Sender {
             }
             // 8.2: "the sender sends a ZEOF header with the file ending offset
             // equal to the number of characters in the file".
-            self.say(
-                Header::position(Kind::Eof, self.data.len() as u32),
-                self.binary(),
-            );
+            self.say(Header::position(Kind::Eof, self.data.len() as u32), self.binary());
             self.state = State::Finishing;
         }
     }
@@ -459,11 +456,7 @@ impl Sender {
     /// 7.3.2: a 32-bit binary header only where the receiver said it can take
     /// one, "iff the receiver indicates the capability with the CANFC32 bit".
     fn binary(&self) -> Style {
-        if self.wide {
-            Style::Binary32
-        } else {
-            Style::Binary16
-        }
+        if self.wide { Style::Binary32 } else { Style::Binary16 }
     }
 
     fn say(&mut self, h: Header, style: Style) {

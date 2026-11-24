@@ -93,12 +93,10 @@ fn main() -> ExitCode {
 
     println!("\n  Hz     returned    relative");
     let mut results: Vec<(f64, f64)> = Vec::new();
-    for freq in [
-        300.0, 600.0, 1_000.0, 1_500.0, 1_800.0, 2_400.0, 3_000.0, 3_400.0,
-    ] {
+    for freq in [300.0, 600.0, 1_000.0, 1_500.0, 1_800.0, 2_400.0, 3_000.0, 3_400.0] {
         let level = measure(&audio, freq, seconds);
         results.push((freq, level));
-        println!("{freq:>6.0}  {level:>10.4}",);
+        println!("{freq:>6.0}  {level:>10.4}", );
     }
 
     let peak = results.iter().map(|r| r.1).fold(0.0f64, f64::max);

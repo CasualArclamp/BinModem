@@ -430,10 +430,7 @@ fn follows(ppm: f64, bar: f64) {
         worst <= bar,
         "at {ppm} ppm the residual echo reached {worst:.1} dB of the far end"
     );
-    assert_eq!(
-        run.jumps, 0,
-        "a clean line at {ppm} ppm was taken to have jumped"
-    );
+    assert_eq!(run.jumps, 0, "a clean line at {ppm} ppm was taken to have jumped");
     assert!(
         (run.ppm - ppm).abs() < 0.2 * ppm.abs().max(5.0),
         "at {ppm} ppm the drift was read as {:.1}",
@@ -534,10 +531,7 @@ fn a_retrain_on_a_drifting_cable_trains_as_if_it_did_not_drift() {
         median(&after),
         run.ppm
     );
-    assert!(
-        worst <= -28.0,
-        "after the retrain the echo reached {worst:.1} dB"
-    );
+    assert!(worst <= -28.0, "after the retrain the echo reached {worst:.1} dB");
     assert_eq!(run.jumps, 0);
 }
 
@@ -570,10 +564,7 @@ fn frozen_the_canceller_loses_a_drifting_echo() {
     let run = run(Layout::Cable, 20.0, 30.0, false, &[]);
     let seconds = run.seconds(3);
     let last = seconds[seconds.len() - 1];
-    println!(
-        "frozen at 20 ppm: {:.1} dB in the fourth second, {last:.1} dB at 30 s",
-        seconds[0]
-    );
+    println!("frozen at 20 ppm: {:.1} dB in the fourth second, {last:.1} dB at 30 s", seconds[0]);
     assert!(last > -10.0, "frozen, the echo was still {last:.1} dB down");
 }
 

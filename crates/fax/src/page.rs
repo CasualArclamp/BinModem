@@ -83,11 +83,7 @@ impl Page {
     pub fn coverage(&self) -> f64 {
         let ink: usize = self.lines.iter().flatten().filter(|p| **p).count();
         let total = self.lines.len() * WIDTH;
-        if total == 0 {
-            0.0
-        } else {
-            ink as f64 / total as f64
-        }
+        if total == 0 { 0.0 } else { ink as f64 / total as f64 }
     }
 
     /// The page as Modified Huffman bits (T.4 4.1).
@@ -161,11 +157,12 @@ impl Grey {
         }
         let paper_h_mm = height as f64 / lines_per_mm;
         // The source has square pixels, so its shape is its pixel counts.
-        let scale = (WIDTH_MM / self.width as f64).min(paper_h_mm / self.height as f64);
-        let drawn_w =
-            (((self.width as f64 * scale) * PELS_PER_MM).round() as usize).clamp(1, width);
-        let drawn_h =
-            (((self.height as f64 * scale) * lines_per_mm).round() as usize).clamp(1, height);
+        let scale = (WIDTH_MM / self.width as f64)
+            .min(paper_h_mm / self.height as f64);
+        let drawn_w = (((self.width as f64 * scale) * PELS_PER_MM).round() as usize)
+            .clamp(1, width);
+        let drawn_h = (((self.height as f64 * scale) * lines_per_mm).round() as usize)
+            .clamp(1, height);
         let left = (width - drawn_w) / 2;
         // Against the top rather than centred. A fax comes out of a machine
         // top first, and a page of text that starts a third of the way down
@@ -228,15 +225,10 @@ pub fn render(image: &Grey, resolution: Resolution, halftone: Halftone) -> Page 
         // The picture's height in scan lines when it is drawn the full width
         // of the paper: its aspect ratio times the width, in millimetres, at
         // this resolution's lines per millimetre.
-        let lines =
-            (image.height as f64 / image.width as f64) * WIDTH_MM * resolution.lines_per_mm();
+        let lines = (image.height as f64 / image.width as f64) * WIDTH_MM * resolution.lines_per_mm();
         (lines.round() as usize).clamp(1, max_lines)
     };
-    ink(
-        image.fit(WIDTH, height, resolution.lines_per_mm()),
-        resolution,
-        halftone,
-    )
+    ink(image.fit(WIDTH, height, resolution.lines_per_mm()), resolution, halftone)
 }
 
 /// Turn grey that is already on the paper into a page: `WIDTH` values across
@@ -287,11 +279,7 @@ mod tests {
     use super::*;
 
     fn solid(width: usize, height: usize, ink: f32) -> Grey {
-        Grey {
-            width,
-            height,
-            ink: vec![ink; width * height],
-        }
+        Grey { width, height, ink: vec![ink; width * height] }
     }
 
     #[test]
@@ -307,11 +295,7 @@ mod tests {
         }
         // A picture taller than the sheet is capped at it and scaled to fit,
         // as a real machine's page is.
-        let tall = render(
-            &solid(100, 400, 0.0),
-            Resolution::Standard,
-            Halftone::Threshold,
-        );
+        let tall = render(&solid(100, 400, 0.0), Resolution::Standard, Halftone::Threshold);
         assert_eq!(tall.height(), 1143);
         let fine = render(&solid(100, 400, 0.0), Resolution::Fine, Halftone::Threshold);
         assert_eq!(fine.height(), 2287);
@@ -319,24 +303,12 @@ mod tests {
 
     #[test]
     fn white_paper_stays_white_and_black_paper_stays_black() {
-        let white = render(
-            &solid(64, 64, 0.0),
-            Resolution::Standard,
-            Halftone::Threshold,
-        );
+        let white = render(&solid(64, 64, 0.0), Resolution::Standard, Halftone::Threshold);
         assert_eq!(white.coverage(), 0.0);
         // Black now fills its page: the page is the square's own shape, so the
         // ink reaches every edge with no white margin below it.
-        let black = render(
-            &solid(64, 64, 1.0),
-            Resolution::Standard,
-            Halftone::Threshold,
-        );
-        assert!(
-            black.coverage() > 0.99,
-            "a black square left the page part white: {}",
-            black.coverage()
-        );
+        let black = render(&solid(64, 64, 1.0), Resolution::Standard, Halftone::Threshold);
+        assert!(black.coverage() > 0.99, "a black square left the page part white: {}", black.coverage());
     }
 
     fn inked_lines(page: &Page) -> Vec<usize> {
@@ -354,7 +326,9 @@ mod tests {
         // 3.85 lines to the millimetre is 828 lines and not 1728. Fitting by
         // pel counts alone gives the second, and a picture squashed to half
         // its height.
-        for (resolution, want) in [(Resolution::Standard, 828.0), (Resolution::Fine, 1656.0)] {
+        for (resolution, want) in
+            [(Resolution::Standard, 828.0), (Resolution::Fine, 1656.0)]
+        {
             let page = render(&solid(200, 200, 1.0), resolution, Halftone::Threshold);
             let inked = inked_lines(&page);
             let tall = inked.len() as f64;
@@ -370,11 +344,7 @@ mod tests {
     #[test]
     fn a_tall_picture_is_limited_by_the_length_of_the_paper() {
         // Taller than A4's 215 by 297, so it is the height that runs out.
-        let page = render(
-            &solid(100, 400, 1.0),
-            Resolution::Standard,
-            Halftone::Threshold,
-        );
+        let page = render(&solid(100, 400, 1.0), Resolution::Standard, Halftone::Threshold);
         let inked = inked_lines(&page);
         assert_eq!(inked.len(), page.height(), "it should fill the paper");
         let across = page.lines[0].iter().filter(|p| **p).count();
@@ -411,11 +381,7 @@ mod tests {
     fn a_blank_page_codes_to_almost_nothing() {
         // An A4-shaped blank page, so it is the full sheet: a square one would
         // be shorter now, which the length test above covers.
-        let page = render(
-            &solid(215, 297, 0.0),
-            Resolution::Standard,
-            Halftone::Threshold,
-        );
+        let page = render(&solid(215, 297, 0.0), Resolution::Standard, Halftone::Threshold);
         assert_eq!(page.height(), 1143);
         let bits = page.encode();
         // Every line is EOL, 1728 white, 0 white: 29 bits, plus the RTC.

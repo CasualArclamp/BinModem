@@ -8,9 +8,9 @@
 
 use eframe::egui;
 use egui::{Color32, RichText};
-use fax::call::Exchanged;
 use fax::coding::Coding;
 use fax::page::{Grey, Halftone, Page, Resolution};
+use fax::call::Exchanged;
 use fax::t30::{self, Frame};
 use std::sync::Arc;
 
@@ -245,19 +245,11 @@ fn non_standard_rows(fif: &[u8]) -> Vec<(&'static str, String)> {
     vec![
         (
             "non-standard",
-            format!(
-                "{} octets, country code {:02x}",
-                fif.len(),
-                country.reverse_bits()
-            ),
+            format!("{} octets, country code {:02x}", fif.len(), country.reverse_bits()),
         ),
         (
             "  starting",
-            format!(
-                "{}{}",
-                start.join(" "),
-                if fif.len() > 8 { " ..." } else { "" }
-            ),
+            format!("{}{}", start.join(" "), if fif.len() > 8 { " ..." } else { "" }),
         ),
     ]
 }
@@ -265,9 +257,7 @@ fn non_standard_rows(fif: &[u8]) -> Vec<(&'static str, String)> {
 /// Screen pixels down for each line at `resolution`: as many as make the
 /// pels square, at least one -- two at standard, one at fine and above.
 fn pixels_per_line(resolution: Resolution) -> usize {
-    (fax::page::PELS_PER_MM / resolution.lines_per_mm())
-        .round()
-        .max(1.0) as usize
+    (fax::page::PELS_PER_MM / resolution.lines_per_mm()).round().max(1.0) as usize
 }
 
 /// How big to draw a picture `width` texels across and `rows` down, in
@@ -335,11 +325,7 @@ impl Zoom {
 
     /// Pels to a texel, and screen pixels to a texel, at `level`.
     fn factors(level: i32) -> (usize, usize) {
-        if level < 0 {
-            ((1 - level) as usize, 1)
-        } else {
-            (1, (level + 1) as usize)
-        }
+        if level < 0 { ((1 - level) as usize, 1) } else { (1, (level + 1) as usize) }
     }
 
     fn scale(level: i32) -> f32 {
@@ -367,11 +353,9 @@ impl Zoom {
                         .events
                         .iter()
                         .map(|e| match e {
-                            egui::Event::MouseWheel {
-                                unit: egui::MouseWheelUnit::Point,
-                                delta,
-                                ..
-                            } => delta.y / ZOOM_STEP,
+                            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => {
+                                delta.y / ZOOM_STEP
+                            }
                             egui::Event::MouseWheel { delta, .. } => delta.y,
                             _ => 0.0,
                         })
@@ -386,10 +370,7 @@ impl Zoom {
                     self.wheel += 1.0;
                 }
                 new = new.clamp(-6, 7);
-                if ui.input(|i| {
-                    i.pointer
-                        .button_double_clicked(egui::PointerButton::Primary)
-                }) {
+                if ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
                     self.level = None;
                     new = fit;
                 } else if new != old {
@@ -418,9 +399,7 @@ impl Zoom {
             if self.level.is_none() { " fit" } else { "" }
         );
         let font = egui::FontId::monospace(11.0);
-        let galley = ui
-            .painter()
-            .layout_no_wrap(text, font, Color32::from_gray(200));
+        let galley = ui.painter().layout_no_wrap(text, font, Color32::from_gray(200));
         let at = egui::pos2(inner.right() - galley.size().x - 18.0, inner.top() + 4.0);
         ui.painter().rect_filled(
             egui::Rect::from_min_size(at, galley.size()).expand(3.0),
@@ -540,13 +519,7 @@ impl Scan {
 
     /// The next row, from the lines under it.
     fn finish_row(&mut self) {
-        block_row(
-            &self.lines,
-            pixels_per_line(self.resolution),
-            self.scale,
-            self.rows,
-            &mut self.pixels,
-        );
+        block_row(&self.lines, pixels_per_line(self.resolution), self.scale, self.rows, &mut self.pixels);
         self.rows += 1;
     }
 
@@ -603,11 +576,7 @@ impl Scan {
 
 /// Write a page out as a picture, each line as many pixels tall as makes the
 /// pels square.
-fn write_page(
-    lines: &[Vec<bool>],
-    resolution: Resolution,
-    path: &std::path::Path,
-) -> Result<(), String> {
+fn write_page(lines: &[Vec<bool>], resolution: Resolution, path: &std::path::Path) -> Result<(), String> {
     let tall = (fax::page::PELS_PER_MM / resolution.lines_per_mm())
         .round()
         .max(1.0) as usize;
@@ -631,8 +600,7 @@ fn write_pdf(pages: &[fax::pdf::Sheet<'_>], path: &std::path::Path) -> Result<()
 
 /// Whether a name chosen to save to asks for a PDF.
 fn names_pdf(path: &std::path::Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
 /// Which page the big picture shows.
@@ -728,11 +696,7 @@ impl CallRecord {
     pub fn confirmed_pages(&self) -> usize {
         if self.frames.iter().any(|f| f.frame == Frame::Pps) {
             let last_good = self.last_response() == Some(Frame::Mcf);
-            return if last_good {
-                self.sheets
-            } else {
-                self.sheets.saturating_sub(1)
-            };
+            return if last_good { self.sheets } else { self.sheets.saturating_sub(1) };
         }
         let mut asked = false;
         let mut count = 0;
@@ -763,8 +727,8 @@ impl CallRecord {
         // Or a receiver that had confirmed the last page and was waiting for
         // the far end to hang up, which T.30 reaches only after the last:
         // a far end that puts the call down as it sends DCN cuts the DCN off.
-        let waiting_to_hang_up =
-            !self.sending && self.last_phase == Some(fax::call::Phase::AwaitingDisconnect.name());
+        let waiting_to_hang_up = !self.sending
+            && self.last_phase == Some(fax::call::Phase::AwaitingDisconnect.name());
         let last_page = waiting_to_hang_up
             || match last_post {
                 Some(Frame::Eop) => true,
@@ -793,11 +757,7 @@ impl CallRecord {
             }
             Some(Frame::Mcf) => Verdict::Failed {
                 phase,
-                why: format!(
-                    "{}, after page {} was confirmed",
-                    why(),
-                    self.confirmed_pages()
-                ),
+                why: format!("{}, after page {} was confirmed", why(), self.confirmed_pages()),
             },
             _ => Verdict::Failed { phase, why: why() },
         }
@@ -805,30 +765,18 @@ impl CallRecord {
 
     /// The verdict in a line, and the colour to draw it in.
     pub fn headline(&self) -> (String, Color32) {
-        let pages = |n: usize| {
-            if n == 1 {
-                "1 page".to_owned()
-            } else {
-                format!("{n} pages")
-            }
-        };
+        let pages = |n: usize| if n == 1 { "1 page".to_owned() } else { format!("{n} pages") };
         match self.verdict() {
             Verdict::Going => (
                 if self.sending { "sending" } else { "receiving" }.to_owned(),
                 GOOD,
             ),
             Verdict::Confirmed if self.sending => (
-                format!(
-                    "Confirmed: the far end took {} (MCF)",
-                    pages(self.confirmed_pages())
-                ),
+                format!("Confirmed: the far end took {} (MCF)", pages(self.confirmed_pages())),
                 BEST,
             ),
             Verdict::Confirmed => (
-                format!(
-                    "Received {}, confirmed (MCF)",
-                    pages(self.received.len().max(self.confirmed_pages()))
-                ),
+                format!("Received {}, confirmed (MCF)", pages(self.received.len().max(self.confirmed_pages()))),
                 BEST,
             ),
             Verdict::RetrainAsked(Frame::Rtp) => (
@@ -840,10 +788,7 @@ impl CallRecord {
                 POOR,
             ),
             Verdict::Failed { phase, why } => (
-                format!(
-                    "Disconnected in phase {phase} ({}): {why}",
-                    phase_said(phase)
-                ),
+                format!("Disconnected in phase {phase} ({}): {why}", phase_said(phase)),
                 POOR,
             ),
         }
@@ -853,14 +798,7 @@ impl CallRecord {
     /// correction, and how long.
     pub fn details(&self, now: f64) -> String {
         let mut parts = vec![
-            format!(
-                "{} sent",
-                if self.sending {
-                    self.confirmed_pages()
-                } else {
-                    0
-                }
-            ),
+            format!("{} sent", if self.sending { self.confirmed_pages() } else { 0 }),
             format!("{} received", self.received.len()),
         ];
         if let Some(c) = self.carried {
@@ -920,9 +858,7 @@ fn ago(seconds: f64) -> String {
 
 /// Which of the four codings a name is, as `coded_bits` orders them.
 fn coding_index(coding: &str) -> Option<usize> {
-    ["MH", "MR", "MMR", "JBIG"]
-        .iter()
-        .position(|c| *c == coding)
+    ["MH", "MR", "MMR", "JBIG"].iter().position(|c| *c == coding)
 }
 
 /// How far through a fax the sending end is.
@@ -937,12 +873,7 @@ pub struct SendProgress {
 
 /// `bits` is what each page codes to, `sheet` the page going (from one) and
 /// `fraction` how far through it.
-pub fn send_progress(
-    bits: &[usize],
-    sheet: usize,
-    fraction: f64,
-    rate: u32,
-) -> Option<SendProgress> {
+pub fn send_progress(bits: &[usize], sheet: usize, fraction: f64, rate: u32) -> Option<SendProgress> {
     let page_bits = *bits.get(sheet.checked_sub(1)?)?;
     if rate == 0 {
         return None;
@@ -981,30 +912,14 @@ fn modulation_rank(modulation: &str) -> u8 {
 /// Every rate this end will send at, fastest first. V.34 carries the
 /// packed coding, since it always has error correction (T.30 F.3); the rest
 /// carry `best`.
-pub fn rate_rows(
-    v34: bool,
-    ours: &[t30::Modulation],
-    packed: usize,
-    best: usize,
-    mh: usize,
-) -> Vec<RateRow> {
+pub fn rate_rows(v34: bool, ours: &[t30::Modulation], packed: usize, best: usize, mh: usize) -> Vec<RateRow> {
     let mut rows = Vec::new();
     if v34 {
-        rows.push(RateRow {
-            rate: 33_600,
-            modulation: "V.34",
-            least: packed,
-            most: mh,
-        });
+        rows.push(RateRow { rate: 33_600, modulation: "V.34", least: packed, most: mh });
     }
     for m in ours {
         for rate in m.rates() {
-            rows.push(RateRow {
-                rate: *rate,
-                modulation: m.name(),
-                least: best,
-                most: mh,
-            });
+            rows.push(RateRow { rate: *rate, modulation: m.name(), least: best, most: mh });
         }
     }
     rows.sort_by(|a, b| {
@@ -1029,8 +944,7 @@ pub fn agreed(row: &RateRow, carried: Option<Carried>) -> bool {
 /// Returns what to say about it.
 fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Path) -> String {
     if names_pdf(path) {
-        let sheets: Vec<fax::pdf::Sheet<'_>> =
-            pages.iter().map(|(_, lines, r)| (*lines, *r)).collect();
+        let sheets: Vec<fax::pdf::Sheet<'_>> = pages.iter().map(|(_, lines, r)| (*lines, *r)).collect();
         return match write_pdf(&sheets, path) {
             Ok(()) if sheets.len() == 1 => format!("saved to {}", path.display()),
             Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
@@ -1043,9 +957,7 @@ fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Pat
             Err(e) => e,
         };
     }
-    let stem = path
-        .file_stem()
-        .map_or_else(|| "fax".into(), |s| s.to_string_lossy());
+    let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
     let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
     let mut written = 0;
     let mut trouble = None;
@@ -1056,10 +968,7 @@ fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Pat
         }
     }
     trouble.unwrap_or_else(|| {
-        format!(
-            "{written} pages saved as {}",
-            path.with_file_name(format!("{stem}-N.png")).display()
-        )
+        format!("{written} pages saved as {}", path.with_file_name(format!("{stem}-N.png")).display())
     })
 }
 
@@ -1137,10 +1046,7 @@ impl Fax {
                 // Ink, so a white page is nothing and a black one is
                 // everything. The image is the other way round, which is the
                 // only reason this subtraction exists.
-                ink: grey
-                    .pixels()
-                    .map(|p| 1.0 - f32::from(p.0[0]) / 255.0)
-                    .collect(),
+                ink: grey.pixels().map(|p| 1.0 - f32::from(p.0[0]) / 255.0).collect(),
             }));
         }
         self.path = path.display().to_string();
@@ -1152,47 +1058,36 @@ impl Fax {
 
     /// Make the pages from the picture or the PDF already loaded.
     pub fn render(&mut self) {
-        let Some(source) = self.source.as_ref() else {
-            return;
-        };
+        let Some(source) = self.source.as_ref() else { return };
         let pages = match source {
             Source::Picture(grey) => vec![fax::page::render(grey, self.resolution, self.halftone)],
-            Source::Document(bytes) => {
-                match document::read(bytes, self.resolution, self.halftone) {
-                    Ok((pages, all)) => {
-                        self.source_said = (
-                            "document",
-                            match all {
-                                1 => "1 page".to_owned(),
-                                _ if all > pages.len() => {
-                                    format!("the first {} of its {all} pages", pages.len())
-                                }
-                                _ => format!("{all} pages"),
-                            },
-                        );
-                        pages
-                    }
-                    Err(e) => {
-                        self.trouble = Some(e);
-                        Vec::new()
-                    }
+            Source::Document(bytes) => match document::read(bytes, self.resolution, self.halftone) {
+                Ok((pages, all)) => {
+                    self.source_said = (
+                        "document",
+                        match all {
+                            1 => "1 page".to_owned(),
+                            _ if all > pages.len() => {
+                                format!("the first {} of its {all} pages", pages.len())
+                            }
+                            _ => format!("{all} pages"),
+                        },
+                    );
+                    pages
                 }
-            }
+                Err(e) => {
+                    self.trouble = Some(e);
+                    Vec::new()
+                }
+            },
         };
         self.coded_bits = [0; 4];
         self.coded_pages.clear();
         self.line_ends = (0..pages.len()).map(|_| None).collect();
         for page in &pages {
-            let codings = [
-                Coding::ModifiedHuffman,
-                Coding::ModifiedRead,
-                Coding::Mmr,
-                Coding::Jbig,
-            ];
+            let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
             let mut each = [0; 4];
-            for ((total, one), coding) in
-                self.coded_bits.iter_mut().zip(each.iter_mut()).zip(codings)
-            {
+            for ((total, one), coding) in self.coded_bits.iter_mut().zip(each.iter_mut()).zip(codings) {
                 *one = coding.encode(&page.lines, page.resolution, 0).len();
                 *total += *one;
             }
@@ -1230,7 +1125,8 @@ impl Fax {
         if self.preview.is_none() || self.preview_scale != n {
             let page = self.pages.get(self.showing)?;
             let image = Self::thumbnail(page, ctx.input(|i| i.max_texture_side), n);
-            self.preview = Some(ctx.load_texture("fax-page", image, egui::TextureOptions::NEAREST));
+            self.preview =
+                Some(ctx.load_texture("fax-page", image, egui::TextureOptions::NEAREST));
             self.preview_scale = n;
         }
         self.preview.clone()
@@ -1248,8 +1144,7 @@ impl Fax {
                 Some(fax::call::Phase::Done | fax::call::Phase::Failed)
             )
         };
-        let going =
-            frame.state != telemetry::CallState::Idle && frame.fax_phase.is_some_and(|p| !over(p));
+        let going = frame.state != telemetry::CallState::Idle && frame.fax_phase.is_some_and(|p| !over(p));
         let live = self.calls.last().is_some_and(|c| c.ended.is_none());
         if going && !live {
             self.carried = None;
@@ -1261,8 +1156,7 @@ impl Fax {
             self.pace = None;
             self.view = View::Follow;
             self.opened = None;
-            self.calls
-                .push(CallRecord::new(frame.fax_sending, now, &self.dialled));
+            self.calls.push(CallRecord::new(frame.fax_sending, now, &self.dialled));
         }
         if let Some(call) = self.calls.last_mut().filter(|c| c.ended.is_none()) {
             call.sending = frame.fax_sending;
@@ -1396,10 +1290,7 @@ impl Fax {
     /// Look at the page `step` places away from the one in view, among the
     /// call's pages.
     fn look(&mut self, step: isize) {
-        let at = self
-            .looking
-            .as_ref()
-            .map_or(self.earlier.len(), |(i, _)| *i);
+        let at = self.looking.as_ref().map_or(self.earlier.len(), |(i, _)| *i);
         let last = self.earlier.len() + usize::from(self.scan.is_some());
         let Some(to) = at.checked_add_signed(step).filter(|to| *to < last) else {
             return;
@@ -1423,11 +1314,7 @@ impl Fax {
             .is_none_or(|scan| scan.page != arriving.page && arriving.from == 0);
         if fresh {
             self.next_sheet(arriving.sheet);
-            self.scan = Some(Scan::new(
-                arriving.page,
-                arriving.sheet,
-                arriving.resolution,
-            ));
+            self.scan = Some(Scan::new(arriving.page, arriving.sheet, arriving.resolution));
         }
         if let Some(scan) = self.scan.as_mut() {
             scan.page = arriving.page;
@@ -1452,9 +1339,7 @@ impl Fax {
     /// A page still arriving saves as far as it has got, which is also what
     /// is left of a call that ended part way down the page.
     pub fn save(&mut self, path: &std::path::Path) {
-        let Some((_, lines, resolution)) = self.in_view() else {
-            return;
-        };
+        let Some((_, lines, resolution)) = self.in_view() else { return };
         let written = if names_pdf(path) {
             write_pdf(&[(lines, resolution)], path)
         } else {
@@ -1488,9 +1373,7 @@ impl Fax {
     /// to a sheet, and otherwise each to its own picture -- `fax.png` becomes
     /// `fax-1.png`, `fax-2.png` and so on, by the page's number in the call.
     pub fn save_all(&mut self, path: &std::path::Path) {
-        let stem = path
-            .file_stem()
-            .map_or_else(|| "fax".into(), |s| s.to_string_lossy());
+        let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
         let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
         let mut pages: Vec<(usize, &[Vec<bool>], Resolution)> = self
             .earlier
@@ -1500,17 +1383,13 @@ impl Fax {
         if let Some(scan) = self.scan.as_ref() {
             match self.incoming.as_ref() {
                 Some(page) => pages.push((scan.sheet, &page.lines, page.resolution)),
-                None if !scan.lines.is_empty() => {
-                    pages.push((scan.sheet, &scan.lines, scan.resolution))
-                }
+                None if !scan.lines.is_empty() => pages.push((scan.sheet, &scan.lines, scan.resolution)),
                 None => {}
             }
         }
         if names_pdf(path) {
-            let sheets: Vec<fax::pdf::Sheet<'_>> = pages
-                .iter()
-                .map(|(_, lines, resolution)| (*lines, *resolution))
-                .collect();
+            let sheets: Vec<fax::pdf::Sheet<'_>> =
+                pages.iter().map(|(_, lines, resolution)| (*lines, *resolution)).collect();
             self.saved = Some(match write_pdf(&sheets, path) {
                 Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
                 Err(e) => e,
@@ -1527,10 +1406,7 @@ impl Fax {
         }
         self.saved = Some(match trouble {
             Some(e) => e,
-            None => format!(
-                "{written} pages saved as {}",
-                named(0).with_file_name(format!("{stem}-N.png")).display()
-            ),
+            None => format!("{written} pages saved as {}", named(0).with_file_name(format!("{stem}-N.png")).display()),
         });
     }
 
@@ -1612,16 +1488,8 @@ impl Fax {
                             ui.label(RichText::new(k).monospace().size(12.0).color(dim));
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label(
-                                    RichText::new(before).monospace().size(12.0).color(bright),
-                                );
-                                ui.label(
-                                    RichText::new("JBIG")
-                                        .monospace()
-                                        .size(12.0)
-                                        .strong()
-                                        .color(BEST),
-                                );
+                                ui.label(RichText::new(before).monospace().size(12.0).color(bright));
+                                ui.label(RichText::new("JBIG").monospace().size(12.0).strong().color(BEST));
                                 ui.label(RichText::new(after).monospace().size(12.0).color(bright));
                             });
                             ui.end_row();
@@ -1630,29 +1498,17 @@ impl Fax {
                     }
                 }
                 ui.label(
-                    RichText::new(if self.sending {
-                        "both ends"
-                    } else {
-                        "this call"
-                    })
-                    .monospace()
-                    .size(12.0)
-                    .color(dim),
+                    RichText::new(if self.sending { "both ends" } else { "this call" })
+                        .monospace()
+                        .size(12.0)
+                        .color(dim),
                 );
                 let shared = self.shared(caps);
                 ui.label(
-                    RichText::new(
-                        shared
-                            .clone()
-                            .unwrap_or_else(|| "nothing in common".to_owned()),
-                    )
-                    .monospace()
-                    .size(12.0)
-                    .color(if shared.is_some() {
-                        BEST
-                    } else {
-                        Color32::from_rgb(235, 100, 90)
-                    }),
+                    RichText::new(shared.clone().unwrap_or_else(|| "nothing in common".to_owned()))
+                        .monospace()
+                        .size(12.0)
+                        .color(if shared.is_some() { BEST } else { Color32::from_rgb(235, 100, 90) }),
                 );
                 ui.end_row();
             });
@@ -1663,24 +1519,16 @@ impl Fax {
     /// what the caller's DCS chose when receiving.
     fn shared(&self, caps: &t30::Capabilities) -> Option<String> {
         if self.symbol_rate > 0 {
-            return Some(format!(
-                "V.34 at {} bit/s on {} baud",
-                self.rate, self.symbol_rate
-            ));
+            return Some(format!("V.34 at {} bit/s on {} baud", self.rate, self.symbol_rate));
         }
         if self.sending {
-            return caps
-                .best_shared(&self.ours())
-                .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()));
+            return caps.best_shared(&self.ours()).map(|(m, rate)| format!("{} at {rate} bit/s", m.name()));
         }
         self.far_field
             .as_deref()
             .and_then(t30::command_rate)
             .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
-            .or_else(|| {
-                self.carried
-                    .map(|c| format!("{} at {} bit/s", c.modulation, c.rate))
-            })
+            .or_else(|| self.carried.map(|c| format!("{} at {} bit/s", c.modulation, c.rate)))
     }
 
     /// The page, large: the one going out, or the one arriving drawn a line
@@ -1690,22 +1538,14 @@ impl Fax {
         let bright = Color32::from_rgb(220, 225, 235);
         let shown = self.shown_view();
         ui.horizontal(|ui| {
-            for (view, name) in [
-                (View::Follow, "follow the call"),
-                (View::Sending, "to send"),
-                (View::Received, "received"),
-            ] {
+            for (view, name) in [(View::Follow, "follow the call"), (View::Sending, "to send"), (View::Received, "received")] {
                 if ui.selectable_label(self.view == view, name).clicked() {
                     self.view = view;
                 }
             }
             ui.separator();
             if let Some(trouble) = &self.trouble {
-                ui.label(
-                    RichText::new(trouble)
-                        .small()
-                        .color(Color32::from_rgb(235, 100, 90)),
-                );
+                ui.label(RichText::new(trouble).small().color(Color32::from_rgb(235, 100, 90)));
             }
         });
         match shown {
@@ -1727,21 +1567,11 @@ impl Fax {
         let mut step = 0isize;
         ui.horizontal(|ui| {
             if count > 1 {
-                if ui
-                    .add_enabled(self.showing > 0, egui::Button::new("<"))
-                    .clicked()
-                {
+                if ui.add_enabled(self.showing > 0, egui::Button::new("<")).clicked() {
                     step = -1;
                 }
-                ui.label(
-                    RichText::new(format!("page {} of {count}", self.showing + 1))
-                        .monospace()
-                        .color(bright),
-                );
-                if ui
-                    .add_enabled(self.showing + 1 < count, egui::Button::new(">"))
-                    .clicked()
-                {
+                ui.label(RichText::new(format!("page {} of {count}", self.showing + 1)).monospace().color(bright));
+                if ui.add_enabled(self.showing + 1 < count, egui::Button::new(">")).clicked() {
                     step = 1;
                 }
             }
@@ -1760,10 +1590,7 @@ impl Fax {
             }
         });
         if step != 0 {
-            self.showing = self
-                .showing
-                .saturating_add_signed(step)
-                .min(count.saturating_sub(1));
+            self.showing = self.showing.saturating_add_signed(step).min(count.saturating_sub(1));
             self.preview = None;
         }
         let ppp = ui.ctx().pixels_per_point();
@@ -1792,39 +1619,36 @@ impl Fax {
                     None => fraction,
                 }
             });
-        let mut area = egui::ScrollArea::both()
-            .id_salt("fax-send-scroll")
-            .auto_shrink([false, false]);
+        let mut area = egui::ScrollArea::both().id_salt("fax-send-scroll").auto_shrink([false, false]);
         if let Some(offset) = anchor {
             area = area.scroll_offset(offset);
         }
         let out = area.show(ui, |ui| {
-            let (area, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width().max(size.x), size.y),
-                egui::Sense::hover(),
-            );
-            let left = ((area.center().x - size.x / 2.0).max(area.left()) * ppp).round() / ppp;
-            let top = (area.top() * ppp).round() / ppp;
-            let rect = egui::Rect::from_min_size(egui::pos2(left, top), size);
-            ui.painter().image(
-                texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-            // What is still to go, shaded, and a green line where the
-            // page has got to.
-            if let Some(down) = progress {
-                let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
-                    0.0,
-                    Color32::from_rgba_unmultiplied(24, 28, 36, 200),
+                let (area, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().max(size.x), size.y),
+                    egui::Sense::hover(),
                 );
-                ui.painter()
-                    .hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
-            }
-        });
+                let left = ((area.center().x - size.x / 2.0).max(area.left()) * ppp).round() / ppp;
+                let top = (area.top() * ppp).round() / ppp;
+                let rect = egui::Rect::from_min_size(egui::pos2(left, top), size);
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                // What is still to go, shaded, and a green line where the
+                // page has got to.
+                if let Some(down) = progress {
+                    let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(24, 28, 36, 200),
+                    );
+                    ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
+                }
+            });
         self.zoom.end(ui, out.inner_rect, out.state.offset, level);
     }
 
@@ -1844,15 +1668,8 @@ impl Fax {
                     if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
                         step = -1;
                     }
-                    ui.label(
-                        RichText::new(format!("page {} of {pages}", at + 1))
-                            .monospace()
-                            .color(bright),
-                    );
-                    if ui
-                        .add_enabled(at + 1 < pages, egui::Button::new(">"))
-                        .clicked()
-                    {
+                    ui.label(RichText::new(format!("page {} of {pages}", at + 1)).monospace().color(bright));
+                    if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
                         step = 1;
                     }
                 }
@@ -1871,46 +1688,26 @@ impl Fax {
             return;
         }
         let arriving = self.looking.is_none()
-            && self.scan.as_ref().is_some_and(|scan| {
-                self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING
-            });
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING);
         let pages = self.earlier.len() + usize::from(self.scan.is_some());
-        let at = self
-            .looking
-            .as_ref()
-            .map_or(self.earlier.len(), |(i, _)| *i);
+        let at = self.looking.as_ref().map_or(self.earlier.len(), |(i, _)| *i);
         let (mut save, mut save_all, mut step) = (false, false, 0isize);
         ui.horizontal(|ui| {
-            let heading = match (
-                self.looking.as_ref().map(|(_, s)| s).or(self.scan.as_ref()),
-                arriving,
-            ) {
+            let heading = match (self.looking.as_ref().map(|(_, s)| s).or(self.scan.as_ref()), arriving) {
                 (None, _) => "page received".to_owned(),
-                (Some(scan), true) => format!(
-                    "page {} arriving: {} lines",
-                    scan.sheet.max(1),
-                    scan.lines.len()
-                ),
-                (Some(scan), false) => format!(
-                    "page {} received: {} lines",
-                    scan.sheet.max(1),
-                    scan.lines.len()
-                ),
+                (Some(scan), true) => format!("page {} arriving: {} lines", scan.sheet.max(1), scan.lines.len()),
+                (Some(scan), false) => format!("page {} received: {} lines", scan.sheet.max(1), scan.lines.len()),
             };
             ui.label(RichText::new(heading).color(dim));
             if pages > 1 {
                 if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
                     step = -1;
                 }
-                ui.label(
-                    RichText::new(format!("{} of {pages}", at + 1))
-                        .monospace()
-                        .color(bright),
-                );
-                if ui
-                    .add_enabled(at + 1 < pages, egui::Button::new(">"))
-                    .clicked()
-                {
+                ui.label(RichText::new(format!("{} of {pages}", at + 1)).monospace().color(bright));
+                if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
                     step = 1;
                 }
             }
@@ -1956,8 +1753,7 @@ impl Fax {
         if arriving {
             // The green line goes when the page stops, and nothing else may
             // be about to ask for a frame when it does.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(500));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
         if step != 0 {
             self.look(step);
@@ -1997,43 +1793,30 @@ impl Fax {
     /// Everything to the right of the page: the number and the keys, how far
     /// the call has got, how the last one went, the document, the rates and
     /// the calls so far. Returns what was asked of the modem.
-    pub fn side_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        on_hook: bool,
-        number: &mut String,
-    ) -> Option<Start> {
+    pub fn side_panel(&mut self, ui: &mut egui::Ui, on_hook: bool, number: &mut String) -> Option<Start> {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         let now = ui.input(|i| i.time);
         let mut start = None;
 
-        egui::Grid::new("fax-dial")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(RichText::new("fax number").color(dim)).on_hover_text(
+        egui::Grid::new("fax-dial").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label(RichText::new("fax number").color(dim)).on_hover_text(
                 "The dialler's number: the same one the Dial keypad edits, and what Send fax dials",
             );
-                ui.add(
-                    egui::TextEdit::singleline(number)
-                        .desired_width(180.0)
-                        .hint_text("from the dialler"),
-                );
-                ui.end_row();
-                ui.label(RichText::new("this end (TSI/CSI)").color(dim))
-                    .on_hover_text(
-                        "What this end calls itself: sent as a TSI when sending and a CSI when \
+            ui.add(egui::TextEdit::singleline(number).desired_width(180.0).hint_text("from the dialler"));
+            ui.end_row();
+            ui.label(RichText::new("this end (TSI/CSI)").color(dim)).on_hover_text(
+                "What this end calls itself: sent as a TSI when sending and a CSI when \
                  receiving, and shown at the far end. Digits, spaces and a plus; blank is \
                  allowed, and plenty of machines send nothing",
-                    );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.identification)
-                        .desired_width(180.0)
-                        .hint_text("e.g. +61 3 9999 0000"),
-                );
-                ui.end_row();
-            });
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.identification)
+                    .desired_width(180.0)
+                    .hint_text("e.g. +61 3 9999 0000"),
+            );
+            ui.end_row();
+        });
         ui.horizontal(|ui| {
             ui.add_enabled_ui(on_hook, |ui| {
                 if ui
@@ -2083,27 +1866,15 @@ impl Fax {
         }
         if let Some(call) = self.calls.last().filter(|c| c.ended.is_some()) {
             let (headline, colour) = call.headline();
-            egui::Frame::group(ui.style())
-                .stroke(egui::Stroke::new(1.0, colour))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new("last call").small().color(dim));
-                    ui.label(RichText::new(headline).strong().color(colour));
-                    ui.label(
-                        RichText::new(call.details(now))
-                            .monospace()
-                            .size(12.0)
-                            .color(bright),
-                    );
-                    if !call.far.is_empty() {
-                        ui.label(
-                            RichText::new(format!("far end {}", call.far))
-                                .monospace()
-                                .size(12.0)
-                                .color(dim),
-                        );
-                    }
-                });
+            egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0, colour)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("last call").small().color(dim));
+                ui.label(RichText::new(headline).strong().color(colour));
+                ui.label(RichText::new(call.details(now)).monospace().size(12.0).color(bright));
+                if !call.far.is_empty() {
+                    ui.label(RichText::new(format!("far end {}", call.far)).monospace().size(12.0).color(dim));
+                }
+            });
         }
 
         ui.separator();
@@ -2121,10 +1892,7 @@ impl Fax {
     /// and the time left at the agreed rate.
     fn call_progress(&mut self, ui: &mut egui::Ui, now: f64, dim: Color32, bright: Color32) {
         let what = self.phase.unwrap_or("a call, but not a fax");
-        let phase = self
-            .phase
-            .and_then(fax::call::Phase::named)
-            .map(fax::call::Phase::letter);
+        let phase = self.phase.and_then(fax::call::Phase::named).map(fax::call::Phase::letter);
         let side = if self.sending { "sending" } else { "receiving" };
         ui.label(
             RichText::new(match phase {
@@ -2164,9 +1932,7 @@ impl Fax {
                 );
             });
         }
-        let Some(fraction) = self.progress else {
-            return;
-        };
+        let Some(fraction) = self.progress else { return };
         let mut said = Vec::new();
         if self.sending {
             let bits: Vec<usize> = match self.coding_now() {
@@ -2176,11 +1942,7 @@ impl Fax {
             let pages = self.sheets.max(self.sheet).max(1);
             said.push(format!("page {} of {pages}", self.sheet.max(1)));
             if let Some(p) = send_progress(&bits, self.sheet, fraction, self.rate) {
-                said.push(format!(
-                    "{:.1} of {:.1} kB",
-                    p.done_bits as f64 / 8000.0,
-                    p.page_bits as f64 / 8000.0
-                ));
+                said.push(format!("{:.1} of {:.1} kB", p.done_bits as f64 / 8000.0, p.page_bits as f64 / 8000.0));
                 if let Some((line, lines)) = self.line_reached(self.sheet - 1, fraction) {
                     said.push(format!("line {} of {lines}", line.floor() as usize));
                 }
@@ -2203,43 +1965,24 @@ impl Fax {
                 None => self.pace = Some((now, self.lines, 0.0)),
                 _ => {}
             }
-            let expected = self
-                .scan
-                .as_ref()
-                .map_or(Resolution::Standard, |s| s.resolution)
-                .lines();
+            let expected = self.scan.as_ref().map_or(Resolution::Standard, |s| s.resolution).lines();
             said.push(format!("{} of about {expected} lines", self.lines));
             if let Some((_, _, per_second)) = self.pace
                 && per_second > 0.0
                 && self.lines < expected
             {
-                said.push(format!(
-                    "about {} left",
-                    clock((expected - self.lines) as f64 / per_second)
-                ));
+                said.push(format!("about {} left", clock((expected - self.lines) as f64 / per_second)));
             }
         }
-        ui.add(
-            egui::ProgressBar::new(fraction as f32)
-                .desired_height(16.0)
-                .show_percentage(),
-        );
-        ui.label(
-            RichText::new(said.join(" · "))
-                .monospace()
-                .size(12.0)
-                .color(dim),
-        );
+        ui.add(egui::ProgressBar::new(fraction as f32).desired_height(16.0).show_percentage());
+        ui.label(RichText::new(said.join(" · ")).monospace().size(12.0).color(dim));
     }
 
     /// How far down page `page` the call has got once `fraction` of its bits
     /// have gone, in lines, and how many lines it has. None before the
     /// coding is known.
     fn line_reached(&mut self, page: usize, fraction: f64) -> Option<(f64, usize)> {
-        let coding = self
-            .live()
-            .and_then(|c| c.carried)
-            .map_or(self.coding, |c| c.coding);
+        let coding = self.live().and_then(|c| c.carried).map_or(self.coding, |c| c.coding);
         let which = match coding {
             "MH" => Coding::ModifiedHuffman,
             "MR" => Coding::ModifiedRead,
@@ -2267,20 +2010,14 @@ impl Fax {
         {
             *slot = Some(LineMap::Ready(c, ends, total));
         }
-        let Some(LineMap::Ready(_, ends, total)) = slot.as_ref() else {
-            return None;
-        };
+        let Some(LineMap::Ready(_, ends, total)) = slot.as_ref() else { return None };
         let sent = (fraction.clamp(0.0, 1.0) * *total as f64).round() as usize;
         Some((fax::coding::line_at(ends, sent), lines))
     }
 
     /// Which of the four codings the call is sending in.
     fn coding_now(&self) -> Option<usize> {
-        coding_index(
-            self.live()
-                .and_then(|c| c.carried)
-                .map_or(self.coding, |c| c.coding),
-        )
+        coding_index(self.live().and_then(|c| c.carried).map_or(self.coding, |c| c.coding))
     }
 
     /// The document to send and how it is made into pages, folded away
@@ -2395,47 +2132,36 @@ impl Fax {
         let packed = if self.jbig { jbig.min(mmr) } else { mmr };
         let best = if self.error_correction { packed } else { mr };
         let carried = self.live().and_then(|c| c.carried).or(self.carried);
-        ui.label(RichText::new("how long the document takes").color(bright))
-            .on_hover_text(
-                "From the smallest coding this end will send at each rate -- JBIG or MMR under \
+        ui.label(RichText::new("how long the document takes").color(bright)).on_hover_text(
+            "From the smallest coding this end will send at each rate -- JBIG or MMR under \
              error correction, MR without -- to MH, which every machine reads. Fastest first",
-            );
-        egui::Grid::new("fax-rates")
-            .num_columns(3)
-            .spacing([10.0, 2.0])
-            .show(ui, |ui| {
-                for row in rate_rows(self.v34, &self.ours(), packed, best, mh) {
-                    let lit = agreed(&row, carried);
-                    let rate = if lit && row.modulation == "V.34" {
-                        carried.map_or(row.rate, |c| c.rate)
-                    } else {
-                        row.rate
-                    };
-                    let text = |s: String, colour: Color32| {
-                        let t = RichText::new(s).monospace().size(12.0).color(colour);
-                        if lit {
-                            t.strong().background_color(Color32::from_rgb(30, 70, 45))
-                        } else {
-                            t
-                        }
-                    };
-                    ui.label(text(format!("{rate}"), if lit { BEST } else { dim }));
-                    ui.label(text(
-                        row.modulation.to_owned(),
-                        modulation_colour(row.modulation),
-                    ));
-                    ui.label(text(
-                        format!(
-                            "{} to {}{}",
-                            clock(row.least as f64 / f64::from(rate)),
-                            clock(row.most as f64 / f64::from(rate)),
-                            if lit { "  agreed" } else { "" }
-                        ),
-                        if lit { BEST } else { bright },
-                    ));
-                    ui.end_row();
-                }
-            });
+        );
+        egui::Grid::new("fax-rates").num_columns(3).spacing([10.0, 2.0]).show(ui, |ui| {
+            for row in rate_rows(self.v34, &self.ours(), packed, best, mh) {
+                let lit = agreed(&row, carried);
+                let rate = if lit && row.modulation == "V.34" {
+                    carried.map_or(row.rate, |c| c.rate)
+                } else {
+                    row.rate
+                };
+                let text = |s: String, colour: Color32| {
+                    let t = RichText::new(s).monospace().size(12.0).color(colour);
+                    if lit { t.strong().background_color(Color32::from_rgb(30, 70, 45)) } else { t }
+                };
+                ui.label(text(format!("{rate}"), if lit { BEST } else { dim }));
+                ui.label(text(row.modulation.to_owned(), modulation_colour(row.modulation)));
+                ui.label(text(
+                    format!(
+                        "{} to {}{}",
+                        clock(row.least as f64 / f64::from(rate)),
+                        clock(row.most as f64 / f64::from(rate)),
+                        if lit { "  agreed" } else { "" }
+                    ),
+                    if lit { BEST } else { bright },
+                ));
+                ui.end_row();
+            }
+        });
     }
 
     /// The calls since the window opened, newest first.
@@ -2446,69 +2172,35 @@ impl Fax {
             return;
         }
         let (mut open, mut save) = (None, None);
-        egui::Grid::new("fax-calls")
-            .num_columns(5)
-            .spacing([8.0, 3.0])
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, call) in self.calls.iter().enumerate().rev().take(30) {
-                    ui.label(
-                        RichText::new(ago(now - call.ended.unwrap_or(now)))
-                            .size(12.0)
-                            .color(dim),
-                    );
-                    let far = if call.far.is_empty() {
-                        "?"
-                    } else {
-                        call.far.as_str()
-                    };
-                    ui.label(
-                        RichText::new(format!(
-                            "{} {far}",
-                            if call.sending { "to" } else { "from" }
-                        ))
+        egui::Grid::new("fax-calls").num_columns(5).spacing([8.0, 3.0]).striped(true).show(ui, |ui| {
+            for (i, call) in self.calls.iter().enumerate().rev().take(30) {
+                ui.label(RichText::new(ago(now - call.ended.unwrap_or(now))).size(12.0).color(dim));
+                let far = if call.far.is_empty() { "?" } else { call.far.as_str() };
+                ui.label(
+                    RichText::new(format!("{} {far}", if call.sending { "to" } else { "from" }))
                         .monospace()
                         .size(12.0)
                         .color(bright),
-                    )
-                    .on_hover_text(call.details(now));
-                    let (short, colour) = call.short();
-                    ui.label(
-                        RichText::new(short)
-                            .monospace()
-                            .size(12.0)
-                            .strong()
-                            .color(colour),
-                    )
+                )
+                .on_hover_text(call.details(now));
+                let (short, colour) = call.short();
+                ui.label(RichText::new(short).monospace().size(12.0).strong().color(colour))
                     .on_hover_text(call.headline().0);
-                    let pages = if call.sending {
-                        call.confirmed_pages()
-                    } else {
-                        call.received.len()
-                    };
-                    ui.label(
-                        RichText::new(format!("{pages} p"))
-                            .monospace()
-                            .size(12.0)
-                            .color(dim),
-                    );
-                    ui.horizontal(|ui| {
-                        if !call.received.is_empty() {
-                            if ui.small_button("open").clicked() {
-                                open = Some(i);
-                            }
-                            if ui
-                                .small_button("save")
-                                .on_hover_text("As one PDF, or a PNG a page")
-                                .clicked()
-                            {
-                                save = Some(i);
-                            }
+                let pages = if call.sending { call.confirmed_pages() } else { call.received.len() };
+                ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(dim));
+                ui.horizontal(|ui| {
+                    if !call.received.is_empty() {
+                        if ui.small_button("open").clicked() {
+                            open = Some(i);
                         }
-                    });
-                    ui.end_row();
-                }
-            });
+                        if ui.small_button("save").on_hover_text("As one PDF, or a PNG a page").clicked() {
+                            save = Some(i);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
         if let Some(i) = open {
             self.open(i, 0);
         }
@@ -2556,9 +2248,7 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool, zoom: &mut Zoom
     let room = ui.available_size();
     let (n, m, level, anchor) = zoom.begin(ui, (room.x - 14.0) * ppp);
     scan.set_scale(n);
-    let Some(texture) = scan.texture(ui.ctx()) else {
-        return;
-    };
+    let Some(texture) = scan.texture(ui.ctx()) else { return };
     let shown = scan.shown();
     let bottom = shown as f32 / scan.capacity as f32;
     let sheet = scan.sheet_rows();
@@ -2594,11 +2284,7 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool, zoom: &mut Zoom
             Color32::WHITE,
         );
         if arriving {
-            ui.painter().hline(
-                rect.x_range(),
-                rect.bottom() - 1.0,
-                egui::Stroke::new(2.0, BEST),
-            );
+            ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, egui::Stroke::new(2.0, BEST));
         }
     });
     zoom.end(ui, out.inner_rect, out.state.offset, level);
@@ -2625,13 +2311,10 @@ mod tests {
         assert_eq!(rows[0].1, "10 octets, country code 00");
         assert_eq!(rows[1].1, "00 00 51 00 00 10 b1 2a ...");
         // Most significant bit first on the line: 0x01 as read is 0x80.
-        assert_eq!(
-            non_standard_rows(&[0x01, 0x02]),
-            vec![
-                ("non-standard", "2 octets, country code 80".to_owned()),
-                ("  starting", "01 02".to_owned()),
-            ]
-        );
+        assert_eq!(non_standard_rows(&[0x01, 0x02]), vec![
+            ("non-standard", "2 octets, country code 80".to_owned()),
+            ("  starting", "01 02".to_owned()),
+        ]);
         assert_eq!(non_standard_rows(&[]).len(), 1);
     }
 
@@ -2670,23 +2353,13 @@ mod tests {
             let mut before: Vec<Color32> = Vec::new();
             for (i, line) in page.lines.iter().enumerate() {
                 scan.extend(i, vec![line.clone()]);
-                assert!(
-                    scan.span(scan.rows).end > scan.lines.len(),
-                    "a finished row was left"
-                );
-                assert_eq!(
-                    &scan.pixels[..before.len()],
-                    &before[..],
-                    "a finished row changed"
-                );
+                assert!(scan.span(scan.rows).end > scan.lines.len(), "a finished row was left");
+                assert_eq!(&scan.pixels[..before.len()], &before[..], "a finished row changed");
                 before.clone_from(&scan.pixels);
             }
             let mut whole = Scan::new(0, 1, resolution);
             whole.extend(0, page.lines.clone());
-            assert_eq!(
-                scan.pixels, whole.pixels,
-                "a line at a time is not the same picture"
-            );
+            assert_eq!(scan.pixels, whole.pixels, "a line at a time is not the same picture");
         }
     }
 
@@ -2722,20 +2395,11 @@ mod tests {
             lines: page.lines[from..to].to_vec(),
         };
         let mut fax = Fax::new();
-        assert!(
-            fax.arriving(batch(0, 30), 1.0),
-            "the top of a page is a new page"
-        );
+        assert!(fax.arriving(batch(0, 30), 1.0), "the top of a page is a new page");
         fax.arrived(1, page.clone());
-        assert!(
-            !fax.arriving(batch(30, 40), 1.1),
-            "its own last lines are not"
-        );
+        assert!(!fax.arriving(batch(30, 40), 1.1), "its own last lines are not");
         assert_eq!(fax.scan.as_ref().map(|s| &s.lines), Some(&page.lines));
-        assert!(
-            fax.incoming.is_some(),
-            "the page that arrived was forgotten"
-        );
+        assert!(fax.incoming.is_some(), "the page that arrived was forgotten");
 
         // A page handed over whole before any of its lines were.
         let mut fax = Fax::new();
@@ -2791,20 +2455,13 @@ mod tests {
         scan.extend(0, lines_of(100, false));
         let texture = scan.texture(&ctx).expect("no texture");
         assert_eq!(texture.size()[0], SCAN_WIDTH / 3);
-        assert!(
-            texture.size()[1] >= 762,
-            "{} rows is not a sheet",
-            texture.size()[1]
-        );
+        assert!(texture.size()[1] >= 762, "{} rows is not a sheet", texture.size()[1]);
         assert_eq!(scan.uploaded, scan.rows);
 
         // Half as long again as a sheet.
         scan.extend(100, lines_of(1700, false));
         let texture = scan.texture(&ctx).expect("no texture");
-        assert!(
-            texture.size()[1] >= scan.rows,
-            "the page ran off the texture"
-        );
+        assert!(texture.size()[1] >= scan.rows, "the page ran off the texture");
         assert_eq!(scan.uploaded, scan.rows);
 
         // And longer than the card takes: the texture stops at its largest
@@ -2824,10 +2481,7 @@ mod tests {
         for shape in shapes {
             match shape {
                 egui::Shape::Rect(filled)
-                    if filled
-                        .brush
-                        .as_ref()
-                        .is_some_and(|b| b.fill_texture_id == texture) =>
+                    if filled.brush.as_ref().is_some_and(|b| b.fill_texture_id == texture) =>
                 {
                     out.push(filled.rect);
                 }
@@ -2889,33 +2543,20 @@ mod tests {
             let shapes: Vec<egui::Shape> = output.shapes.into_iter().map(|c| c.shape).collect();
             let mut drawn = Vec::new();
             painted_with(&shapes, texture, &mut drawn);
-            let rect = *drawn
-                .first()
-                .unwrap_or_else(|| panic!("{lines} lines: the page was not drawn"));
+            let rect = *drawn.first().unwrap_or_else(|| panic!("{lines} lines: the page was not drawn"));
             widths.push(rect.width());
             heights.push(rect.height());
         }
         // 1728 pels do not fit 640 points, so a third: 576 across.
-        assert!(
-            (widths[0] - 576.0).abs() < 0.5,
-            "the first rows are {} across",
-            widths[0]
-        );
+        assert!((widths[0] - 576.0).abs() < 0.5, "the first rows are {} across", widths[0]);
         assert!(
             widths.iter().all(|w| (w - widths[0]).abs() < 0.5),
             "the page changed width as it arrived: {widths:?}"
         );
-        assert!(
-            heights.windows(2).all(|h| h[0] < h[1]),
-            "not growing downwards: {heights:?}"
-        );
+        assert!(heights.windows(2).all(|h| h[0] < h[1]), "not growing downwards: {heights:?}");
         // And whole pixels at the end: 1143 standard lines, two pixels
         // each, shrunk by three.
-        assert!(
-            (heights[3] - 762.0).abs() < 0.5,
-            "a sheet {} tall",
-            heights[3]
-        );
+        assert!((heights[3] - 762.0).abs() < 0.5, "a sheet {} tall", heights[3]);
     }
 
     #[test]
@@ -2947,10 +2588,7 @@ mod tests {
             let mut page = page_of(20);
             page.resolution = resolution;
             fax.arrived(1, page);
-            let path = dir.join(format!(
-                "{}.png",
-                resolution.name().replace(['.', ',', ' ', '/'], "-")
-            ));
+            let path = dir.join(format!("{}.png", resolution.name().replace(['.', ',', ' ', '/'], "-")));
             fax.save(&path);
             let saved = fax.saved.clone().unwrap_or_default();
             assert!(saved.starts_with("saved to"), "{saved}");
@@ -2974,17 +2612,10 @@ mod tests {
                 from: 0,
                 lines: page.lines[..4].to_vec(),
             };
-            assert!(
-                fax.arriving(arriving, n as f64),
-                "page {sheet} is not a new page"
-            );
+            assert!(fax.arriving(arriving, n as f64), "page {sheet} is not a new page");
             fax.arrived(sheet, page.clone());
         }
-        let kept: Vec<(usize, usize)> = fax
-            .earlier
-            .iter()
-            .map(|(n, p)| (*n, p.lines.len()))
-            .collect();
+        let kept: Vec<(usize, usize)> = fax.earlier.iter().map(|(n, p)| (*n, p.lines.len())).collect();
         assert_eq!(kept, [(1, 10), (2, 11)]);
         assert_eq!(fax.in_view().map(|(n, l, _)| (n, l.len())), Some((3, 12)));
 
@@ -2992,21 +2623,13 @@ mod tests {
         assert_eq!(fax.in_view().map(|(n, l, _)| (n, l.len())), Some((2, 11)));
         fax.look(-1);
         fax.look(-1);
-        assert_eq!(
-            fax.in_view().map(|(n, _, _)| n),
-            Some(1),
-            "went before the first"
-        );
+        assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(1), "went before the first");
         fax.look(1);
         fax.look(1);
         assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(3));
         assert!(fax.looking.is_none(), "the last page is the one arriving");
         fax.look(1);
-        assert_eq!(
-            fax.in_view().map(|(n, _, _)| n),
-            Some(3),
-            "went past the last"
-        );
+        assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(3), "went past the last");
 
         let dir = std::env::temp_dir().join("binmodem-faxwin-pages");
         let _ = std::fs::create_dir_all(&dir);
@@ -3017,13 +2640,7 @@ mod tests {
             assert_eq!(image.height() as usize, page.lines.len() * 2);
             let _ = std::fs::remove_file(&path);
         }
-        assert!(
-            fax.saved
-                .as_deref()
-                .is_some_and(|s| s.starts_with("3 pages")),
-            "{:?}",
-            fax.saved
-        );
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("3 pages")), "{:?}", fax.saved);
 
         // A new call's first page, and the last call's pages go.
         let arriving = Arriving {
@@ -3034,10 +2651,7 @@ mod tests {
             lines: pages[0].lines[..2].to_vec(),
         };
         assert!(fax.arriving(arriving, 9.0));
-        assert!(
-            fax.earlier.is_empty(),
-            "the last call's pages are still there"
-        );
+        assert!(fax.earlier.is_empty(), "the last call's pages are still there");
     }
 
     /// The badges' colours rank the codings and the carriers, the best of
@@ -3083,11 +2697,7 @@ mod tests {
 
         frame.fax_progress = None;
         fax.observe(&frame, 0.0);
-        assert_eq!(
-            fax.carried,
-            Some(page),
-            "lost in the turnaround after the page"
-        );
+        assert_eq!(fax.carried, Some(page), "lost in the turnaround after the page");
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -3099,10 +2709,8 @@ mod tests {
     #[test]
     fn a_pdf_goes_a_page_to_a_sheet_and_a_picture_as_one() {
         let pages: Vec<Page> = (0..3).map(|n| page_of(300 + 100 * n)).collect();
-        let sheets: Vec<fax::pdf::Sheet<'_>> = pages
-            .iter()
-            .map(|p| (p.lines.as_slice(), p.resolution))
-            .collect();
+        let sheets: Vec<fax::pdf::Sheet<'_>> =
+            pages.iter().map(|p| (p.lines.as_slice(), p.resolution)).collect();
         let path = scratch("three.pdf");
         std::fs::write(&path, fax::pdf::document(&sheets)).unwrap();
         let mut fax = Fax::new();
@@ -3110,11 +2718,7 @@ mod tests {
         assert_eq!(fax.trouble, None);
         assert_eq!(fax.source_said, ("document", "3 pages".to_owned()));
         let heights: Vec<usize> = fax.pages().iter().map(Page::height).collect();
-        assert_eq!(
-            heights,
-            [300, 400, 500],
-            "the pages are not the lengths they were"
-        );
+        assert_eq!(heights, [300, 400, 500], "the pages are not the lengths they were");
 
         // Fine: every page drawn again, with twice the lines.
         fax.showing = 2;
@@ -3123,26 +2727,15 @@ mod tests {
         let heights: Vec<usize> = fax.pages().iter().map(Page::height).collect();
         assert_eq!(heights, [600, 800, 1000]);
         assert_eq!(fax.showing, 2, "the preview went back to the first page");
-        let codings = [
-            Coding::ModifiedHuffman,
-            Coding::ModifiedRead,
-            Coding::Mmr,
-            Coding::Jbig,
-        ];
+        let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
         for (total, coding) in fax.coded_bits.into_iter().zip(codings) {
-            let each: usize = fax
-                .pages()
-                .iter()
-                .map(|p| coding.encode(&p.lines, p.resolution, 0).len())
-                .sum();
+            let each: usize = fax.pages().iter().map(|p| coding.encode(&p.lines, p.resolution, 0).len()).sum();
             assert_eq!(total, each, "{coding:?} is not the whole fax");
         }
 
         // A picture is one page, whatever came before it.
         let picture = scratch("square.png");
-        image::GrayImage::from_pixel(40, 40, image::Luma([0]))
-            .save(&picture)
-            .unwrap();
+        image::GrayImage::from_pixel(40, 40, image::Luma([0])).save(&picture).unwrap();
         fax.load(&picture);
         assert_eq!(fax.pages().len(), 1);
         assert_eq!(fax.showing, 0);
@@ -3159,24 +2752,12 @@ mod tests {
         fax.arrived(1, page.clone());
         let path = scratch("forward.pdf");
         fax.save(&path);
-        assert!(
-            fax.saved
-                .as_deref()
-                .is_some_and(|s| s.starts_with("saved to")),
-            "{:?}",
-            fax.saved
-        );
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("saved to")), "{:?}", fax.saved);
         fax.load(&path);
         assert_eq!(fax.trouble, None);
         assert_eq!(fax.pages().len(), 1);
         let back = &fax.pages()[0];
-        let wrong = back
-            .lines
-            .iter()
-            .flatten()
-            .zip(page.lines.iter().flatten())
-            .filter(|(a, b)| a != b)
-            .count();
+        let wrong = back.lines.iter().flatten().zip(page.lines.iter().flatten()).filter(|(a, b)| a != b).count();
         assert_eq!(back.height(), page.height());
         assert_eq!(wrong, 0, "{wrong} pels came back different");
         let _ = std::fs::remove_file(&path);
@@ -3191,13 +2772,7 @@ mod tests {
         }
         let path = scratch("call.pdf");
         fax.save_all(&path);
-        assert!(
-            fax.saved
-                .as_deref()
-                .is_some_and(|s| s.starts_with("3 pages saved to")),
-            "{:?}",
-            fax.saved
-        );
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("3 pages saved to")), "{:?}", fax.saved);
         let pdf = std::fs::read(&path).unwrap();
         let text = String::from_utf8_lossy(&pdf);
         assert_eq!(text.matches("/Type /Page ").count(), 3);
@@ -3208,18 +2783,14 @@ mod tests {
     #[test]
     fn a_document_longer_than_a_fax_goes_as_far_as_it_can() {
         let lines = lines_of(4, true);
-        let sheets: Vec<fax::pdf::Sheet<'_>> = (0..document::MOST_PAGES + 7)
-            .map(|_| (lines.as_slice(), Resolution::Standard))
-            .collect();
+        let sheets: Vec<fax::pdf::Sheet<'_>> =
+            (0..document::MOST_PAGES + 7).map(|_| (lines.as_slice(), Resolution::Standard)).collect();
         let path = scratch("long.pdf");
         std::fs::write(&path, fax::pdf::document(&sheets)).unwrap();
         let mut fax = Fax::new();
         fax.load(&path);
         assert_eq!(fax.pages().len(), document::MOST_PAGES);
-        assert_eq!(
-            fax.source_said.1,
-            format!("the first 50 of its {} pages", document::MOST_PAGES + 7)
-        );
+        assert_eq!(fax.source_said.1, format!("the first 50 of its {} pages", document::MOST_PAGES + 7));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3255,13 +2826,7 @@ mod tests {
     }
 
     fn v17() -> Carried {
-        Carried {
-            coding: "MH",
-            modulation: "V.17",
-            rate: 14_400,
-            symbol_rate: 0,
-            correcting: false,
-        }
+        Carried { coding: "MH", modulation: "V.17", rate: 14_400, symbol_rate: 0, correcting: false }
     }
 
     fn sent(frames: Vec<Exchanged>) -> CallRecord {
@@ -3282,10 +2847,7 @@ mod tests {
         let (headline, colour) = call.headline();
         assert_eq!(headline, "Confirmed: the far end took 1 page (MCF)");
         assert_eq!(colour, BEST);
-        assert_eq!(
-            call.details(0.0),
-            "1 sent · 0 received · V.17 14400 · MH · no ECM · 0:46"
-        );
+        assert_eq!(call.details(0.0), "1 sent · 0 received · V.17 14400 · MH · no ECM · 0:46");
         assert_eq!(call.short().0, "MCF");
     }
 
@@ -3313,40 +2875,18 @@ mod tests {
         let mut call = sent(telstra()[..4].to_vec());
         call.last_phase = Some(fax::call::Phase::AwaitingConfirm.name());
         call.trouble = Some("no answer to the DCS".to_owned());
-        assert_eq!(
-            call.verdict(),
-            Verdict::Failed {
-                phase: 'B',
-                why: "no answer to the DCS".to_owned()
-            }
-        );
-        assert!(
-            call.headline().0.starts_with("Disconnected in phase B"),
-            "{}",
-            call.headline().0
-        );
+        assert_eq!(call.verdict(), Verdict::Failed { phase: 'B', why: "no answer to the DCS".to_owned() });
+        assert!(call.headline().0.starts_with("Disconnected in phase B"), "{}", call.headline().0);
         assert_eq!(call.short().0, "failed B");
 
         let mut stopped = sent(telstra()[..6].to_vec());
         stopped.last_phase = Some(fax::call::Phase::AwaitingReceipt.name());
         stopped.stopped_here = true;
-        assert_eq!(
-            stopped.verdict(),
-            Verdict::Failed {
-                phase: 'D',
-                why: "stopped at this end".to_owned()
-            }
-        );
+        assert_eq!(stopped.verdict(), Verdict::Failed { phase: 'D', why: "stopped at this end".to_owned() });
 
         let mut nobody = sent(Vec::new());
         nobody.last_phase = Some(fax::call::Phase::Calling.name());
-        assert_eq!(
-            nobody.verdict(),
-            Verdict::Failed {
-                phase: 'A',
-                why: "no fax machine answered".to_owned()
-            }
-        );
+        assert_eq!(nobody.verdict(), Verdict::Failed { phase: 'A', why: "no fax machine answered".to_owned() });
     }
 
     #[test]
@@ -3358,9 +2898,7 @@ mod tests {
         let mut call = sent(frames);
         call.trouble = Some("the far end hung up while this end was sending the page".to_owned());
         match call.verdict() {
-            Verdict::Failed { why, .. } => {
-                assert!(why.ends_with("after page 1 was confirmed"), "{why}")
-            }
+            Verdict::Failed { why, .. } => assert!(why.ends_with("after page 1 was confirmed"), "{why}"),
             other => panic!("{other:?}"),
         }
     }
@@ -3370,13 +2908,7 @@ mod tests {
         let near = |frame| Exchanged { frame, ours: true };
         let far = |frame| Exchanged { frame, ours: false };
         let mut frames = telstra()[..5].to_vec();
-        frames.extend([
-            near(Frame::Eop),
-            near(Frame::Eop),
-            near(Frame::Eop),
-            far(Frame::Mcf),
-            near(Frame::Dcn),
-        ]);
+        frames.extend([near(Frame::Eop), near(Frame::Eop), near(Frame::Eop), far(Frame::Mcf), near(Frame::Dcn)]);
         assert_eq!(sent(frames).confirmed_pages(), 1);
     }
 
@@ -3406,70 +2938,37 @@ mod tests {
 
     #[test]
     fn the_rate_table_goes_fastest_first() {
-        let ours = [
-            t30::Modulation::V27ter,
-            t30::Modulation::V29,
-            t30::Modulation::V17,
-        ];
+        let ours = [t30::Modulation::V27ter, t30::Modulation::V29, t30::Modulation::V17];
         let rows = rate_rows(true, &ours, 10, 20, 30);
         let order: Vec<(u32, &str)> = rows.iter().map(|r| (r.rate, r.modulation)).collect();
-        assert_eq!(
-            order,
-            vec![
-                (33_600, "V.34"),
-                (14_400, "V.17"),
-                (12_000, "V.17"),
-                (9600, "V.17"),
-                (9600, "V.29"),
-                (7200, "V.17"),
-                (7200, "V.29"),
-                (4800, "V.27ter"),
-                (2400, "V.27ter"),
-            ]
-        );
+        assert_eq!(order, vec![
+            (33_600, "V.34"),
+            (14_400, "V.17"),
+            (12_000, "V.17"),
+            (9600, "V.17"),
+            (9600, "V.29"),
+            (7200, "V.17"),
+            (7200, "V.29"),
+            (4800, "V.27ter"),
+            (2400, "V.27ter"),
+        ]);
         assert_eq!((rows[0].least, rows[1].least, rows[1].most), (10, 20, 30));
     }
 
     #[test]
     fn the_rate_the_call_agreed_is_the_one_lit() {
-        let ours = [
-            t30::Modulation::V27ter,
-            t30::Modulation::V29,
-            t30::Modulation::V17,
-        ];
+        let ours = [t30::Modulation::V27ter, t30::Modulation::V29, t30::Modulation::V17];
         let rows = rate_rows(true, &ours, 10, 20, 30);
-        let lit: Vec<(u32, &str)> = rows
-            .iter()
-            .filter(|r| agreed(r, Some(v17())))
-            .map(|r| (r.rate, r.modulation))
-            .collect();
+        let lit: Vec<(u32, &str)> =
+            rows.iter().filter(|r| agreed(r, Some(v17()))).map(|r| (r.rate, r.modulation)).collect();
         assert_eq!(lit, vec![(14_400, "V.17")]);
-        assert!(
-            rows.iter().all(|r| !agreed(r, None)),
-            "lit before anything was agreed"
-        );
+        assert!(rows.iter().all(|r| !agreed(r, None)), "lit before anything was agreed");
         // V.34 at whatever rate it settled on, which is seldom 33 600.
-        let v34 = Carried {
-            coding: "JBIG",
-            modulation: "V.34",
-            rate: 26_400,
-            symbol_rate: 3200,
-            correcting: true,
-        };
-        let lit: Vec<&str> = rows
-            .iter()
-            .filter(|r| agreed(r, Some(v34)))
-            .map(|r| r.modulation)
-            .collect();
+        let v34 = Carried { coding: "JBIG", modulation: "V.34", rate: 26_400, symbol_rate: 3200, correcting: true };
+        let lit: Vec<&str> = rows.iter().filter(|r| agreed(r, Some(v34))).map(|r| r.modulation).collect();
         assert_eq!(lit, vec!["V.34"]);
         // V.27 ter written with its space still matches.
-        let v27 = Carried {
-            coding: "MH",
-            modulation: "V.27 ter",
-            rate: 4800,
-            symbol_rate: 0,
-            correcting: false,
-        };
+        let v27 = Carried { coding: "MH", modulation: "V.27 ter", rate: 4800, symbol_rate: 0, correcting: false };
         assert!(rows.iter().any(|r| agreed(r, Some(v27)) && r.rate == 4800));
     }
 
@@ -3481,11 +2980,7 @@ mod tests {
         assert!((p.page_left - 2.5).abs() < 1e-9, "{}", p.page_left);
         assert!((p.rest_left - 2.0).abs() < 1e-9, "{}", p.rest_left);
         assert_eq!(send_progress(&bits, 0, 0.5, 14_400), None, "no page yet");
-        assert_eq!(
-            send_progress(&bits, 4, 0.5, 14_400),
-            None,
-            "past the last page"
-        );
+        assert_eq!(send_progress(&bits, 4, 0.5, 14_400), None, "past the last page");
         assert_eq!(send_progress(&bits, 1, 0.5, 0), None, "no rate yet");
     }
 
@@ -3502,10 +2997,7 @@ mod tests {
         frame.fax_sending = true;
         fax.observe(&frame, 1.0);
         assert_eq!(fax.calls.len(), 1);
-        assert_eq!(
-            fax.calls[0].far, "1300368909",
-            "the number dialled until the far end says"
-        );
+        assert_eq!(fax.calls[0].far, "1300368909", "the number dialled until the far end says");
         frame.fax_identity = "     1300  368 909".to_owned();
         frame.fax_phase = Some(fax::call::Phase::AwaitingReceipt.name());
         frame.fax_sheet = 1;
@@ -3544,32 +3036,18 @@ mod tests {
         fax.arrived(1, page_of(30));
         fax.arrived(2, page_of(40));
         fax.arrived(2, page_of(41));
-        let kept: Vec<(usize, usize)> = fax.calls[0]
-            .received
-            .iter()
-            .map(|(s, p)| (*s, p.height()))
-            .collect();
-        assert_eq!(
-            kept,
-            vec![(1, 30), (2, 41)],
-            "a page handed over again replaces itself"
-        );
+        let kept: Vec<(usize, usize)> = fax.calls[0].received.iter().map(|(s, p)| (*s, p.height())).collect();
+        assert_eq!(kept, vec![(1, 30), (2, 41)], "a page handed over again replaces itself");
         fax.open(0, 1);
-        assert_eq!(
-            fax.opened.as_ref().map(|(c, p, s)| (*c, *p, s.lines.len())),
-            Some((0, 1, 41))
-        );
+        assert_eq!(fax.opened.as_ref().map(|(c, p, s)| (*c, *p, s.lines.len())), Some((0, 1, 41)));
         assert_eq!(fax.shown_view(), View::Received);
     }
 
     #[test]
     fn a_call_record_saves_every_page_as_one_pdf_or_a_png_each() {
         let pages = [page_of(20), page_of(30)];
-        let refs: Vec<(usize, &[Vec<bool>], Resolution)> = pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i + 1, p.lines.as_slice(), p.resolution))
-            .collect();
+        let refs: Vec<(usize, &[Vec<bool>], Resolution)> =
+            pages.iter().enumerate().map(|(i, p)| (i + 1, p.lines.as_slice(), p.resolution)).collect();
         let pdf = scratch("record.pdf");
         assert!(save_pages(&refs, &pdf).starts_with("2 pages saved"));
         assert!(std::fs::metadata(&pdf).is_ok());
@@ -3626,11 +3104,7 @@ mod tests {
         // A DCS for V.17 at 14 400: bits 11 to 14 are 0001 (Table 2).
         let mut dcs = vec![0u8; 3];
         dcs[1] = 0b0010_0000;
-        assert_eq!(
-            t30::command_rate(&dcs),
-            Some((t30::Modulation::V17, 14_400)),
-            "the field in this test"
-        );
+        assert_eq!(t30::command_rate(&dcs), Some((t30::Modulation::V17, 14_400)), "the field in this test");
         frame.fax_capabilities = Some(dcs);
         fax.observe(&frame, 0.0);
         let caps = fax.far.clone().expect("no far end");
@@ -3653,10 +3127,7 @@ mod tests {
             })
             .collect();
         let mut fax = Fax::new();
-        fax.pages = vec![Page {
-            lines,
-            resolution: Resolution::Standard,
-        }];
+        fax.pages = vec![Page { lines, resolution: Resolution::Standard }];
         fax.line_ends = vec![None];
         for coding in ["MH", "MR", "MMR", "JBIG"] {
             fax.coding = coding;
@@ -3674,10 +3145,7 @@ mod tests {
             assert_eq!(of, 300);
             assert!(half > 200.0, "{coding}: half the bits is line {half}");
             let (all, _) = fax.line_reached(0, 1.0).unwrap();
-            assert!(
-                (all - 300.0).abs() < 1.0,
-                "{coding}: every bit is line {all}"
-            );
+            assert!((all - 300.0).abs() < 1.0, "{coding}: every bit is line {all}");
         }
         fax.coding = "-";
         assert_eq!(fax.line_reached(0, 0.5), None, "a coding not known yet");
@@ -3688,34 +3156,20 @@ mod tests {
         // The same sheet at standard and at fine: half the lines, the same
         // paper, the same picture -- a pixel a pel, standard lines doubled.
         let size = |resolution: Resolution, n| {
-            let page = Page {
-                lines: lines_of(resolution.lines(), false),
-                resolution,
-            };
+            let page = Page { lines: lines_of(resolution.lines(), false), resolution };
             let image = Fax::thumbnail(&page, 16384, n);
             picture_size(1.0, image.size[0], image.size[1], 1)
         };
         for n in [1, 2, 3] {
             let (a, b) = (size(Resolution::Standard, n), size(Resolution::Fine, n));
-            assert!(
-                (a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01,
-                "{a:?} against {b:?}"
-            );
+            assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
             assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.07, "not A4: {a:?}");
         }
-        let page = Page {
-            lines: lines_of(5, true),
-            resolution: Resolution::Fine,
-        };
+        let page = Page { lines: lines_of(5, true), resolution: Resolution::Fine };
         assert_eq!(Fax::thumbnail(&page, 16384, 1).size, [1728, 5]);
         assert_eq!(Fax::thumbnail(&page, 16384, 2).size, [864, 3]);
         // Shrunk, a block all ink is still black, and black and white at 1:1.
-        assert!(
-            Fax::thumbnail(&page, 16384, 2)
-                .pixels
-                .iter()
-                .all(|p| *p == Color32::BLACK)
-        );
+        assert!(Fax::thumbnail(&page, 16384, 2).pixels.iter().all(|p| *p == Color32::BLACK));
     }
 
     #[test]
@@ -3741,10 +3195,6 @@ mod tests {
         assert_eq!(call.verdict(), Verdict::Confirmed);
         // Still receiving the page when the line went: not confirmed.
         call.last_phase = Some(fax::call::Phase::Receiving.name());
-        assert!(
-            matches!(call.verdict(), Verdict::Failed { phase: 'C', .. }),
-            "{:?}",
-            call.verdict()
-        );
+        assert!(matches!(call.verdict(), Verdict::Failed { phase: 'C', .. }), "{:?}", call.verdict());
     }
 }

@@ -88,11 +88,7 @@ impl Uri {
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let (scheme, rest) = text.split_once(':')?;
-        if scheme.is_empty()
-            || !scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+')
-        {
+        if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+') {
             return None;
         }
         // Parameters end the host part. The user part can contain neither a

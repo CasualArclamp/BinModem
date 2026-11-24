@@ -101,17 +101,11 @@ impl Agc {
 
     /// Starting at gain `g`, and kept within 20 dB of it.
     pub(super) fn at(g: f64) -> Self {
-        Self {
-            gain: g,
-            power: 1.0 / (g * g),
-            zone: 0.0,
-            trained: g,
-        }
+        Self { gain: g, power: 1.0 / (g * g), zone: 0.0, trained: g }
     }
 
     pub(super) fn value(&self) -> f64 {
-        self.gain
-            .clamp(self.trained / GAIN_RANGE, self.trained * GAIN_RANGE)
+        self.gain.clamp(self.trained / GAIN_RANGE, self.trained * GAIN_RANGE)
     }
 
     /// A gain found outright, by a resync's fit: the power estimate starts
@@ -128,9 +122,7 @@ impl Agc {
         self.power += rate * (unscaled / mean - self.power);
         self.zone = 0.5 * (1.0 + zone).ln();
         let says = 1.0 / self.power.max(1e-30).sqrt();
-        self.gain = self
-            .gain
-            .clamp(says * (-self.zone).exp(), says * self.zone.exp());
+        self.gain = self.gain.clamp(says * (-self.zone).exp(), says * self.zone.exp());
     }
 
     /// One accepted symbol's decision: `e` the error of `z` from it, against
@@ -205,10 +197,7 @@ impl Core {
 
     /// Equalise the symbol at `next_symbol` (`v34/receiver.rs:910-923`).
     fn equalise(&mut self) -> Point {
-        let wide = self
-            .front
-            .samples(self.next_symbol, REACH + 1)
-            .expect("the caller checked the samples are here");
+        let wide = self.front.samples(self.next_symbol, REACH + 1).expect("the caller checked the samples are here");
         self.next_symbol += 2;
         let row = &wide[1..wide.len() - 1];
         let y = apply(&self.taps, row);
@@ -218,27 +207,13 @@ impl Core {
             .taps
             .iter()
             .enumerate()
-            .fold(Complex::ZERO, |sum, (i, w)| {
-                sum + *w * (wide[i + 2] - wide[i]).scale(0.5)
-            });
+            .fold(Complex::ZERO, |sum, (i, w)| sum + *w * (wide[i + 2] - wide[i]).scale(0.5));
         let spin = Complex::from_polar(1.0, -self.rotation);
         let gain = self.gain.value();
         let z = (y * spin).scale(gain);
         let (label, nearest) = self.slicer.decide(z);
-        let point = Point {
-            z,
-            nearest,
-            label,
-            index: self.produced,
-        };
-        self.pending = Some(Pending {
-            wide,
-            rate,
-            spin,
-            unscaled: y.norm_sqr(),
-            gain,
-            point,
-        });
+        let point = Point { z, nearest, label, index: self.produced };
+        self.pending = Some(Pending { wide, rate, spin, unscaled: y.norm_sqr(), gain, point });
         point
     }
 
@@ -249,14 +224,7 @@ impl Core {
     /// their thresholds keep their meaning whatever the decision
     /// (design.md 2.6). None if there was no symbol to settle.
     pub fn settle(&mut self, target: Complex) -> Option<Symbol> {
-        let Pending {
-            wide,
-            rate,
-            spin,
-            unscaled,
-            gain,
-            point,
-        } = self.pending.take()?;
+        let Pending { wide, rate, spin, unscaled, gain, point } = self.pending.take()?;
         let row = &wide[1..wide.len() - 1];
         let z = point.z;
         let e = z - target;
@@ -287,8 +255,7 @@ impl Core {
         // slip at four points turns the constellation 40.5 degrees: an error
         // under the loss threshold, and every symbol refused by a gate nine
         // times the settled error, so nothing would ever learn or resync.
-        let refusing = self.refused.len() == judged
-            && self.refused.iter().filter(|r| **r).count() * 4 >= judged * 3;
+        let refusing = self.refused.len() == judged && self.refused.iter().filter(|r| **r).count() * 4 >= judged * 3;
         // And a third. Errors that grow gradually are let through a gate
         // relative to what the errors settle to, and the settled error rises
         // to meet them: a -6 dB ramp over half a second on the 128-point
@@ -297,12 +264,7 @@ impl Core {
         // what the errors had settled to up to 384 symbols before, in the
         // oldest copy of the loops kept.
         let slid = self.options.relative_gate
-            && self.earlier.front().is_some_and(|l| {
-                recent
-                    > SLID
-                        * l.settled
-                            .max(self.slicer.min_distance_squared() / GATE_FLOOR)
-            });
+            && self.earlier.front().is_some_and(|l| recent > SLID * l.settled.max(self.slicer.min_distance_squared() / GATE_FLOOR));
         if !self.held {
             match self.lost {
                 None if self.recent.len() == judged
@@ -331,9 +293,7 @@ impl Core {
             for (tap, x) in self.taps.iter_mut().zip(row) {
                 *tap -= back * x.conj();
             }
-            let power = self
-                .slicer
-                .phase_power(target, self.options.unweighted_phase);
+            let power = self.slicer.phase_power(target, self.options.unweighted_phase);
             let wrong = (z * target.conj()).im / power;
             self.turn += FREQUENCY_GAIN * wrong;
             if self.options.turn_limit_hz.is_finite() {
@@ -358,8 +318,7 @@ impl Core {
                 self.gain.trim(e, z, mean);
             }
             let zone = self.slicer.agc_zone(self.settled);
-            self.gain
-                .follow(unscaled, mean, self.slicer.agc_rate(), zone);
+            self.gain.follow(unscaled, mean, self.slicer.agc_rate(), zone);
         }
         let symbol = self.next_symbol / 2;
         if self.lost.is_none() && symbol.is_multiple_of(EARLIER_EVERY) {
@@ -370,11 +329,7 @@ impl Core {
         self.residual += 0.01 * (near.sqrt() - self.residual);
         self.last = z;
         self.produced += 1;
-        if self.options.anchor
-            && self.lost.is_none()
-            && !self.held
-            && self.produced.is_multiple_of(ANCHOR_EVERY)
-        {
+        if self.options.anchor && self.lost.is_none() && !self.held && self.produced.is_multiple_of(ANCHOR_EVERY) {
             self.anchor();
         }
         if !self.held
@@ -384,14 +339,7 @@ impl Core {
         {
             self.resync();
         }
-        Some(Symbol {
-            point: z,
-            target,
-            nearest: point.nearest,
-            label: point.label,
-            error: near,
-            accepted,
-        })
+        Some(Symbol { point: z, target, nearest: point.nearest, label: point.label, error: near, accepted })
     }
 
     /// Keep a copy of the loops as they are (`v34/receiver.rs:971-986`).
@@ -424,11 +372,7 @@ impl Core {
     /// there is goes back instead.
     pub fn rewind(&mut self, back: u64) -> bool {
         let now = self.next_symbol / 2;
-        let (kept, found) = match self
-            .earlier
-            .iter()
-            .rposition(|l| now.saturating_sub(l.symbol) >= back)
-        {
+        let (kept, found) = match self.earlier.iter().rposition(|l| now.saturating_sub(l.symbol) >= back) {
             Some(kept) => (kept, true),
             None if self.options.rewind_safely && !self.earlier.is_empty() => (0, false),
             None => {
@@ -455,9 +399,7 @@ impl Core {
         self.gain = loops.gain;
         // Taps from before the anchor last moved them belong to symbols
         // centred where they were then.
-        self.next_symbol = self
-            .next_symbol
-            .saturating_add_signed(loops.anchored - self.anchored);
+        self.next_symbol = self.next_symbol.saturating_add_signed(loops.anchored - self.anchored);
         self.anchored = loops.anchored;
         found
     }

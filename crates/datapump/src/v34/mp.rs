@@ -94,10 +94,7 @@ fn crc_at(length: usize) -> usize {
 /// start bits.
 fn covered(bits: &[bool], length: usize) -> Vec<bool> {
     let starts = start_bits(length);
-    (SYNC_ONES + 1..crc_at(length))
-        .filter(|i| !starts.contains(i))
-        .map(|i| bits[i])
-        .collect()
+    (SYNC_ONES + 1..crc_at(length)).filter(|i| !starts.contains(i)).map(|i| bits[i]).collect()
 }
 
 /// Bits 0:19, which MP and MPh lay out alike: the sync, a start bit, the type
@@ -114,18 +111,9 @@ fn head(type1: bool) -> Vec<bool> {
 /// rate mask, bit 50 (asymmetric rates -- of the data in MP, of the control
 /// channel in MPh), a start bit, then the precoding coefficients or sixteen
 /// reserved bits with their start bits, the CRC and the fill.
-fn tail(
-    mut bits: Vec<bool>,
-    rates: u16,
-    bit_50: bool,
-    precoding: Option<[Coefficient; 3]>,
-) -> Vec<bool> {
+fn tail(mut bits: Vec<bool>, rates: u16, bit_50: bool, precoding: Option<[Coefficient; 3]>) -> Vec<bool> {
     debug_assert_eq!(bits.len(), 34);
-    let length = if precoding.is_some() {
-        TYPE1_BITS
-    } else {
-        TYPE0_BITS
-    };
+    let length = if precoding.is_some() { TYPE1_BITS } else { TYPE0_BITS };
     bits.push(false); // 34: start
     put(&mut bits, u32::from(rates & 0x3fff), 15); // 35:49, 49 reserved
     bits.push(bit_50);
@@ -173,12 +161,7 @@ fn check(bits: &[bool]) -> Option<bool> {
 
 /// h(1), h(2) and h(3) out of a Type 1 sequence.
 fn coefficients(bits: &[bool]) -> [Coefficient; 3] {
-    let coefficient = |from: usize| -> Coefficient {
-        (
-            get(bits, from, 16) as u16 as i16,
-            get(bits, from + 17, 16) as u16 as i16,
-        )
-    };
+    let coefficient = |from: usize| -> Coefficient { (get(bits, from, 16) as u16 as i16, get(bits, from + 17, 16) as u16 as i16) };
     [coefficient(52), coefficient(86), coefficient(120)]
 }
 
@@ -336,11 +319,7 @@ impl Mph {
         let type1 = check(bits)?;
         Some(Self {
             max_rate: get(bits, 20, 4) as u8,
-            control_rate: if bits[27] {
-                ControlRate::Bps2400
-            } else {
-                ControlRate::Bps1200
-            },
+            control_rate: if bits[27] { ControlRate::Bps2400 } else { ControlRate::Bps1200 },
             trellis: trellis_of(get(bits, 29, 2)),
             non_linear: bits[31],
             expanded_shaping: bits[32],
@@ -403,12 +382,7 @@ impl Search {
     /// One more bit, with `read` to make a sequence of bits that start at its
     /// frame sync. With `exact_sync`, seventeen ones with another in front of
     /// them are not a sync.
-    fn feed<T>(
-        &mut self,
-        bit: bool,
-        exact_sync: bool,
-        read: fn(&[bool]) -> Option<T>,
-    ) -> Option<Hit<T>> {
+    fn feed<T>(&mut self, bit: bool, exact_sync: bool, read: fn(&[bool]) -> Option<T>) -> Option<Hit<T>> {
         self.ones = if bit { self.ones + 1 } else { 0 };
         self.bits.push(bit);
         // A sequence is sync, a start bit and the type; a sequence is only
@@ -544,10 +518,7 @@ mod tests {
     #[test]
     fn the_two_types_are_the_lengths_their_tables_give() {
         assert_eq!(ours().to_bits().len(), TYPE0_BITS);
-        let with = Mp {
-            precoding: Some([(1, -1), (16383, -16384), (0, 7)]),
-            ..ours()
-        };
+        let with = Mp { precoding: Some([(1, -1), (16383, -16384), (0, 7)]), ..ours() };
         assert_eq!(with.to_bits().len(), TYPE1_BITS);
     }
 
@@ -567,14 +538,7 @@ mod tests {
 
     #[test]
     fn both_types_come_back_and_a_wrong_bit_does_not() {
-        for mp in [
-            ours(),
-            ours().acknowledged(),
-            Mp {
-                precoding: Some([(1, -1), (16383, -16384), (0, 7)]),
-                ..ours()
-            },
-        ] {
+        for mp in [ours(), ours().acknowledged(), Mp { precoding: Some([(1, -1), (16383, -16384), (0, 7)]), ..ours() }] {
             let bits = mp.to_bits();
             assert_eq!(Mp::from_bits(&bits), Some(mp));
             for i in 17..bits.len() - 3 {
@@ -593,14 +557,7 @@ mod tests {
         stream.extend(ours().acknowledged().to_bits());
         stream.extend(std::iter::repeat_n(true, 20));
         let found: Vec<Found> = stream.iter().filter_map(|&b| finder.feed(b)).collect();
-        assert_eq!(
-            found,
-            vec![
-                Found::Mp(ours()),
-                Found::Mp(ours().acknowledged()),
-                Found::E
-            ]
-        );
+        assert_eq!(found, vec![Found::Mp(ours()), Found::Mp(ours().acknowledged()), Found::E]);
     }
 
     /// A recipient's MPh, Type 1 with its precoder's coefficients.
@@ -620,12 +577,7 @@ mod tests {
 
     /// A source's: Type 0, with bits 29 to 32 zero (NOTE 2).
     fn source() -> Mph {
-        Mph {
-            max_rate: 14,
-            control_rate: ControlRate::Bps1200,
-            rates: Mp::rates_up_to(14),
-            ..Mph::default()
-        }
+        Mph { max_rate: 14, control_rate: ControlRate::Bps1200, rates: Mp::rates_up_to(14), ..Mph::default() }
     }
 
     /// A table's fields one after another, each checked to start at the bit
@@ -645,10 +597,7 @@ mod tests {
     /// model of Figure 14's cells, over bits 18 to 33, 35 to 50 and 52 to 67.
     #[test]
     fn a_type_0_mph_is_table_23_bit_for_bit() {
-        let mph = Mph {
-            precoding: None,
-            ..recipient()
-        };
+        let mph = Mph { precoding: None, ..recipient() };
         let bits = laid_out(&[
             (0, "11111111111111111"), // frame sync
             (17, "0"),                // start bit
@@ -725,30 +674,13 @@ mod tests {
     #[test]
     fn both_types_of_mph_come_back_and_a_wrong_bit_does_not() {
         let others = [
-            Mph {
-                precoding: None,
-                trellis: Trellis::States64,
-                expanded_shaping: true,
-                ..recipient()
-            },
-            Mph {
-                max_rate: 1,
-                rates: 1,
-                control_rate: ControlRate::Bps2400,
-                ..Mph::default()
-            },
-            Mph {
-                precoding: Some([(i16::MIN, i16::MAX), (-1, 1), (0, 0)]),
-                ..source()
-            },
+            Mph { precoding: None, trellis: Trellis::States64, expanded_shaping: true, ..recipient() },
+            Mph { max_rate: 1, rates: 1, control_rate: ControlRate::Bps2400, ..Mph::default() },
+            Mph { precoding: Some([(i16::MIN, i16::MAX), (-1, 1), (0, 0)]), ..source() },
         ];
         for mph in [source(), recipient()].into_iter().chain(others) {
             let bits = mph.to_bits();
-            let length = if mph.precoding.is_some() {
-                TYPE1_BITS
-            } else {
-                TYPE0_BITS
-            };
+            let length = if mph.precoding.is_some() { TYPE1_BITS } else { TYPE0_BITS };
             assert_eq!(bits.len(), length);
             assert_eq!(Mph::from_bits(&bits), Some(mph));
             for i in 0..crc_at(length) + 16 {
@@ -767,14 +699,8 @@ mod tests {
         for mph in [source(), recipient()] {
             let bits = mph.to_bits();
             let length = bits.len();
-            let reserved: Vec<usize> = [19, 24, 25, 26, 28, 33, 49]
-                .into_iter()
-                .chain(if length == TYPE0_BITS {
-                    52..68
-                } else {
-                    154..170
-                })
-                .collect();
+            let reserved: Vec<usize> =
+                [19, 24, 25, 26, 28, 33, 49].into_iter().chain(if length == TYPE0_BITS { 52..68 } else { 154..170 }).collect();
             assert!(reserved.iter().all(|&i| !bits[i]), "sent as zeros");
             // From a modem that has found a use for them, sealed again.
             let mut used = bits.clone();
@@ -795,10 +721,7 @@ mod tests {
         for k in 0..16 {
             bits[crc_at(TYPE0_BITS) + k] = sealed >> k & 1 == 1;
         }
-        assert_eq!(
-            Mph::from_bits(&bits).map(|m| m.trellis),
-            Some(Trellis::States16)
-        );
+        assert_eq!(Mph::from_bits(&bits).map(|m| m.trellis), Some(Trellis::States16));
     }
 
     /// MPh keeps MP's frame (Tables 20 and 21 against 23 and 24): the one
@@ -808,21 +731,14 @@ mod tests {
         for mph in [source(), recipient()] {
             let mp = Mp::from_bits(&mph.to_bits()).expect("MP's framing");
             assert_eq!(mp.call_to_answer, mph.max_rate);
-            assert_eq!(
-                (mp.trellis, mp.non_linear, mp.expanded_shaping),
-                (mph.trellis, mph.non_linear, mph.expanded_shaping)
-            );
+            assert_eq!((mp.trellis, mp.non_linear, mp.expanded_shaping), (mph.trellis, mph.non_linear, mph.expanded_shaping));
             assert_eq!((mp.rates, mp.precoding), (mph.rates, mph.precoding));
             assert!(!mp.auxiliary && !mp.acknowledge, "reserved in MPh");
         }
     }
 
     fn with(max_rate: u8, rates: u16) -> Mph {
-        Mph {
-            max_rate,
-            rates,
-            ..Mph::default()
-        }
+        Mph { max_rate, rates, ..Mph::default() }
     }
 
     #[test]
@@ -834,14 +750,8 @@ mod tests {
         assert_eq!(primary_rate(&with(9, all), &with(14, all)), Some(9));
         // A maximum that is not enabled: the next rate down that both enable.
         let no_26400_or_28800 = all & !(1 << 11) & !(1 << 10);
-        assert_eq!(
-            primary_rate(&with(12, all), &with(12, no_26400_or_28800)),
-            Some(10)
-        );
-        assert_eq!(
-            primary_rate(&with(14, all & !(1 << 13)), &with(14, all)),
-            Some(13)
-        );
+        assert_eq!(primary_rate(&with(12, all), &with(12, no_26400_or_28800)), Some(10));
+        assert_eq!(primary_rate(&with(14, all & !(1 << 13)), &with(14, all)), Some(13));
         // Enabled means enabled in both masks.
         assert_eq!(primary_rate(&with(14, 0b0111), &with(14, 0b1110)), Some(3));
         // And when nothing is, there is no rate (F-V34 16 in the notes): masks
@@ -854,11 +764,7 @@ mod tests {
         // Fifteen fits the field but is no rate of Table 23's.
         assert_eq!(primary_rate(&with(15, all), &with(15, all)), Some(14));
         // One rule, one number at both ends.
-        for (a, b) in [
-            (with(14, all), with(10, 0x0fff)),
-            (with(7, 0x3ff0), with(12, all)),
-            (source(), recipient()),
-        ] {
+        for (a, b) in [(with(14, all), with(10, 0x0fff)), (with(7, 0x3ff0), with(12, all)), (source(), recipient())] {
             assert_eq!(primary_rate(&a, &b), primary_rate(&b, &a));
         }
         assert_eq!(primary_rate(&source(), &recipient()), Some(13));
@@ -867,51 +773,22 @@ mod tests {
     #[test]
     fn the_control_channel_goes_at_what_the_far_end_asks_only_if_both_allow_it() {
         use ControlRate::{Bps1200, Bps2400};
-        let asks = |control_rate, asymmetric_control| Mph {
-            control_rate,
-            asymmetric_control,
-            ..Mph::default()
-        };
+        let asks = |control_rate, asymmetric_control| Mph { control_rate, asymmetric_control, ..Mph::default() };
         // Symmetric unless both say otherwise, and then the lower of the two.
-        assert_eq!(
-            control_rates(&asks(Bps2400, false), &asks(Bps1200, false)),
-            (Bps1200, Bps1200)
-        );
-        assert_eq!(
-            control_rates(&asks(Bps2400, false), &asks(Bps2400, false)),
-            (Bps2400, Bps2400)
-        );
-        assert_eq!(
-            control_rates(&asks(Bps1200, true), &asks(Bps2400, false)),
-            (Bps1200, Bps1200)
-        );
+        assert_eq!(control_rates(&asks(Bps2400, false), &asks(Bps1200, false)), (Bps1200, Bps1200));
+        assert_eq!(control_rates(&asks(Bps2400, false), &asks(Bps2400, false)), (Bps2400, Bps2400));
+        assert_eq!(control_rates(&asks(Bps1200, true), &asks(Bps2400, false)), (Bps1200, Bps1200));
         // Both allow it: each transmits at what the other asked for.
-        assert_eq!(
-            control_rates(&asks(Bps2400, true), &asks(Bps1200, true)),
-            (Bps1200, Bps2400)
-        );
+        assert_eq!(control_rates(&asks(Bps2400, true), &asks(Bps1200, true)), (Bps1200, Bps2400));
         // What one end sends at is what the other receives at, every way round.
-        for a in [
-            asks(Bps1200, false),
-            asks(Bps2400, false),
-            asks(Bps1200, true),
-            asks(Bps2400, true),
-        ] {
-            for b in [
-                asks(Bps1200, false),
-                asks(Bps2400, false),
-                asks(Bps1200, true),
-                asks(Bps2400, true),
-            ] {
+        for a in [asks(Bps1200, false), asks(Bps2400, false), asks(Bps1200, true), asks(Bps2400, true)] {
+            for b in [asks(Bps1200, false), asks(Bps2400, false), asks(Bps1200, true), asks(Bps2400, true)] {
                 let (a_sends, a_hears) = control_rates(&a, &b);
                 let (b_sends, b_hears) = control_rates(&b, &a);
                 assert_eq!((a_sends, a_hears), (b_hears, b_sends), "{a:?} and {b:?}");
             }
         }
-        assert_eq!(
-            (Bps1200.bits_per_symbol(), Bps2400.bits_per_symbol()),
-            (2, 4)
-        );
+        assert_eq!((Bps1200.bits_per_symbol(), Bps2400.bits_per_symbol()), (2, 4));
     }
 
     /// ALT for `symbols` 600 baud symbols at 1200 bit/s: zeros and ones by
@@ -935,18 +812,13 @@ mod tests {
         for i in 0..64 {
             descrambler.descramble(i % 8 < 4);
         }
-        bits.iter()
-            .map(|&bit| descrambler.descramble(scrambler.scramble(bit)))
-            .collect()
+        bits.iter().map(|&bit| descrambler.descramble(scrambler.scramble(bit))).collect()
     }
 
     /// Every find, with the bit it was made on.
     fn finds(bits: &[bool]) -> Vec<(usize, MphFound)> {
         let mut finder = MphFinder::new();
-        bits.iter()
-            .enumerate()
-            .filter_map(|(i, &bit)| finder.feed(bit).map(|found| (i, found)))
-            .collect()
+        bits.iter().enumerate().filter_map(|(i, &bit)| finder.feed(bit).map(|found| (i, found))).collect()
     }
 
     #[test]
@@ -954,11 +826,7 @@ mod tests {
         // 12.4: ALT, then MPh until the far end's has come in, then E. An ALT
         // from zero ends on a one, which runs on into the first sync.
         for first in [false, true] {
-            for (symbols, sent) in [
-                (16, vec![source(), source()]),
-                (120, vec![recipient()]),
-                (40, vec![recipient(), recipient()]),
-            ] {
+            for (symbols, sent) in [(16, vec![source(), source()]), (120, vec![recipient()]), (40, vec![recipient(), recipient()])] {
                 let mut bits = alt(first, symbols);
                 let alt_ends = bits.len();
                 for mph in &sent {
@@ -968,23 +836,11 @@ mod tests {
                 let e_ends = bits.len();
                 bits.extend(flags());
                 let found = finds(&through_the_scrambler(&bits));
-                assert!(
-                    found.iter().all(|&(at, _)| at >= alt_ends),
-                    "{found:?} in ALT"
-                );
-                let mut expected: Vec<MphFound> =
-                    sent.iter().map(|&mph| MphFound::Mph(mph)).collect();
+                assert!(found.iter().all(|&(at, _)| at >= alt_ends), "{found:?} in ALT");
+                let mut expected: Vec<MphFound> = sent.iter().map(|&mph| MphFound::Mph(mph)).collect();
                 expected.push(MphFound::E);
-                assert_eq!(
-                    found.iter().map(|&(_, f)| f).collect::<Vec<_>>(),
-                    expected,
-                    "ALT from {first}"
-                );
-                assert_eq!(
-                    found.last().map(|&(at, _)| at),
-                    Some(e_ends - 1),
-                    "E on its last bit"
-                );
+                assert_eq!(found.iter().map(|&(_, f)| f).collect::<Vec<_>>(), expected, "ALT from {first}");
+                assert_eq!(found.last().map(|&(at, _)| at), Some(e_ends - 1), "E on its last bit");
             }
         }
     }
@@ -1000,11 +856,7 @@ mod tests {
             // A one at the end of ALT makes the run twenty-one long, and the
             // twentieth one is E's nineteenth.
             let at = e_starts + E_BITS - if first { 1 } else { 2 };
-            assert_eq!(
-                finds(&through_the_scrambler(&bits)),
-                vec![(at, MphFound::E)],
-                "ALT from {first}"
-            );
+            assert_eq!(finds(&through_the_scrambler(&bits)), vec![(at, MphFound::E)], "ALT from {first}");
             // ALT at its longest, and nothing.
             assert_eq!(finds(&through_the_scrambler(&alt(first, 120))), vec![]);
         }

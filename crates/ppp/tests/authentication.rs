@@ -18,24 +18,12 @@ fn provider(accounts: Vec<Account>) -> Link {
     Link::with_authentication(
         SERVER,
         CLIENT,
-        Authentication {
-            callers: Some(accounts),
-            name: "binmodem".into(),
-            seed: 0x1234_5678,
-            ..Authentication::default()
-        },
+        Authentication { callers: Some(accounts), name: "binmodem".into(), seed: 0x1234_5678, ..Authentication::default() },
     )
 }
 
 fn caller(account: Option<Account>) -> Link {
-    Link::with_authentication(
-        [0; 4],
-        [0; 4],
-        Authentication {
-            account,
-            ..Authentication::default()
-        },
-    )
+    Link::with_authentication([0; 4], [0; 4], Authentication { account, ..Authentication::default() })
 }
 
 /// Run both until `done`, or for `ms`. Gives back the milliseconds it took.
@@ -64,20 +52,13 @@ fn both_up(a: &Link, b: &Link) -> bool {
 
 #[test]
 fn the_right_account_gets_in_over_chap() {
-    let mut server = provider(vec![
-        Account::new("rory", "hunter2"),
-        Account::new("guest", "letmein"),
-    ]);
+    let mut server = provider(vec![Account::new("rory", "hunter2"), Account::new("guest", "letmein")]);
     let mut client = caller(Some(Account::new("guest", "letmein")));
     server.open();
     client.open();
     let took = run(&mut server, &mut client, 30_000, both_up).expect("never came up");
     assert_eq!(server.who(), Some("guest"));
-    assert_eq!(
-        server.checked_with(),
-        Some(Auth::ChapMd5),
-        "CHAP is to be offered before PAP"
-    );
+    assert_eq!(server.checked_with(), Some(Auth::ChapMd5), "CHAP is to be offered before PAP");
     assert_eq!(client.proved_with(), Some(Auth::ChapMd5));
     assert_eq!(client.addresses(), (CLIENT, SERVER));
     println!("  up in {took} ms, over CHAP");
@@ -86,14 +67,7 @@ fn the_right_account_gets_in_over_chap() {
     let _ = server.take_arrived();
     assert!(client.ping(1, 1, b"let in"));
     run(&mut server, &mut client, 50, |_, _| false);
-    assert_eq!(
-        client
-            .take_arrived()
-            .iter()
-            .filter(|a| a.echo.reply)
-            .count(),
-        1
-    );
+    assert_eq!(client.take_arrived().iter().filter(|a| a.echo.reply).count(), 1);
 }
 
 /// An account with no password cannot be used with CHAP (RFC 1994 2.3), so the
@@ -115,24 +89,14 @@ fn a_wrong_password_is_refused_and_the_link_ends_with_the_reason() {
     let mut client = caller(Some(Account::new("guest", "guessing")));
     server.open();
     client.open();
-    let ended = run(&mut server, &mut client, 30_000, |a, b| {
-        a.ended() && b.ended()
-    });
-    assert!(
-        ended.is_some(),
-        "still going: {:?} and {:?}",
-        server.phase(),
-        client.phase()
-    );
+    let ended = run(&mut server, &mut client, 30_000, |a, b| a.ended() && b.ended());
+    assert!(ended.is_some(), "still going: {:?} and {:?}", server.phase(), client.phase());
     assert!(!server.up() && !client.up());
     assert_eq!(server.who(), None);
     let server_says = server.trouble().unwrap_or_default();
     let client_says = client.trouble().unwrap_or_default();
     assert!(server_says.contains("not right"), "server: {server_says}");
-    assert!(
-        client_says.contains("did not accept"),
-        "client: {client_says}"
-    );
+    assert!(client_says.contains("did not accept"), "client: {client_says}");
     println!("  server: {server_says}\n  client: {client_says}");
 }
 
@@ -157,49 +121,19 @@ fn a_caller_that_stays_silent_is_not_let_through() {
             {
                 let mut ack = packet.payload.clone();
                 ack[0] = 2;
-                far.frame(
-                    &Packet {
-                        protocol: ppp::protocol::LCP,
-                        payload: ack,
-                    },
-                    &mut to_server,
-                );
-                far.frame(
-                    &Packet {
-                        protocol: ppp::protocol::LCP,
-                        payload: vec![1, 1, 0, 4],
-                    },
-                    &mut to_server,
-                );
-                far.frame(
-                    &Packet {
-                        protocol: ppp::protocol::IPCP,
-                        payload: vec![1, 1, 0, 10, 3, 6, 10, 0, 0, 2],
-                    },
-                    &mut to_server,
-                );
+                far.frame(&Packet { protocol: ppp::protocol::LCP, payload: ack }, &mut to_server);
+                far.frame(&Packet { protocol: ppp::protocol::LCP, payload: vec![1, 1, 0, 4] }, &mut to_server);
+                far.frame(&Packet { protocol: ppp::protocol::IPCP, payload: vec![1, 1, 0, 10, 3, 6, 10, 0, 0, 2] }, &mut to_server);
             }
         }
         if !to_server.is_empty() {
             server.feed(&std::mem::take(&mut to_server));
         }
         server.tick(1);
-        assert_ne!(
-            server.phase(),
-            Phase::Network,
-            "a caller that never answered was let through"
-        );
+        assert_ne!(server.phase(), Phase::Network, "a caller that never answered was let through");
     }
-    assert!(
-        server.ended(),
-        "the provider is still waiting: {:?}",
-        server.phase()
-    );
-    assert!(
-        server.trouble().unwrap_or_default().contains("challenges"),
-        "{:?}",
-        server.trouble()
-    );
+    assert!(server.ended(), "the provider is still waiting: {:?}", server.phase());
+    assert!(server.trouble().unwrap_or_default().contains("challenges"), "{:?}", server.trouble());
 }
 
 #[test]
@@ -208,10 +142,7 @@ fn a_caller_with_no_account_is_told_no_rather_than_hanging() {
     let mut client = caller(None);
     server.open();
     client.open();
-    run(&mut server, &mut client, 30_000, |a, b| {
-        a.ended() && b.ended()
-    })
-    .expect("never ended");
+    run(&mut server, &mut client, 30_000, |a, b| a.ended() && b.ended()).expect("never ended");
     assert!(client.trouble().is_some());
 }
 
@@ -230,13 +161,7 @@ fn a_protocol_this_end_does_not_run_is_rejected_by_number() {
     let mut wire = Vec::new();
     let mut framer = Framer::new();
     framer.set_accm(0);
-    framer.frame(
-        &Packet {
-            protocol: 0x80fd,
-            payload: vec![1, 7, 0, 4],
-        },
-        &mut wire,
-    );
+    framer.frame(&Packet { protocol: 0x80fd, payload: vec![1, 7, 0, 4] }, &mut wire);
     a.feed(&wire);
 
     let mut deframer = Deframer::new();
@@ -267,16 +192,7 @@ fn a_link_the_far_end_ends_can_be_started_again() {
 
     a.close();
     let went = run(&mut a, &mut b, 30_000, |a, b| a.ended() && b.ended());
-    assert!(
-        went.is_some(),
-        "a {:?} {} {:?}, b {:?} {} {:?}",
-        a.phase(),
-        a.ended(),
-        a.trouble(),
-        b.phase(),
-        b.ended(),
-        b.trouble()
-    );
+    assert!(went.is_some(), "a {:?} {} {:?}, b {:?} {} {:?}", a.phase(), a.ended(), a.trouble(), b.phase(), b.ended(), b.trouble());
     assert_eq!(b.trouble(), Some("the far end ended the link"));
     assert_eq!(a.trouble(), None, "closing it was this end's own doing");
 

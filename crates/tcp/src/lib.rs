@@ -20,6 +20,6 @@ pub mod seq;
 pub mod stack;
 
 pub use connection::{Connection, Endpoint, State};
+pub use stack::{Handle, Stack};
 pub use segment::Segment;
 pub use seq::Seq;
-pub use stack::{Handle, Stack};

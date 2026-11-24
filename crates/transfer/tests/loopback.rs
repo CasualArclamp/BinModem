@@ -135,10 +135,7 @@ fn a_damaged_subpacket_is_recovered_from() {
         }
     });
 
-    assert!(
-        spoiled > 5,
-        "the line was not damaged enough to prove anything"
-    );
+    assert!(spoiled > 5, "the line was not damaged enough to prove anything");
     assert_eq!(tx.state(), State::Done, "the transfer did not survive");
     let got = rx.finished().expect("no file");
     assert_eq!(got.data, data, "what arrived is not what was sent");
@@ -151,9 +148,7 @@ fn what_arrives_is_what_was_sent_or_nothing_at_all() {
     // The property that matters more than finishing. A transfer may fail --
     // lines do -- but a file that arrives must be the file, and a checksum
     // that passed on damaged data would be worse than no transfer at all.
-    let data: Vec<u8> = (0..15_000u32)
-        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
-        .collect();
+    let data: Vec<u8> = (0..15_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
     for period in [3usize, 5, 11, 23] {
         let (_, rx) = run(plain("HARSH.BIN", &data), data.clone(), |round, chunk| {
             if round % period == 1 && chunk.len() > 8 {
@@ -163,10 +158,7 @@ fn what_arrives_is_what_was_sent_or_nothing_at_all() {
             }
         });
         if let Some(got) = rx.finished() {
-            assert_eq!(
-                got.data, data,
-                "damaged data was accepted at period {period}"
-            );
+            assert_eq!(got.data, data, "damaged data was accepted at period {period}");
         }
     }
 }
@@ -178,11 +170,7 @@ fn a_receiver_that_cancels_stops_the_sender() {
     let data: Vec<u8> = vec![b'x'; 50_000];
     let mut cancelled = false;
     let (tx, _) = run(plain("STOP.BIN", &data), data.clone(), |_, _| {});
-    assert_eq!(
-        tx.state(),
-        State::Done,
-        "the harness cannot move this file at all"
-    );
+    assert_eq!(tx.state(), State::Done, "the harness cannot move this file at all");
 
     // And now the same transfer, interrupted part-way through.
     let mut tx = Sender::new(plain("STOP.BIN", &data), data, 9600);
@@ -206,10 +194,7 @@ fn a_receiver_that_cancels_stops_the_sender() {
             break;
         }
     }
-    assert!(
-        cancelled,
-        "the transfer never got far enough to be cancelled"
-    );
+    assert!(cancelled, "the transfer never got far enough to be cancelled");
     assert_eq!(tx.state(), State::Failed(Failure::Cancelled));
 }
 
@@ -273,18 +258,14 @@ fn a_rewind_costs_what_is_in_flight_and_not_the_rest_of_the_file() {
     // and nothing beyond it.
     let data: Vec<u8> = (0..60_000u32).map(|i| (i % 251) as u8).collect();
     let mut spoiled = 0;
-    let (tx, rx) = run(
-        plain("INFLIGHT.BIN", &data),
-        data.clone(),
-        |round, chunk| {
-            // Once, in the middle, and only once.
-            if spoiled == 0 && round > 60 && chunk.len() > 40 {
-                let at = chunk.len() / 2;
-                chunk[at] ^= 0xFF;
-                spoiled += 1;
-            }
-        },
-    );
+    let (tx, rx) = run(plain("INFLIGHT.BIN", &data), data.clone(), |round, chunk| {
+        // Once, in the middle, and only once.
+        if spoiled == 0 && round > 60 && chunk.len() > 40 {
+            let at = chunk.len() / 2;
+            chunk[at] ^= 0xFF;
+            spoiled += 1;
+        }
+    });
 
     assert_eq!(spoiled, 1, "the line was not damaged exactly once");
     assert_eq!(tx.state(), State::Done, "the transfer did not survive");
@@ -326,23 +307,14 @@ fn a_batch_as_sz_sends_it(files: &[(&str, &[u8])]) -> Vec<Vec<u8>> {
     steps.push(sinit);
     for (name, data) in files {
         let mut offer = Header::position(Kind::File, 0).encode(Style::Binary32);
-        offer.extend(subpacket::encode(
-            &plain(name, data).encode(),
-            Ending::Wait,
-            true,
-            0,
-        ));
+        offer.extend(subpacket::encode(&plain(name, data).encode(), Ending::Wait, true, 0));
         steps.push(offer);
         // 7.4's longest subpacket, as `sz` sends them, and the last one
         // ending the frame.
         let mut body = Header::position(Kind::Data, 0).encode(Style::Binary32);
         let pieces: Vec<&[u8]> = data.chunks(1024).collect();
         for (i, piece) in pieces.iter().enumerate() {
-            let ending = if i + 1 == pieces.len() {
-                Ending::End
-            } else {
-                Ending::Go
-            };
+            let ending = if i + 1 == pieces.len() { Ending::End } else { Ending::Go };
             body.extend(subpacket::encode(piece, ending, true, 0));
         }
         body.extend(Header::position(Kind::Eof, data.len() as u32).encode(Style::Hex));
@@ -380,11 +352,7 @@ fn a_zsinit_is_answered_with_a_zack() {
     rx.feed(&steps[0]);
     rx.take_out();
     rx.feed(&steps[1]);
-    assert_eq!(
-        said(&rx.take_out()),
-        vec![Kind::Ack],
-        "the ZSINIT went unanswered"
-    );
+    assert_eq!(said(&rx.take_out()), vec![Kind::Ack], "the ZSINIT went unanswered");
     for step in &steps[2..] {
         rx.feed(step);
     }
@@ -411,11 +379,7 @@ fn every_file_of_a_batch_is_kept() {
     assert_eq!(arrived[0].data, one);
     assert_eq!(arrived[1].data, two);
     assert_eq!(arrived[2].data, three);
-    assert_eq!(
-        rx.finished().expect("no file").data,
-        three,
-        "finished() is the last file"
-    );
+    assert_eq!(rx.finished().expect("no file").data, three, "finished() is the last file");
     assert!(rx.take_arrived().is_empty(), "a file was handed up twice");
 }
 
@@ -436,11 +400,7 @@ fn a_batch_that_fails_partway_keeps_what_had_arrived() {
         rx.tick(1_000);
     }
     arrived.extend(rx.take_arrived());
-    assert!(
-        matches!(rx.state(), State::Failed(_)),
-        "the receiver is {:?}",
-        rx.state()
-    );
+    assert!(matches!(rx.state(), State::Failed(_)), "the receiver is {:?}", rx.state());
     assert_eq!(arrived.len(), 1);
     assert_eq!(arrived[0].file.name, "ONE.TXT");
     assert_eq!(arrived[0].data, one);

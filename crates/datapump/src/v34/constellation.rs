@@ -25,10 +25,7 @@ fn quarter_points() -> &'static [Point] {
     static POINTS: OnceLock<Vec<Point>> = OnceLock::new();
     POINTS.get_or_init(|| {
         let axis: Vec<i32> = (-43..=45).step_by(4).collect();
-        let mut points: Vec<Point> = axis
-            .iter()
-            .flat_map(|&x| axis.iter().map(move |&y| (x, y)))
-            .collect();
+        let mut points: Vec<Point> = axis.iter().flat_map(|&x| axis.iter().map(move |&y| (x, y))).collect();
         points.sort_by_key(|&(x, y)| (x * x + y * y, -y));
         points.truncate(QUARTER);
         points

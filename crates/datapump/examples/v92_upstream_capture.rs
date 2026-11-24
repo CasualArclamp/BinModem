@@ -69,10 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last = (((to + delay) * 8000.0) as usize).min(line.len());
     let window = &line[first..last];
     let rms = (window.iter().map(|x| x * x).sum::<f64>() / window.len().max(1) as f64).sqrt();
-    println!(
-        "{path}: {from:.3}..{to:.3} s, {} symbols, rms {rms:.0}, lead {lead}",
-        window.len()
-    );
+    println!("{path}: {from:.3}..{to:.3} s, {} symbols, rms {rms:.0}, lead {lead}", window.len());
     if rms <= 0.0 {
         return Ok(());
     }
@@ -81,10 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // modem measure it, a tenth of a second at a time.
         for (k, run) in window.chunks(798).enumerate() {
             if let Some(lag) = datapump::v92::epsilon::lag(run) {
-                println!(
-                    "  {:7.3} s  Su lag {lag:.3} symbol",
-                    from + k as f64 * 798.0 / 8000.0
-                );
+                println!("  {:7.3} s  Su lag {lag:.3} symbol", from + k as f64 * 798.0 / 8000.0);
             }
         }
         return Ok(());
@@ -98,15 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (n, &x) in window.iter().enumerate() {
         // TRN2u and its sequences go out at LU's power, and CPt at LU.
         let level = x / rms;
-        let bits: Vec<bool> = if cpt {
-            two.feed(level).into_iter().collect()
-        } else {
-            four.feed(level).into_iter().collect()
-        };
+        let bits: Vec<bool> = if cpt { two.feed(level).into_iter().collect() } else { four.feed(level).into_iter().collect() };
         for bit in bits {
-            let Some(family) = finder.feed(bit) else {
-                continue;
-            };
+            let Some(family) = finder.feed(bit) else { continue };
             let name = match &family {
                 CpFamily::Cpt(cp) => format!("CPt drn {}", cp.drn),
                 CpFamily::Cpu(cp) => format!("CPu drn {} ack {}", cp.drn, cp.acknowledge),
@@ -126,8 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// A PCM WAV's rate, channel count and interleaved 16-bit samples.
 fn wav(bytes: &[u8]) -> Result<(u32, usize, Vec<i16>), Box<dyn std::error::Error>> {
-    let word =
-        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("not a WAV".into());
     }
@@ -143,12 +130,7 @@ fn wav(bytes: &[u8]) -> Result<(u32, usize, Vec<i16>), Box<dyn std::error::Error
             b"data" => {
                 let (rate, channels) = format.ok_or("data before fmt")?;
                 let end = (body + size).min(bytes.len());
-                let samples = bytes[body..end]
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|p| i16::from_le_bytes(*p))
-                    .collect();
+                let samples = bytes[body..end].as_chunks::<2>().0.iter().map(|p| i16::from_le_bytes(*p)).collect();
                 return Ok((rate, channels, samples));
             }
             _ => {}

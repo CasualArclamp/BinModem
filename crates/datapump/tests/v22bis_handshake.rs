@@ -231,9 +231,7 @@ fn a_hybrid_puts_our_own_signal_over_the_far_one_and_it_still_connects() {
         calling.hs.step(&mut calling.tx, &mut calling.rx);
         calling.out = calling.tx.next_sample();
 
-        answering
-            .rx
-            .feed(from_calling * FAR + from_answering * ECHO);
+        answering.rx.feed(from_calling * FAR + from_answering * ECHO);
         answering.hs.step(&mut answering.tx, &mut answering.rx);
         answering.out = answering.tx.next_sample();
     }

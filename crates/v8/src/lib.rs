@@ -226,16 +226,11 @@ impl Modulations {
     }
 
     pub fn iter(self) -> impl Iterator<Item = Modulation> {
-        Modulation::ALL
-            .into_iter()
-            .filter(move |&m| self.contains(m))
+        Modulation::ALL.into_iter().filter(move |&m| self.contains(m))
     }
 
     fn index(m: Modulation) -> u16 {
-        Modulation::ALL
-            .iter()
-            .position(|&x| x == m)
-            .expect("in ALL") as u16
+        Modulation::ALL.iter().position(|&x| x == m).expect("in ALL") as u16
     }
 }
 
@@ -305,11 +300,7 @@ pub enum PcmRole {
 impl Pcm {
     /// An analogue modem and nothing else, which is what a modem on a
     /// telephone line can be.
-    pub const ANALOGUE: Self = Self {
-        analogue: true,
-        digital: false,
-        v91: false,
-    };
+    pub const ANALOGUE: Self = Self { analogue: true, digital: false, v91: false };
 
     /// Whether this end, with `ours`, and a far end with `far` make a pair,
     /// and if so which half this end is (9.1.1/V.90).
@@ -331,11 +322,7 @@ impl Pcm {
         let we_analogue = ours.analogue && far.digital;
         let we_digital = ours.digital && far.analogue;
         match (we_analogue, we_digital) {
-            (true, true) => Some(if calling {
-                PcmRole::Analogue
-            } else {
-                PcmRole::Digital
-            }),
+            (true, true) => Some(if calling { PcmRole::Analogue } else { PcmRole::Digital }),
             (true, false) => Some(PcmRole::Analogue),
             (false, true) => Some(PcmRole::Digital),
             (false, false) => None,
@@ -344,10 +331,7 @@ impl Pcm {
 
     fn octet(self) -> u8 {
         octet([
-            true,
-            true,
-            true,
-            false, // b0..b3: the PCM availability tag, 1110
+            true, true, true, false, // b0..b3: the PCM availability tag, 1110
             false, // b4: a category octet
             self.analogue,
             self.digital,
@@ -429,10 +413,7 @@ impl Menu {
 
         let has = |m: Modulation| self.modulations.contains(m);
         out.push(octet([
-            true,
-            false,
-            true,
-            false, // b0..b3: the modulation tag, 1010
+            true, false, true, false, // b0..b3: the modulation tag, 1010
             false, // b4: a category octet
             // b5: 7.3, "if the PCM modem availability category is present
             // ... the modulation category, if present, shall have bit b5 in
@@ -467,7 +448,7 @@ impl Menu {
         // category has to skip it -- which is easiest at the end.
         if self.protocol == Protocol::Lapm {
             out.push(octet([
-                false, true, false, true,  // b0..b3: the protocol tag, 0101
+                false, true, false, true, // b0..b3: the protocol tag, 0101
                 false, // b4: a category octet
                 true, false, false, // b5..b7: 100, LAPM per ITU-T V.42
             ]));
@@ -483,10 +464,7 @@ impl Menu {
         let access = self.access.or(self.pcm.map(|_| Access::default()));
         if let Some(a) = access {
             out.push(octet([
-                true,
-                false,
-                true,
-                true,  // b0..b3: the PSTN access tag, 1011
+                true, false, true, true, // b0..b3: the PSTN access tag, 1011
                 false, // b4: a category octet
                 a.call_cellular,
                 a.answer_cellular,
@@ -519,7 +497,8 @@ impl Menu {
             // category claimed it.
             match tag_of(o) {
                 tag::CALL_FUNCTION if !bit(o, 4) => {
-                    function = CallFunction::from_bits([bit(o, 5), bit(o, 6), bit(o, 7)]);
+                    function =
+                        CallFunction::from_bits([bit(o, 5), bit(o, 6), bit(o, 7)]);
                 }
                 tag::MODULATION if !bit(o, 4) => {
                     let mut group = [o, 0, 0];
@@ -563,22 +542,12 @@ impl Menu {
                     });
                 }
                 tag::PCM if !bit(o, 4) => {
-                    pcm = Some(Pcm {
-                        analogue: bit(o, 5),
-                        digital: bit(o, 6),
-                        v91: bit(o, 7),
-                    });
+                    pcm = Some(Pcm { analogue: bit(o, 5), digital: bit(o, 6), v91: bit(o, 7) });
                 }
                 _ => {}
             }
         }
-        Some(Self {
-            function: function?,
-            modulations,
-            protocol,
-            access,
-            pcm,
-        })
+        Some(Self { function: function?, modulations, protocol, access, pcm })
     }
 
     /// The joint menu: what this end has that the far end also offered.
@@ -618,24 +587,12 @@ impl Menu {
     /// ends make a pair; and with it the PSTN access category, whose b5 "is
     /// set to ONE if and only if the corresponding bit (b5) is set to ONE in
     /// the received CM".
-    pub fn joint_pcm(
-        &self,
-        ours: Modulations,
-        protocol: Protocol,
-        pcm: Pcm,
-        access: Access,
-    ) -> Self {
+    pub fn joint_pcm(&self, ours: Modulations, protocol: Protocol, pcm: Pcm, access: Access) -> Self {
         let mut jm = self.joint(ours, protocol);
-        let paired = self
-            .pcm
-            .and_then(|far| Pcm::pair(pcm, far, false))
-            .is_some();
+        let paired = self.pcm.and_then(|far| Pcm::pair(pcm, far, false)).is_some();
         if paired {
             jm.pcm = Some(pcm);
-            jm.access = Some(Access {
-                call_cellular: self.access.is_some_and(|a| a.call_cellular),
-                ..access
-            });
+            jm.access = Some(Access { call_cellular: self.access.is_some_and(|a| a.call_cellular), ..access });
         }
         jm
     }
@@ -755,11 +712,7 @@ impl Decoder {
         // this, because the same misreading of a lone octet turns a stretch of
         // noise into a CI, and a CI is what short Phase 1 is made of.
         let damaged_zero = octet == DAMAGED_ZERO && self.zeros + 1 == CJ.len();
-        self.zeros = if octet == 0 || damaged_zero {
-            self.zeros + 1
-        } else {
-            0
-        };
+        self.zeros = if octet == 0 || damaged_zero { self.zeros + 1 } else { 0 };
         if self.zeros >= CJ.len() {
             self.zeros = 0;
             // A CI sync is also a zero octet, so a run of them is only a CJ if
@@ -797,7 +750,11 @@ impl Decoder {
             self.body.push(octet);
             // A CI is one octet long and known to be complete at once.
             if kind == Signal::Ci && self.body.len() == 1 {
-                let f = CallFunction::from_bits([bit(octet, 5), bit(octet, 6), bit(octet, 7)]);
+                let f = CallFunction::from_bits([
+                    bit(octet, 5),
+                    bit(octet, 6),
+                    bit(octet, 7),
+                ]);
                 self.kind = None;
                 self.body.clear();
                 return f.map(Heard::Ci);
@@ -859,17 +816,10 @@ mod tests {
         let mut d = Decoder::new();
         assert!(d.feed(0).is_none());
         assert!(d.feed(0).is_none());
-        assert_eq!(
-            d.feed(DAMAGED_ZERO),
-            Some(Heard::Cj),
-            "a torn last octet lost the CJ"
-        );
+        assert_eq!(d.feed(DAMAGED_ZERO), Some(Heard::Cj), "a torn last octet lost the CJ");
 
         let mut d = Decoder::new();
-        assert!(
-            d.feed(DAMAGED_ZERO).is_none(),
-            "one damaged octet is not a CJ"
-        );
+        assert!(d.feed(DAMAGED_ZERO).is_none(), "one damaged octet is not a CJ");
         assert!(d.feed(DAMAGED_ZERO).is_none());
         assert!(d.feed(DAMAGED_ZERO).is_none());
     }
@@ -917,13 +867,14 @@ mod tests {
             CallFunction::ReceiveFax,
             CallFunction::Data,
         ] {
-            let menu = Menu {
-                function: f,
-                modulations: Modulations::NONE,
-                protocol: Protocol::Unstated,
-                access: None,
-                pcm: None,
-            };
+            let menu =
+                Menu {
+                    function: f,
+                    modulations: Modulations::NONE,
+                    protocol: Protocol::Unstated,
+                    access: None,
+                    pcm: None,
+                };
             assert_eq!(Menu::parse(&menu.octets()).unwrap().function, f);
         }
     }
@@ -933,10 +884,7 @@ mod tests {
         let octets = data_menu(&[Modulation::V32bis]).octets();
         assert_eq!(tag_of(octets[1]), tag::MODULATION, "modn0 tag");
         assert!(!bit(octets[1], 4), "modn0 not marked a category octet");
-        assert!(
-            !bit(octets[1], 5),
-            "claimed a PCM category that is not there"
-        );
+        assert!(!bit(octets[1], 5), "claimed a PCM category that is not there");
         for extension in &octets[2..] {
             assert!(
                 is_extension(*extension),
@@ -957,10 +905,7 @@ mod tests {
                 Modulations::of(&[m]),
                 "{} came back as {:?}",
                 m.name(),
-                back.modulations
-                    .iter()
-                    .map(Modulation::name)
-                    .collect::<Vec<_>>()
+                back.modulations.iter().map(Modulation::name).collect::<Vec<_>>()
             );
         }
     }
@@ -1007,11 +952,7 @@ mod tests {
         let ours = Modulations::of(&[Modulation::V32bis, Modulation::V22bis]);
         let jm = theirs.joint(ours, Protocol::Unstated);
         assert_eq!(jm.modulations, Modulations::of(&[Modulation::V32bis]));
-        assert_eq!(
-            jm.function,
-            CallFunction::Data,
-            "the call function is carried over"
-        );
+        assert_eq!(jm.function, CallFunction::Data, "the call function is carried over");
     }
 
     #[test]
@@ -1040,10 +981,7 @@ mod tests {
         let prot0 = *menu.octets().last().unwrap();
         assert_eq!(tag_of(prot0), tag::PROTOCOL);
         assert!(!bit(prot0, 4), "a category octet, not an extension");
-        assert_eq!(
-            (bit(prot0, 5), bit(prot0, 6), bit(prot0, 7)),
-            (true, false, false)
-        );
+        assert_eq!((bit(prot0, 5), bit(prot0, 6), bit(prot0, 7)), (true, false, false));
         assert_eq!(prot0, 0b0010_1010);
     }
 
@@ -1077,10 +1015,7 @@ mod tests {
         let menu = data_menu(&[Modulation::V32bis]);
         assert_eq!(menu.protocol, Protocol::Unstated);
         assert!(!menu.lapm());
-        assert_eq!(
-            Menu::parse(&menu.octets()).unwrap().protocol,
-            Protocol::Unstated
-        );
+        assert_eq!(Menu::parse(&menu.octets()).unwrap().protocol, Protocol::Unstated);
     }
 
     #[test]
@@ -1108,10 +1043,7 @@ mod tests {
         };
         let ours = Modulations::of(&[Modulation::V32bis]);
         assert!(asked.joint(ours, Protocol::Lapm).lapm(), "both said it");
-        assert!(
-            !asked.joint(ours, Protocol::Unstated).lapm(),
-            "the answerer did not"
-        );
+        assert!(!asked.joint(ours, Protocol::Unstated).lapm(), "the answerer did not");
 
         let silent = data_menu(&[Modulation::V32bis]);
         assert!(
@@ -1130,11 +1062,7 @@ mod tests {
         let jm = theirs.joint(Modulations::of(&[Modulation::V21]), Protocol::Unstated);
         assert!(jm.modulations.is_empty());
         assert_eq!(jm.chosen(), None);
-        assert_eq!(
-            jm.octets().len(),
-            theirs.octets().len(),
-            "fewer octets than CM"
-        );
+        assert_eq!(jm.octets().len(), theirs.octets().len(), "fewer octets than CM");
     }
 
     #[test]
@@ -1160,10 +1088,7 @@ mod tests {
         let mut octets = data_menu(&[Modulation::V22bis]).octets();
         // A non-standard facilities category, tag 1111, which this does not
         // implement and must not choke on.
-        octets.insert(
-            1,
-            octet([true, true, true, true, false, false, false, false]),
-        );
+        octets.insert(1, octet([true, true, true, true, false, false, false, false]));
         let back = Menu::parse(&octets).expect("a menu with an unknown category");
         assert_eq!(back.function, CallFunction::Data);
         assert_eq!(back.modulations, Modulations::of(&[Modulation::V22bis]));
@@ -1177,10 +1102,7 @@ mod tests {
         let short = &full[..2];
         let back = Menu::parse(short).expect("two octets");
         assert!(back.modulations.contains(Modulation::V34Duplex));
-        assert!(
-            !back.modulations.contains(Modulation::V32bis),
-            "read past the end"
-        );
+        assert!(!back.modulations.contains(Modulation::V32bis), "read past the end");
     }
 
     #[test]
@@ -1262,11 +1184,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            heard,
-            Some(Heard::Cm(menu)),
-            "a category past the end costs nothing"
-        );
+        assert_eq!(heard, Some(Heard::Cm(menu)), "a category past the end costs nothing");
     }
 
     #[test]
@@ -1393,15 +1311,8 @@ mod pcm_tests {
         let cm = Menu::parse(&CONEXANT_CM).expect("it parses");
         assert_eq!(cm.function, CallFunction::Data);
         assert_eq!(cm.pcm, Some(Pcm::ANALOGUE));
-        assert!(
-            cm.modulations.contains(Modulation::V34Duplex),
-            "6.3 wants V.34 beside PCM"
-        );
-        assert_eq!(
-            cm.access,
-            Some(Access::default()),
-            "an analogue line, not cellular"
-        );
+        assert!(cm.modulations.contains(Modulation::V34Duplex), "6.3 wants V.34 beside PCM");
+        assert_eq!(cm.access, Some(Access::default()), "an analogue line, not cellular");
         assert_eq!(cm.protocol, Protocol::Lapm);
         // 7.3's b5 in modn0 says a PCM category follows.
         assert!(bit(CONEXANT_CM[1], 5));
@@ -1410,26 +1321,9 @@ mod pcm_tests {
     #[test]
     fn a_real_joint_menu_answers_with_a_digital_modem_on_a_digital_line() {
         let jm = Menu::parse(&SERVER_JM).expect("it parses");
-        assert_eq!(
-            jm.pcm,
-            Some(Pcm {
-                analogue: false,
-                digital: true,
-                v91: false
-            })
-        );
-        assert_eq!(
-            jm.access,
-            Some(Access {
-                call_cellular: false,
-                answer_cellular: false,
-                digital: true
-            })
-        );
-        assert_eq!(
-            Pcm::pair(Pcm::ANALOGUE, jm.pcm.unwrap(), true),
-            Some(PcmRole::Analogue)
-        );
+        assert_eq!(jm.pcm, Some(Pcm { analogue: false, digital: true, v91: false }));
+        assert_eq!(jm.access, Some(Access { call_cellular: false, answer_cellular: false, digital: true }));
+        assert_eq!(Pcm::pair(Pcm::ANALOGUE, jm.pcm.unwrap(), true), Some(PcmRole::Analogue));
     }
 
     /// Building the same call menu gives the same octets, in the same order.
@@ -1456,21 +1350,12 @@ mod pcm_tests {
     fn a_joint_menu_carries_pcm_only_for_a_pair() {
         let cm = Menu::parse(&CONEXANT_CM).unwrap();
         let ours = Modulations::of(&[Modulation::V34Duplex, Modulation::V32bis]);
-        let digital = Pcm {
-            digital: true,
-            ..Pcm::default()
-        };
-        let on_isdn = Access {
-            digital: true,
-            ..Access::default()
-        };
+        let digital = Pcm { digital: true, ..Pcm::default() };
+        let on_isdn = Access { digital: true, ..Access::default() };
         let jm = cm.joint_pcm(ours, Protocol::Lapm, digital, on_isdn);
         assert_eq!(jm.pcm, Some(digital));
         assert_eq!(jm.access, Some(on_isdn));
-        assert!(
-            bit(jm.octets()[1], 5),
-            "modn0 does not say a PCM category follows"
-        );
+        assert!(bit(jm.octets()[1], 5), "modn0 does not say a PCM category follows");
         // An answering modem that is only analogue is no pair for an
         // analogue caller, and says nothing about PCM at all.
         let jm = cm.joint_pcm(ours, Protocol::Lapm, Pcm::ANALOGUE, Access::default());
@@ -1478,32 +1363,18 @@ mod pcm_tests {
         assert!(!bit(jm.octets()[1], 5));
         // And a call menu with no PCM in it gets none back.
         let plain = Menu { pcm: None, ..cm };
-        assert_eq!(
-            plain.joint_pcm(ours, Protocol::Lapm, digital, on_isdn).pcm,
-            None
-        );
+        assert_eq!(plain.joint_pcm(ours, Protocol::Lapm, digital, on_isdn).pcm, None);
     }
 
     /// 9.1.1/V.90's pairing, including both ends able to be either.
     #[test]
     fn the_calling_modem_is_the_analogue_one_when_either_would_do() {
-        let both = Pcm {
-            analogue: true,
-            digital: true,
-            v91: false,
-        };
+        let both = Pcm { analogue: true, digital: true, v91: false };
         assert_eq!(Pcm::pair(both, both, true), Some(PcmRole::Analogue));
         assert_eq!(Pcm::pair(both, both, false), Some(PcmRole::Digital));
         assert_eq!(Pcm::pair(Pcm::ANALOGUE, Pcm::ANALOGUE, true), None);
-        let digital = Pcm {
-            digital: true,
-            ..Pcm::default()
-        };
-        assert_eq!(
-            Pcm::pair(digital, both, true),
-            Some(PcmRole::Digital),
-            "a digital caller"
-        );
+        let digital = Pcm { digital: true, ..Pcm::default() };
+        assert_eq!(Pcm::pair(digital, both, true), Some(PcmRole::Digital), "a digital caller");
     }
 
     /// A menu offering PCM always says what line it is on (7.3).

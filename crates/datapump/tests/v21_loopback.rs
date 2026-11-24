@@ -144,10 +144,7 @@ fn the_answering_end_follows_v25() {
         .collect();
     let first_sound = loud.iter().position(|&l| l).expect("never made a sound") as f64 * 0.010;
     // 4.3: "maintains silence on the line for a period between 1.8 and 2.5 s".
-    assert!(
-        (1.8..2.5).contains(&first_sound),
-        "the tone began at {first_sound:.2} s"
-    );
+    assert!((1.8..2.5).contains(&first_sound), "the tone began at {first_sound:.2} s");
 
     let tone_end = first_sound
         + loud[(first_sound / 0.010) as usize..]
@@ -161,15 +158,9 @@ fn the_answering_end_follows_v25() {
 
     // And it was 2100 Hz: count zero crossings over the middle second of it.
     let middle = &line[((first_sound + 1.0) * FS) as usize..((first_sound + 2.0) * FS) as usize];
-    let crossings = middle
-        .windows(2)
-        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
-        .count();
+    let crossings = middle.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
     let hz = crossings as f64 / 2.0;
-    assert!(
-        (hz - 2100.0).abs() <= 15.0,
-        "the answering tone was {hz} Hz"
-    );
+    assert!((hz - 2100.0).abs() <= 15.0, "the answering tone was {hz} Hz");
 
     // 4.4: "a silent period for 75 +/- 20 ms", then the carrier.
     let carrier = tone_end
@@ -179,19 +170,12 @@ fn the_answering_end_follows_v25() {
             .expect("no carrier after the tone") as f64
             * 0.010;
     let gap = carrier - tone_end;
-    assert!(
-        (0.055..=0.105).contains(&gap),
-        "{:.0} ms of silence after the tone",
-        gap * 1000.0
-    );
+    assert!((0.055..=0.105).contains(&gap), "{:.0} ms of silence after the tone", gap * 1000.0);
 
     // Channel 2's mark is F_Z, 1650 Hz.
     let start = ((carrier + 0.2) * FS) as usize;
     let after = &line[start..start + FS as usize / 2];
-    let crossings = after
-        .windows(2)
-        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
-        .count();
+    let crossings = after.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
     let hz = crossings as f64;
     assert!((hz - 1650.0).abs() <= 6.0, "the idle carrier was {hz} Hz");
 }
@@ -231,10 +215,7 @@ fn a_call_to_nobody_gives_up_rather_than_waiting_for_ever() {
 fn a_bell_103_and_a_v21_do_not_mistake_each_other() {
     // Neither one's carrier falls in the band the other listens to, so the
     // call fails rather than connecting to nonsense.
-    for (caller, host) in [
-        (v21::DATA, bell103::BELL_103),
-        (bell103::BELL_103, v21::DATA),
-    ] {
+    for (caller, host) in [(v21::DATA, bell103::BELL_103), (bell103::BELL_103, v21::DATA)] {
         let mut p = Pair::between(caller, host);
         p.run(10.0);
         assert!(

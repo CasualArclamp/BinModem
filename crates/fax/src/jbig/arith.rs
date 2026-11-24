@@ -30,12 +30,7 @@ struct Estimate {
 }
 
 const fn e(lsz: u16, nlps: u8, nmps: u8, swtch: u8) -> Estimate {
-    Estimate {
-        lsz,
-        nlps,
-        nmps,
-        swtch: swtch == 1,
-    }
+    Estimate { lsz, nlps, nmps, swtch: swtch == 1 }
 }
 
 /// Table 24/T.82, the probability estimation table, row by row from ST 0.
@@ -45,118 +40,34 @@ const fn e(lsz: u16, nlps: u8, nmps: u8, swtch: u8) -> Estimate {
 /// 7.2.2's byte counts, over nearly four million pels in a thousand contexts,
 /// would not survive a wrong entry in any state those visit.
 const TABLE: [Estimate; 113] = [
-    e(0x5a1d, 1, 1, 1),
-    e(0x2586, 14, 2, 0),
-    e(0x1114, 16, 3, 0),
-    e(0x080b, 18, 4, 0),
-    e(0x03d8, 20, 5, 0),
-    e(0x01da, 23, 6, 0),
-    e(0x00e5, 25, 7, 0),
-    e(0x006f, 28, 8, 0),
-    e(0x0036, 30, 9, 0),
-    e(0x001a, 33, 10, 0),
-    e(0x000d, 35, 11, 0),
-    e(0x0006, 9, 12, 0),
-    e(0x0003, 10, 13, 0),
-    e(0x0001, 12, 13, 0),
-    e(0x5a7f, 15, 15, 1),
-    e(0x3f25, 36, 16, 0),
-    e(0x2cf2, 38, 17, 0),
-    e(0x207c, 39, 18, 0),
-    e(0x17b9, 40, 19, 0),
-    e(0x1182, 42, 20, 0),
-    e(0x0cef, 43, 21, 0),
-    e(0x09a1, 45, 22, 0),
-    e(0x072f, 46, 23, 0),
-    e(0x055c, 48, 24, 0),
-    e(0x0406, 49, 25, 0),
-    e(0x0303, 51, 26, 0),
-    e(0x0240, 52, 27, 0),
-    e(0x01b1, 54, 28, 0),
-    e(0x0144, 56, 29, 0),
-    e(0x00f5, 57, 30, 0),
-    e(0x00b7, 59, 31, 0),
-    e(0x008a, 60, 32, 0),
-    e(0x0068, 62, 33, 0),
-    e(0x004e, 63, 34, 0),
-    e(0x003b, 32, 35, 0),
-    e(0x002c, 33, 9, 0),
-    e(0x5ae1, 37, 37, 1),
-    e(0x484c, 64, 38, 0),
-    e(0x3a0d, 65, 39, 0),
-    e(0x2ef1, 67, 40, 0),
-    e(0x261f, 68, 41, 0),
-    e(0x1f33, 69, 42, 0),
-    e(0x19a8, 70, 43, 0),
-    e(0x1518, 72, 44, 0),
-    e(0x1177, 73, 45, 0),
-    e(0x0e74, 74, 46, 0),
-    e(0x0bfb, 75, 47, 0),
-    e(0x09f8, 77, 48, 0),
-    e(0x0861, 78, 49, 0),
-    e(0x0706, 79, 50, 0),
-    e(0x05cd, 48, 51, 0),
-    e(0x04de, 50, 52, 0),
-    e(0x040f, 50, 53, 0),
-    e(0x0363, 51, 54, 0),
-    e(0x02d4, 52, 55, 0),
-    e(0x025c, 53, 56, 0),
-    e(0x01f8, 54, 57, 0),
-    e(0x01a4, 55, 58, 0),
-    e(0x0160, 56, 59, 0),
-    e(0x0125, 57, 60, 0),
-    e(0x00f6, 58, 61, 0),
-    e(0x00cb, 59, 62, 0),
-    e(0x00ab, 61, 63, 0),
-    e(0x008f, 61, 32, 0),
-    e(0x5b12, 65, 65, 1),
-    e(0x4d04, 80, 66, 0),
-    e(0x412c, 81, 67, 0),
-    e(0x37d8, 82, 68, 0),
-    e(0x2fe8, 83, 69, 0),
-    e(0x293c, 84, 70, 0),
-    e(0x2379, 86, 71, 0),
-    e(0x1edf, 87, 72, 0),
-    e(0x1aa9, 87, 73, 0),
-    e(0x174e, 72, 74, 0),
-    e(0x1424, 72, 75, 0),
-    e(0x119c, 74, 76, 0),
-    e(0x0f6b, 74, 77, 0),
-    e(0x0d51, 75, 78, 0),
-    e(0x0bb6, 77, 79, 0),
-    e(0x0a40, 77, 48, 0),
-    e(0x5832, 80, 81, 1),
-    e(0x4d1c, 88, 82, 0),
-    e(0x438e, 89, 83, 0),
-    e(0x3bdd, 90, 84, 0),
-    e(0x34ee, 91, 85, 0),
-    e(0x2eae, 92, 86, 0),
-    e(0x299a, 93, 87, 0),
-    e(0x2516, 86, 71, 0),
-    e(0x5570, 88, 89, 1),
-    e(0x4ca9, 95, 90, 0),
-    e(0x44d9, 96, 91, 0),
-    e(0x3e22, 97, 92, 0),
-    e(0x3824, 99, 93, 0),
-    e(0x32b4, 99, 94, 0),
-    e(0x2e17, 93, 86, 0),
-    e(0x56a8, 95, 96, 1),
-    e(0x4f46, 101, 97, 0),
-    e(0x47e5, 102, 98, 0),
-    e(0x41cf, 103, 99, 0),
-    e(0x3c3d, 104, 100, 0),
-    e(0x375e, 99, 93, 0),
-    e(0x5231, 105, 102, 0),
-    e(0x4c0f, 106, 103, 0),
-    e(0x4639, 107, 104, 0),
-    e(0x415e, 103, 99, 0),
-    e(0x5627, 105, 106, 1),
-    e(0x50e7, 108, 107, 0),
-    e(0x4b85, 109, 103, 0),
-    e(0x5597, 110, 109, 0),
-    e(0x504f, 111, 107, 0),
-    e(0x5a10, 110, 111, 1),
-    e(0x5522, 112, 109, 0),
+    e(0x5a1d, 1, 1, 1), e(0x2586, 14, 2, 0), e(0x1114, 16, 3, 0), e(0x080b, 18, 4, 0),
+    e(0x03d8, 20, 5, 0), e(0x01da, 23, 6, 0), e(0x00e5, 25, 7, 0), e(0x006f, 28, 8, 0),
+    e(0x0036, 30, 9, 0), e(0x001a, 33, 10, 0), e(0x000d, 35, 11, 0), e(0x0006, 9, 12, 0),
+    e(0x0003, 10, 13, 0), e(0x0001, 12, 13, 0), e(0x5a7f, 15, 15, 1), e(0x3f25, 36, 16, 0),
+    e(0x2cf2, 38, 17, 0), e(0x207c, 39, 18, 0), e(0x17b9, 40, 19, 0), e(0x1182, 42, 20, 0),
+    e(0x0cef, 43, 21, 0), e(0x09a1, 45, 22, 0), e(0x072f, 46, 23, 0), e(0x055c, 48, 24, 0),
+    e(0x0406, 49, 25, 0), e(0x0303, 51, 26, 0), e(0x0240, 52, 27, 0), e(0x01b1, 54, 28, 0),
+    e(0x0144, 56, 29, 0), e(0x00f5, 57, 30, 0), e(0x00b7, 59, 31, 0), e(0x008a, 60, 32, 0),
+    e(0x0068, 62, 33, 0), e(0x004e, 63, 34, 0), e(0x003b, 32, 35, 0), e(0x002c, 33, 9, 0),
+    e(0x5ae1, 37, 37, 1), e(0x484c, 64, 38, 0), e(0x3a0d, 65, 39, 0), e(0x2ef1, 67, 40, 0),
+    e(0x261f, 68, 41, 0), e(0x1f33, 69, 42, 0), e(0x19a8, 70, 43, 0), e(0x1518, 72, 44, 0),
+    e(0x1177, 73, 45, 0), e(0x0e74, 74, 46, 0), e(0x0bfb, 75, 47, 0), e(0x09f8, 77, 48, 0),
+    e(0x0861, 78, 49, 0), e(0x0706, 79, 50, 0), e(0x05cd, 48, 51, 0), e(0x04de, 50, 52, 0),
+    e(0x040f, 50, 53, 0), e(0x0363, 51, 54, 0), e(0x02d4, 52, 55, 0), e(0x025c, 53, 56, 0),
+    e(0x01f8, 54, 57, 0), e(0x01a4, 55, 58, 0), e(0x0160, 56, 59, 0), e(0x0125, 57, 60, 0),
+    e(0x00f6, 58, 61, 0), e(0x00cb, 59, 62, 0), e(0x00ab, 61, 63, 0), e(0x008f, 61, 32, 0),
+    e(0x5b12, 65, 65, 1), e(0x4d04, 80, 66, 0), e(0x412c, 81, 67, 0), e(0x37d8, 82, 68, 0),
+    e(0x2fe8, 83, 69, 0), e(0x293c, 84, 70, 0), e(0x2379, 86, 71, 0), e(0x1edf, 87, 72, 0),
+    e(0x1aa9, 87, 73, 0), e(0x174e, 72, 74, 0), e(0x1424, 72, 75, 0), e(0x119c, 74, 76, 0),
+    e(0x0f6b, 74, 77, 0), e(0x0d51, 75, 78, 0), e(0x0bb6, 77, 79, 0), e(0x0a40, 77, 48, 0),
+    e(0x5832, 80, 81, 1), e(0x4d1c, 88, 82, 0), e(0x438e, 89, 83, 0), e(0x3bdd, 90, 84, 0),
+    e(0x34ee, 91, 85, 0), e(0x2eae, 92, 86, 0), e(0x299a, 93, 87, 0), e(0x2516, 86, 71, 0),
+    e(0x5570, 88, 89, 1), e(0x4ca9, 95, 90, 0), e(0x44d9, 96, 91, 0), e(0x3e22, 97, 92, 0),
+    e(0x3824, 99, 93, 0), e(0x32b4, 99, 94, 0), e(0x2e17, 93, 86, 0), e(0x56a8, 95, 96, 1),
+    e(0x4f46, 101, 97, 0), e(0x47e5, 102, 98, 0), e(0x41cf, 103, 99, 0), e(0x3c3d, 104, 100, 0),
+    e(0x375e, 99, 93, 0), e(0x5231, 105, 102, 0), e(0x4c0f, 106, 103, 0), e(0x4639, 107, 104, 0),
+    e(0x415e, 103, 99, 0), e(0x5627, 105, 106, 1), e(0x50e7, 108, 107, 0), e(0x4b85, 109, 103, 0),
+    e(0x5597, 110, 109, 0), e(0x504f, 111, 107, 0), e(0x5a10, 110, 111, 1), e(0x5522, 112, 109, 0),
     e(0x59eb, 112, 111, 1),
 ];
 
@@ -176,9 +87,7 @@ impl Contexts {
     /// Every context in the equiprobable state 0 with an MPS of 0, which is
     /// where INITENC and INITDEC put them at the top of an image.
     pub fn new(count: usize) -> Self {
-        Self {
-            state: vec![0; count],
-        }
+        Self { state: vec![0; count] }
     }
 
     /// Back to the top of the image, as an SDRST has it (6.2.5).
@@ -524,19 +433,19 @@ mod tests {
     /// 7.1's PIX and CX, sixteen bits a word, the most significant first: "the
     /// raw data of a stripe in raster scan order and from MSB to LSB".
     const PIX: [u16; 16] = [
-        0x05e0, 0x0000, 0x8b00, 0x01c4, 0x1700, 0x0034, 0x7fff, 0x1a3f, 0x951b, 0x05d8, 0x1d17,
-        0xe770, 0x0000, 0x0000, 0x0656, 0x0e6a,
+        0x05e0, 0x0000, 0x8b00, 0x01c4, 0x1700, 0x0034, 0x7fff, 0x1a3f,
+        0x951b, 0x05d8, 0x1d17, 0xe770, 0x0000, 0x0000, 0x0656, 0x0e6a,
     ];
     const CX: [u16; 16] = [
-        0x0fe0, 0x0000, 0x0f00, 0x00f0, 0xff00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-        0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0fe0, 0x0000, 0x0f00, 0x00f0, 0xff00, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     ];
 
     /// 7.1's SCD: 25 bytes, with the five zeros FINALWRITES leaves after the
     /// 0x91 already taken off.
     const SCD: [u8; 25] = [
-        0x69, 0x89, 0x99, 0x5c, 0x32, 0xea, 0xfa, 0xa0, 0xd5, 0xff, 0x52, 0x7f, 0xff, 0xff, 0xff,
-        0xc0, 0x00, 0x00, 0x00, 0x3f, 0xff, 0x2d, 0x20, 0x82, 0x91,
+        0x69, 0x89, 0x99, 0x5c, 0x32, 0xea, 0xfa, 0xa0, 0xd5, 0xff, 0x52, 0x7f, 0xff,
+        0xff, 0xff, 0xc0, 0x00, 0x00, 0x00, 0x3f, 0xff, 0x2d, 0x20, 0x82, 0x91,
     ];
 
     fn bits(words: &[u16; 16]) -> Vec<bool> {
@@ -611,10 +520,7 @@ mod tests {
         assert!(rows.next().is_none(), "a row was never reached");
         // The last row, 257: FINALWRITES, with C after its shift by CT, and
         // the 0x91 it writes.
-        assert_eq!(
-            (encoder.a, encoder.ct, encoder.sc, encoder.buffer),
-            (0x08c72, 6, 2, 0x90)
-        );
+        assert_eq!((encoder.a, encoder.ct, encoder.sc, encoder.buffer), (0x08c72, 6, 2, 0x90));
         encoder.clear_bits();
         let before = encoder.out.len();
         encoder.final_writes();
@@ -639,10 +545,7 @@ mod tests {
         let pix = bits(&PIX);
         let cx = bits(&CX);
         let mut contexts = Contexts::new(2);
-        let mut scd = Scd {
-            bytes: SCD.to_vec(),
-            at: 0,
-        };
+        let mut scd = Scd { bytes: SCD.to_vec(), at: 0 };
         let mut decoder = Decoder::new(&mut scd);
         let mut rows = DECODER_ROWS.iter().peekable();
         let mut got = Vec::new();
@@ -698,16 +601,12 @@ mod tests {
             let mut contexts = Contexts::new(3);
             let mut scd = Scd { bytes: scd, at: 0 };
             let mut decoder = Decoder::new(&mut scd);
-            cx.iter()
-                .map(|&c| decoder.decode(&mut contexts, c, &mut scd))
-                .collect()
+            cx.iter().map(|&c| decoder.decode(&mut contexts, c, &mut scd)).collect()
         };
         let mut carried = [false; 2];
         let mut misread_fails = 0;
         for len in 1..400usize {
-            let pix: Vec<bool> = (0..len)
-                .map(|i| (i * 7 + len) % 13 == 0 || i % 29 == 3)
-                .collect();
+            let pix: Vec<bool> = (0..len).map(|i| (i * 7 + len) % 13 == 0 || i % 29 == 3).collect();
             let cx: Vec<usize> = (0..len).map(|i| (i / 5) % 3).collect();
             let mut contexts = Contexts::new(3);
             let mut encoder = Encoder::new();

@@ -53,13 +53,7 @@ struct End {
 }
 
 /// A modem stepped the way `modem-sip` steps one, until `stop`.
-fn run_modem(
-    media: Media,
-    commands: &'static str,
-    typed: Arc<Mutex<VecDeque<u8>>>,
-    connected: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-) -> End {
+fn run_modem(media: Media, commands: &'static str, typed: Arc<Mutex<VecDeque<u8>>>, connected: Arc<AtomicBool>, stop: Arc<AtomicBool>) -> End {
     let mut modem = Modem::new(FS);
     for b in commands.bytes() {
         modem.feed_dte(b);
@@ -67,8 +61,7 @@ fn run_modem(
     modem.feed_dte(b'\r');
     let mut end = End::default();
     let mut down = Resampler::new(FS, 8000.0);
-    let (mut from_line, mut from_network, mut to_line, mut scratch, mut narrow) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut from_line, mut from_network, mut to_line, mut scratch, mut narrow) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     while !stop.load(Ordering::Relaxed) {
         if let Ok(mut typed) = typed.lock() {
             for b in typed.drain(..) {
@@ -124,20 +117,13 @@ struct Held {
 }
 
 #[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "two modems in real time: run it with --release"
-)]
+#[cfg_attr(debug_assertions, ignore = "two modems in real time: run it with --release")]
 fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls() {
     // The route: one socket facing each end.
     let facing_caller = UdpSocket::bind("127.0.0.1:0").unwrap();
     let facing_host = UdpSocket::bind("127.0.0.1:0").unwrap();
-    facing_caller
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .unwrap();
-    facing_host
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .unwrap();
+    facing_caller.set_read_timeout(Some(Duration::from_millis(1))).unwrap();
+    facing_host.set_read_timeout(Some(Duration::from_millis(1))).unwrap();
 
     let caller_media = Media::open(0, FS).unwrap();
     let host_media = Media::open(0, FS).unwrap();
@@ -153,11 +139,7 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
 
     // Caller to host: untouched, and every packet kept.
     let upstream = {
-        let (from, to, stop) = (
-            facing_caller.try_clone().unwrap(),
-            facing_host.try_clone().unwrap(),
-            Arc::clone(&stop),
-        );
+        let (from, to, stop) = (facing_caller.try_clone().unwrap(), facing_host.try_clone().unwrap(), Arc::clone(&stop));
         thread::spawn(move || {
             let mut packets = Vec::new();
             let mut buffer = [0u8; 2048];
@@ -178,12 +160,7 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
     // 2.5 s. A stall holds everything that arrives in it and lets it go in
     // one burst at its end, which is what an inbound route does.
     let downstream = {
-        let (from, to, stop, impair) = (
-            facing_host.try_clone().unwrap(),
-            facing_caller.try_clone().unwrap(),
-            Arc::clone(&stop),
-            Arc::clone(&impair),
-        );
+        let (from, to, stop, impair) = (facing_host.try_clone().unwrap(), facing_caller.try_clone().unwrap(), Arc::clone(&stop), Arc::clone(&impair));
         thread::spawn(move || {
             let mut held: VecDeque<Held> = VecDeque::new();
             let mut buffer = [0u8; 2048];
@@ -206,8 +183,7 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
                         let t = now.duration_since(since);
                         if t >= Duration::from_millis(1500) * (stalls + 1) {
                             stalls += 1;
-                            stall_until =
-                                now + Duration::from_millis(100 + u64::from(random() % 201));
+                            stall_until = now + Duration::from_millis(100 + u64::from(random() % 201));
                         }
                         if t >= Duration::from_millis(2500) * (losses + 1) {
                             losses += 1;
@@ -221,10 +197,7 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
                         // In order: a packet never overtakes the one before.
                         at = at.max(last_release);
                         last_release = at;
-                        held.push_back(Held {
-                            at,
-                            datagram: buffer[..n].to_vec(),
-                        });
+                        held.push_back(Held { at, datagram: buffer[..n].to_vec() });
                     }
                 }
                 while held.front().is_some_and(|h| h.at <= now) {
@@ -237,37 +210,20 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
     };
 
     let caller_typed = Arc::new(Mutex::new(VecDeque::new()));
-    let (caller_online, host_online) = (
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let (caller_online, host_online) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let host = {
         let (stop, online) = (Arc::clone(&stop), Arc::clone(&host_online));
-        thread::spawn(move || {
-            run_modem(
-                host_media,
-                "AT+MS=V34;A",
-                Arc::new(Mutex::new(VecDeque::new())),
-                online,
-                stop,
-            )
-        })
+        thread::spawn(move || run_modem(host_media, "AT+MS=V34;A", Arc::new(Mutex::new(VecDeque::new())), online, stop))
     };
     let caller = {
-        let (stop, online, typed) = (
-            Arc::clone(&stop),
-            Arc::clone(&caller_online),
-            Arc::clone(&caller_typed),
-        );
+        let (stop, online, typed) = (Arc::clone(&stop), Arc::clone(&caller_online), Arc::clone(&caller_typed));
         thread::spawn(move || run_modem(caller_media, "AT+MS=V34;D5551234", typed, online, stop))
     };
 
     // Wait for both ends, let error control settle, then type for a while
     // with the trouble on.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !(caller_online.load(Ordering::Relaxed) && host_online.load(Ordering::Relaxed))
-        && Instant::now() < deadline
-    {
+    while !(caller_online.load(Ordering::Relaxed) && host_online.load(Ordering::Relaxed)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
     let online = caller_online.load(Ordering::Relaxed) && host_online.load(Ordering::Relaxed);
@@ -293,56 +249,27 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
     let (stalls, losses) = downstream.join().unwrap();
     let stats = caller.stats.clone().unwrap();
     let saw = |end: &End| String::from_utf8_lossy(&end.terminal).into_owned();
-    assert!(
-        online,
-        "the call never came up\ncaller: {:?}\nhost: {:?}",
-        saw(&caller),
-        saw(&host)
-    );
-    assert!(
-        stalls >= 6 && losses >= 4,
-        "the route was not impaired: {stalls} stalls, {losses} losses"
-    );
+    assert!(online, "the call never came up\ncaller: {:?}\nhost: {:?}", saw(&caller), saw(&host));
+    assert!(stalls >= 6 && losses >= 4, "the route was not impaired: {stalls} stalls, {losses} losses");
 
     // The caller heard the trouble: stalls became silence in what it heard.
-    assert!(
-        stats.jitter.starved > 0 && stats.jitter.late > 0,
-        "no stall reached the caller: {stats:?}"
-    );
+    assert!(stats.jitter.starved > 0 && stats.jitter.late > 0, "no stall reached the caller: {stats:?}");
 
     // Every packet the caller sent, numbered and stamped without a break.
     for pair in sent.windows(2) {
-        assert_eq!(
-            pair[1].sequence,
-            pair[0].sequence.wrapping_add(1),
-            "the route lost an upstream packet"
-        );
+        assert_eq!(pair[1].sequence, pair[0].sequence.wrapping_add(1), "the route lost an upstream packet");
         assert_eq!(pair[1].timestamp.wrapping_sub(pair[0].timestamp), 160);
     }
     // And what was in them, against what the caller's modem said.
-    let wire: Vec<u8> = sent
-        .iter()
-        .flat_map(|p| p.payload.iter().copied())
-        .collect();
+    let wire: Vec<u8> = sent.iter().flat_map(|p| p.payload.iter().copied()).collect();
     let quiet = Law::Mu.encode(0);
     let said = &caller.said;
-    let in_said = said
-        .iter()
-        .position(|&c| c != quiet)
-        .expect("the caller's modem said nothing");
-    let on_wire = wire
-        .iter()
-        .position(|&c| c != quiet)
-        .expect("nothing but silence went out");
+    let in_said = said.iter().position(|&c| c != quiet).expect("the caller's modem said nothing");
+    let on_wire = wire.iter().position(|&c| c != quiet).expect("nothing but silence went out");
     assert!(on_wire >= in_said, "the wire led the modem");
     let offset = on_wire - in_said;
     let wire = &wire[offset..];
-    assert!(
-        wire.len() + 2 * 160 >= said.len(),
-        "{} of the {} octets the modem said went out",
-        wire.len(),
-        said.len()
-    );
+    assert!(wire.len() + 2 * 160 >= said.len(), "{} of the {} octets the modem said went out", wire.len(), said.len());
     let n = wire.len().min(said.len());
     if let Some(at) = (0..n).find(|&i| wire[i] != said[i]) {
         panic!(
@@ -351,20 +278,12 @@ fn a_v34_upstream_reaches_the_wire_intact_through_inbound_jitter_loss_and_stalls
             wire[at..].iter().take_while(|&&o| o == quiet).count()
         );
     }
-    assert_eq!(
-        (stats.underruns_mid_call, stats.inserted, stats.dropped_out),
-        (0, 0, 0),
-        "{stats:?}"
-    );
+    assert_eq!((stats.underruns_mid_call, stats.inserted, stats.dropped_out), (0, 0, 0), "{stats:?}");
 
     // And the host's receiver decoded the upstream that rode on it.
     let heard = saw(&host);
     let typed = String::from_utf8_lossy(&typed).into_owned();
-    assert!(
-        heard.contains(&typed),
-        "the host did not get what the caller typed\ncaller: {:?}\nhost: {heard:?}",
-        saw(&caller)
-    );
+    assert!(heard.contains(&typed), "the host did not get what the caller typed\ncaller: {:?}\nhost: {heard:?}", saw(&caller));
     eprintln!(
         "{:.1} s, {} upstream octets checked, {stalls} stalls and {losses} losses inbound; caller: {stats:?}",
         start.elapsed().as_secs_f64(),

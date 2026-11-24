@@ -97,10 +97,7 @@ impl V32Tap {
                         && is_rate_signal(s)
                     {
                         self.said.push(("answerer R1", describe_sequence(s)));
-                        self.notes.push(format!(
-                            "the answering modem's R1: {}",
-                            describe_sequence(s)
-                        ));
+                        self.notes.push(format!("the answering modem's R1: {}", describe_sequence(s)));
                         // The calling modem answers R1 with its own S about a
                         // tenth of a second on; hunting sooner would find the
                         // end of this one.
@@ -132,8 +129,7 @@ impl V32Tap {
                         && is_rate_signal(s)
                     {
                         self.said.push(("caller R2", describe_sequence(s)));
-                        self.notes
-                            .push(format!("the calling modem's R2: {}", describe_sequence(s)));
+                        self.notes.push(format!("the calling modem's R2: {}", describe_sequence(s)));
                         self.notes.push(BOTH.to_owned());
                         self.step = V32Step::Both;
                         break;
@@ -171,9 +167,7 @@ impl V32Tap {
 
     pub fn phase(&self) -> &'static str {
         match (self.step, self.training()) {
-            (V32Step::Answerer | V32Step::Gap(_), true) => {
-                "the answering modem's TRN, alone on the line"
-            }
+            (V32Step::Answerer | V32Step::Gap(_), true) => "the answering modem's TRN, alone on the line",
             (V32Step::Answerer, false) => "waiting for the answering modem's S",
             (V32Step::Gap(_), false) => "the answering modem's rate signal read",
             (V32Step::Caller, true) => "the calling modem's TRN, alone on the line",
@@ -245,10 +239,7 @@ impl Third {
                     ));
                 }
                 Heard::Untrained => {
-                    notes.push(format!(
-                        "the {} modem's PP was not where its S-bar said",
-                        self.name
-                    ));
+                    notes.push(format!("the {} modem's PP was not where its S-bar said", self.name));
                     self.rx.hunt();
                 }
                 Heard::Symbol(symbol) => {
@@ -278,14 +269,7 @@ impl Third {
                                 self.j = true;
                                 let text = format!("asks for {asks}-point training in phase 4");
                                 notes.push(format!("the {} modem's J {text}", self.name));
-                                said.push((
-                                    if self.far == Mode::Answer {
-                                        "answerer J"
-                                    } else {
-                                        "caller J"
-                                    },
-                                    text,
-                                ));
+                                said.push((if self.far == Mode::Answer { "answerer J" } else { "caller J" }, text));
                             }
                         }
                     }
@@ -297,9 +281,7 @@ impl Third {
     /// Over: J has been read, the signal was lost after training, or it never
     /// came in four seconds.
     fn over(&self, fs: f64) -> bool {
-        self.j
-            || (self.trained && self.rx.is_lost())
-            || (!self.trained && self.fed > (4.0 * fs) as usize)
+        self.j || (self.trained && self.rx.is_lost()) || (!self.trained && self.fed > (4.0 * fs) as usize)
     }
 
     fn drawing(&self) -> bool {
@@ -358,9 +340,7 @@ impl V34Tap {
                     // The call modem's turn: its S comes in as the answer
                     // modem's J is ending.
                     self.step = match self.call_band {
-                        Some(band) => {
-                            V34Step::Caller(Box::new(Third::new(band, Mode::Call, "call", self.fs)))
-                        }
+                        Some(band) => V34Step::Caller(Box::new(Third::new(band, Mode::Call, "call", self.fs))),
                         None => V34Step::Both,
                     };
                 }
@@ -399,22 +379,9 @@ impl V34Tap {
                 let text = format!(
                     "symbol rates {}{}",
                     rates.join(", "),
-                    if i.constellation_1664 {
-                        " · 1664 points"
-                    } else {
-                        ""
-                    }
+                    if i.constellation_1664 { " · 1664 points" } else { "" }
                 );
-                self.say(
-                    if side == Side::Call {
-                        "caller INFO0"
-                    } else {
-                        "answerer INFO0"
-                    },
-                    who,
-                    "INFO0",
-                    text,
-                );
+                self.say(if side == Side::Call { "caller INFO0" } else { "answerer INFO0" }, who, "INFO0", text);
             }
             Info::Info1c(i) => {
                 let text = SymbolRate::ALL
@@ -425,12 +392,7 @@ impl V34Tap {
                     .collect::<Vec<_>>()
                     .join(", ");
                 self.info1c = Some(i);
-                self.say(
-                    "caller INFO1c",
-                    who,
-                    "INFO1c: what the probing found each symbol rate would carry",
-                    text,
-                );
+                self.say("caller INFO1c", who, "INFO1c: what the probing found each symbol rate would carry", text);
             }
             Info::Info1a(i) => {
                 let text = format!(
@@ -461,9 +423,7 @@ impl V34Tap {
             | Info::Info1aPcmUp(_)
             | Info::Info1aV34Up(_)
             | Info::Mh(_) => {
-                self.notes.push(format!(
-                    "the {who} modem sent an INFO sequence of another start-up"
-                ));
+                self.notes.push(format!("the {who} modem sent an INFO sequence of another start-up"));
             }
         }
     }
@@ -485,9 +445,7 @@ impl V34Tap {
     }
 
     pub fn snr_db(&self) -> Option<f32> {
-        self.third()
-            .filter(|t| t.drawing())
-            .map(|t| t.rx.snr_db() as f32)
+        self.third().filter(|t| t.drawing()).map(|t| t.rx.snr_db() as f32)
     }
 
     pub fn training(&self) -> bool {
@@ -497,9 +455,7 @@ impl V34Tap {
     pub fn phase(&self) -> &'static str {
         match &self.step {
             V34Step::Second => "V.8 and phase 2: listening for the INFO sequences",
-            V34Step::Answerer(t) if t.drawing() => {
-                "phase 3: the answer modem's TRN, alone on the line"
-            }
+            V34Step::Answerer(t) if t.drawing() => "phase 3: the answer modem's TRN, alone on the line",
             V34Step::Answerer(_) => "phase 3: waiting for the answer modem's S",
             V34Step::Caller(t) if t.drawing() => "phase 3: the call modem's TRN, alone on the line",
             V34Step::Caller(_) => "phase 3: waiting for the call modem's S",
@@ -548,16 +504,8 @@ mod tests {
         assert_eq!(keys, ["answerer R1", "caller R2"], "{:?}", tap.said());
         assert_eq!(tap.phase(), BOTH);
         // Each drew symbols for a good second of its TRN.
-        assert!(
-            drawn[0] > fs as usize,
-            "answerer drawn for {} samples",
-            drawn[0]
-        );
-        assert!(
-            drawn[1] > (fs * 0.5) as usize,
-            "caller drawn for {} samples",
-            drawn[1]
-        );
+        assert!(drawn[0] > fs as usize, "answerer drawn for {} samples", drawn[0]);
+        assert!(drawn[1] > (fs * 0.5) as usize, "caller drawn for {} samples", drawn[1]);
     }
 
     /// The recorded V.34 call: three INFO sequences, and each modem's phase 3
@@ -578,13 +526,7 @@ mod tests {
         println!("{}", notes.join("\n"));
         let keys: Vec<&str> = tap.said().iter().map(|(k, _)| *k).collect();
         assert!(
-            keys == [
-                "answerer INFO0",
-                "caller INFO1c",
-                "answerer INFO1a",
-                "answerer J",
-                "caller J"
-            ],
+            keys == ["answerer INFO0", "caller INFO1c", "answerer INFO1a", "answerer J", "caller J"],
             "{:?}",
             tap.said()
         );

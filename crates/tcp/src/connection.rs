@@ -305,13 +305,7 @@ impl Connection {
     /// of segment, asking the far end for `receive_mss`.
     ///
     /// Sized before the SYN goes, because the SYN is what carries the option.
-    pub fn connect_sized(
-        local: Endpoint,
-        remote: Endpoint,
-        isn: u32,
-        receive_mss: u16,
-        send_limit: u16,
-    ) -> Self {
+    pub fn connect_sized(local: Endpoint, remote: Endpoint, isn: u32, receive_mss: u16, send_limit: u16) -> Self {
         let mut c = Self::new(local, remote, Seq(isn), State::SynSent, false);
         c.set_receive_mss(receive_mss);
         c.set_send_limit(send_limit);
@@ -747,7 +741,9 @@ impl Connection {
                     self.relisten();
                 }
                 State::SynReceived => self.give_up(Report::Refused),
-                State::Closing | State::LastAck | State::TimeWait => self.give_up(Report::Closed),
+                State::Closing | State::LastAck | State::TimeWait => {
+                    self.give_up(Report::Closed)
+                }
                 _ => self.give_up(Report::Reset),
             }
             return;
@@ -801,7 +797,8 @@ impl Connection {
             // "not acceptable"
             (_, 0) => false,
             (_, window) => {
-                seq.within(self.rcv_nxt, window) || (seq + (len - 1)).within(self.rcv_nxt, window)
+                seq.within(self.rcv_nxt, window)
+                    || (seq + (len - 1)).within(self.rcv_nxt, window)
             }
         }
     }
@@ -847,7 +844,8 @@ impl Connection {
             // follow the front of the queue, so it stops when there is
             // nothing left in it.
             self.arm_retransmit();
-        } else if ack == self.snd_una && segment.payload.is_empty() && !self.outgoing.is_empty() {
+        } else if ack == self.snd_una && segment.payload.is_empty() && !self.outgoing.is_empty()
+        {
             self.duplicate_acknowledgment();
         }
         // "If SND.UNA =< SEG.ACK =< SND.NXT, the send window should be
@@ -1086,8 +1084,7 @@ impl Connection {
 
         // The FIN goes when everything before it has, and takes the last place
         // in the sequence space (3.4).
-        let everything_sent =
-            self.snd_una.distance_to(self.snd_nxt) as usize == self.outgoing.len();
+        let everything_sent = self.snd_una.distance_to(self.snd_nxt) as usize == self.outgoing.len();
         if self.closing && !self.fin_sent && everything_sent {
             self.fin_sent = true;
             let sequence = self.snd_nxt.0;
@@ -1253,9 +1250,7 @@ impl Connection {
 
     /// RFC 6298 (2.2) and (2.3), with Karn's rule from section 3.
     fn measure(&mut self, ack: Seq) {
-        let Some((at, sent)) = self.timing else {
-            return;
-        };
+        let Some((at, sent)) = self.timing else { return };
         if ack.before(at) {
             return;
         }

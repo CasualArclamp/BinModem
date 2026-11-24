@@ -169,10 +169,7 @@ impl Gateway {
             }
             self.stage = Stage::Idle;
             let _ = self.talk.answer(http::Answer::Unreachable);
-            log.push(format!(
-                "proxy: {} could not be reached: {why}",
-                self.going_to
-            ));
+            log.push(format!("proxy: {} could not be reached: {why}", self.going_to));
         }
     }
 
@@ -186,13 +183,7 @@ impl Gateway {
     }
 
     /// One round.
-    pub fn step(
-        &mut self,
-        stack: &mut Stack,
-        resolver: &mut Resolver,
-        ms: u32,
-        log: &mut Vec<String>,
-    ) {
+    pub fn step(&mut self, stack: &mut Stack, resolver: &mut Resolver, ms: u32, log: &mut Vec<String>) {
         self.read_browser(log);
         self.follow_request(stack, resolver, log);
         self.follow_lookup(stack, resolver, log);
@@ -275,11 +266,7 @@ impl Gateway {
                         // RFC 1928 3 opens a SOCKS greeting with its version,
                         // 5, and a browser set up for SOCKS will get nowhere
                         // here -- so it is told once, plainly.
-                        let what = if buffer[0] == 5 {
-                            "is set up for SOCKS"
-                        } else {
-                            "is not speaking HTTP"
-                        };
+                        let what = if buffer[0] == 5 { "is set up for SOCKS" } else { "is not speaking HTTP" };
                         log.push(format!(
                             "proxy: {} {what}; set it to use an HTTP proxy, for https as well",
                             self.from
@@ -316,15 +303,8 @@ impl Gateway {
     }
 
     /// Somewhere to go, and possibly somewhere other than where this is.
-    fn follow_request(
-        &mut self,
-        stack: &mut Stack,
-        resolver: &mut Resolver,
-        log: &mut Vec<String>,
-    ) {
-        let Some(want) = self.talk.request() else {
-            return;
-        };
+    fn follow_request(&mut self, stack: &mut Stack, resolver: &mut Resolver, log: &mut Vec<String>) {
+        let Some(want) = self.talk.request() else { return };
         let moving = match self.stage {
             Stage::Idle => true,
             // What the old connection sent has to reach the browser first; the
@@ -372,10 +352,7 @@ impl Gateway {
                 None => {
                     self.stage = Stage::Idle;
                     let _ = self.talk.answer(http::Answer::Failed);
-                    log.push(format!(
-                        "proxy: {} not opened: too many connections",
-                        self.going_to
-                    ));
+                    log.push(format!("proxy: {} not opened: too many connections", self.going_to));
                 }
             },
             Answer::Failed(why) => {

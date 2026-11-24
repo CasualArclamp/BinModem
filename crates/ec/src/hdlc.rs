@@ -175,10 +175,7 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(fcs: Fcs) -> Self {
-        Self {
-            fcs,
-            bits: VecDeque::new(),
-        }
+        Self { fcs, bits: VecDeque::new() }
     }
 
     /// Change the check sequence width for frames queued from now on.
@@ -437,9 +434,8 @@ impl Decoder {
                     // frames that were perfectly well formed.
                     let len = self.bits.len();
                     let certain = len.saturating_sub(5);
-                    let content = (certain..len)
-                        .find(|n| n.is_multiple_of(8))
-                        .unwrap_or(certain);
+                    let content =
+                        (certain..len).find(|n| n.is_multiple_of(8)).unwrap_or(certain);
                     // Its own octets, whatever the frame before it was. Left
                     // alone, this still held that frame's, and every abort
                     // that followed a damaged frame was logged and counted
@@ -646,15 +642,9 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 1, "{seen:02x?}");
-        assert_eq!(
-            seen[0].0.as_ref().expect("the 32-bit frame was not read"),
-            payload
-        );
+        assert_eq!(seen[0].0.as_ref().expect("the 32-bit frame was not read"), payload);
         assert_eq!(dec.matched_fcs(), Fcs::Bits32);
-        assert!(
-            seen[0].1.is_empty(),
-            "the frame was reported as damaged as well as read"
-        );
+        assert!(seen[0].1.is_empty(), "the frame was reported as damaged as well as read");
     }
 
     #[test]
@@ -770,10 +760,7 @@ mod tests {
     /// Bits for a flag, and for octets laid down low-order first without
     /// stuffing, which is enough for octets that never have five ones in a row.
     fn raw(octets: &[u8]) -> Vec<bool> {
-        octets
-            .iter()
-            .flat_map(|&o| (0..8).map(move |i| o & (1 << i) != 0))
-            .collect()
+        octets.iter().flat_map(|&o| (0..8).map(move |i| o & (1 << i) != 0)).collect()
     }
 
     #[test]
@@ -798,11 +785,7 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "{seen:02x?}");
         assert_eq!(seen[0].0, Err(FrameError::BadFcs));
-        assert_eq!(
-            seen[0].1.len(),
-            11,
-            "the damaged frame and its check sequence"
-        );
+        assert_eq!(seen[0].1.len(), 11, "the damaged frame and its check sequence");
         assert_eq!(seen[1], (Err(FrameError::Aborted), vec![0x41, 0x42]));
     }
 

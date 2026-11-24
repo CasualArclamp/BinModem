@@ -177,16 +177,8 @@ fn a_v32bis_call_rides_out_the_faults_of_a_real_sound_card() {
         cable.caller.line_phase(),
         cable.host.line_phase()
     );
-    assert!(
-        cable.caller_saw().contains("CONNECT"),
-        "the terminal was never told: {:?}",
-        cable.caller_saw()
-    );
-    assert_eq!(
-        cable.caller.rate(),
-        Some(14_400),
-        "came up at the wrong rate"
-    );
+    assert!(cable.caller_saw().contains("CONNECT"), "the terminal was never told: {:?}", cable.caller_saw());
+    assert_eq!(cable.caller.rate(), Some(14_400), "came up at the wrong rate");
 
     // Two seconds in, and over the next twelve: five drops and one underrun.
     let start = cable.now;
@@ -194,11 +186,7 @@ fn a_v32bis_call_rides_out_the_faults_of_a_real_sound_card() {
         .into_iter()
         .map(|at| (at, Fault::Drop))
         .collect();
-    faults.extend(
-        moments(start, 2.0, 14.0, 1, 0x0DD_6A9)
-            .into_iter()
-            .map(|at| (at, Fault::Gap(160))),
-    );
+    faults.extend(moments(start, 2.0, 14.0, 1, 0x0DD_6A9).into_iter().map(|at| (at, Fault::Gap(160))));
     faults.sort_by_key(|&(at, _)| at);
     cable.faults = faults.into();
     cable.run(16.0);
@@ -210,10 +198,7 @@ fn a_v32bis_call_rides_out_the_faults_of_a_real_sound_card() {
     cable.run(14.0);
 
     for (name, saw) in [("caller", cable.caller_saw()), ("host", cable.host_saw())] {
-        assert!(
-            !saw.contains("NO CARRIER"),
-            "the {name}'s terminal was told NO CARRIER: {saw:?}"
-        );
+        assert!(!saw.contains("NO CARRIER"), "the {name}'s terminal was told NO CARRIER: {saw:?}");
     }
     assert!(
         cable.up(),

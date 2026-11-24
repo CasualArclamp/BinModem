@@ -58,10 +58,7 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Self {
-            n2: DEFAULT_N2,
-            n7: DEFAULT_N7,
-        }
+        Self { n2: DEFAULT_N2, n7: DEFAULT_N7 }
     }
 }
 
@@ -162,10 +159,7 @@ impl Dictionary {
     }
 
     pub fn in_use(&self, code: u16) -> bool {
-        self.nodes
-            .get(code as usize)
-            .map(|n| n.in_use)
-            .unwrap_or(false)
+        self.nodes.get(code as usize).map(|n| n.in_use).unwrap_or(false)
     }
 
     /// The string a codeword names, first character first.
@@ -173,9 +167,7 @@ impl Dictionary {
         let mut out = Vec::new();
         let mut cursor = Some(code);
         while let Some(c) = cursor {
-            let Some(node) = self.nodes.get(c as usize) else {
-                break;
-            };
+            let Some(node) = self.nodes.get(c as usize) else { break };
             if !node.in_use {
                 break;
             }
@@ -312,24 +304,15 @@ mod tests {
     #[test]
     fn the_maximum_string_length_is_enforced() {
         // V.42bis 6.4 a): a string may not exceed N7.
-        let params = Params {
-            n7: 6,
-            ..Default::default()
-        };
+        let params = Params { n7: 6, ..Default::default() };
         let mut d = Dictionary::new(params);
         let mut code = Dictionary::root_code(b'a');
         for i in 1..6 {
-            code = d
-                .add(code, b'a' + i)
-                .unwrap_or_else(|| panic!("depth {i} refused"));
+            code = d.add(code, b'a' + i).unwrap_or_else(|| panic!("depth {i} refused"));
             assert_eq!(d.depth(code), i + 1);
         }
         assert_eq!(d.depth(code), 6);
-        assert_eq!(
-            d.add(code, b'z'),
-            None,
-            "a seventh character must be refused"
-        );
+        assert_eq!(d.add(code, b'z'), None, "a seventh character must be refused");
     }
 
     #[test]
@@ -376,10 +359,7 @@ mod tests {
             if !d.in_use(code) {
                 continue;
             }
-            if let Some(parent) = (code >= N5)
-                .then(|| d.nodes[code as usize].parent)
-                .flatten()
-            {
+            if let Some(parent) = (code >= N5).then(|| d.nodes[code as usize].parent).flatten() {
                 assert!(
                     d.in_use(parent),
                     "codeword {code} outlived its parent {parent}"

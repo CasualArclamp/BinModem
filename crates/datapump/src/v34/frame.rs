@@ -85,11 +85,7 @@ impl Framing {
     /// it in Table 8.
     pub fn new(rate: SymbolRate, primary: u32, auxiliary: bool, expanded: bool) -> Option<Self> {
         let (j, p) = j_and_p(rate);
-        let lowest = if rate == SymbolRate::S2400 {
-            2400
-        } else {
-            4800
-        };
+        let lowest = if rate == SymbolRate::S2400 { 2400 } else { 4800 };
         let highest = match rate {
             SymbolRate::S2400 => 21_600,
             SymbolRate::S2743 | SymbolRate::S2800 => 26_400,
@@ -118,11 +114,7 @@ impl Framing {
         };
         let root = 2f64.powf(k as f64 / 8.0);
         let minimum = root.ceil() as usize;
-        let m = if expanded {
-            ((1.25 * root).round() as usize).max(minimum)
-        } else {
-            minimum
-        };
+        let m = if expanded { ((1.25 * root).round() as usize).max(minimum) } else { minimum };
         Some(Self {
             rate,
             primary,
@@ -269,18 +261,12 @@ mod tests {
         for rate in SymbolRate::ALL {
             for primary in (2400..=33_600).step_by(2400) {
                 for auxiliary in [false, true] {
-                    let Some(f) = Framing::new(rate, primary, auxiliary, false) else {
-                        continue;
-                    };
+                    let Some(f) = Framing::new(rate, primary, auxiliary, false) else { continue };
                     if f.b > 12 {
                         // b - K is four groups of 3 + 2q.
                         assert_eq!(f.b - f.k, 4 * (3 + 2 * f.q), "{rate:?} at {primary}");
                     } else {
-                        assert!(
-                            matches!(f.b, 8 | 9 | 11 | 12),
-                            "{rate:?} at {primary}: b {}",
-                            f.b
-                        );
+                        assert!(matches!(f.b, 8 | 9 | 11 | 12), "{rate:?} at {primary}: b {}", f.b);
                     }
                     assert!(f.l <= 1664, "{rate:?} at {primary}: L {}", f.l);
                 }

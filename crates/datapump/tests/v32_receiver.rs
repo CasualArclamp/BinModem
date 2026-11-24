@@ -25,10 +25,7 @@ use dsp::qam::{Stage, Via};
 
 const FS: f64 = 16_000.0;
 
-const VECTOR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/vectors/v32bis-14400.wav"
-);
+const VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v32bis-14400.wav");
 
 // ---------------------------------------------------------------------------
 // The line.
@@ -41,9 +38,7 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self {
-            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
-        }
+        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -92,14 +87,7 @@ impl Shifter {
             let w = 0.54 - 0.46 * (TAU * d as f64 / (N - 1) as f64).cos();
             *tap = 2.0 / (PI * k as f64) * w;
         }
-        Self {
-            taps,
-            hist: vec![0.0; N],
-            pos: 0,
-            centre: m,
-            phase: 0.0,
-            step: hz / FS,
-        }
+        Self { taps, hist: vec![0.0; N], pos: 0, centre: m, phase: 0.0, step: hz / FS }
     }
 
     fn process(&mut self, x: f64) -> f64 {
@@ -212,34 +200,17 @@ fn listen(line: &[f64], mode: Mode, hunt_from: usize, until: usize) -> Heard {
         }
     }
     let trained = rx.trained_via().map(|via| (rx.trained_snr_db(), via));
-    Heard {
-        trained,
-        s_hz: rx.s_offset_hz(),
-        sequences,
-        stage: rx.stage(),
-    }
+    Heard { trained, s_hz: rx.s_offset_hz(), sequences, stage: rx.stage() }
 }
 
 fn describe(heard: &Heard) -> String {
-    let sequences: Vec<String> = heard
-        .sequences
-        .iter()
-        .map(|&s| describe_sequence(s))
-        .collect();
+    let sequences: Vec<String> = heard.sequences.iter().map(|&s| describe_sequence(s)).collect();
     format!(
         "trained {}, S {}, {:?}; read {}",
-        heard.trained.map_or("never".into(), |(db, via)| format!(
-            "{db:.1} dB via {via:?}"
-        )),
-        heard
-            .s_hz
-            .map_or("unheard".into(), |hz| format!("{:+.3} Hz", hz)),
+        heard.trained.map_or("never".into(), |(db, via)| format!("{db:.1} dB via {via:?}")),
+        heard.s_hz.map_or("unheard".into(), |hz| format!("{:+.3} Hz", hz)),
         heard.stage,
-        if sequences.is_empty() {
-            "nothing".into()
-        } else {
-            sequences.join("; ")
-        }
+        if sequences.is_empty() { "nothing".into() } else { sequences.join("; ") }
     )
 }
 
@@ -251,42 +222,26 @@ fn our_own_conditioning_signal_trains_the_receiver_above_45_db() {
     for mode in [Mode::Call, Mode::Answer] {
         let (line, s_starts) = our_conditioning(mode);
         let heard = listen(&line, mode.peer(), s_starts / 2, line.len());
-        println!(
-            "our {mode:?} end's conditioning signal, clean: {}",
-            describe(&heard)
-        );
+        println!("our {mode:?} end's conditioning signal, clean: {}", describe(&heard));
         let (db, via) = heard.trained.expect("never trained");
         assert!(db >= 45.0, "{mode:?}: trained to {db:.1} dB");
         assert_eq!(via, Via::First, "{mode:?}");
         let s_hz = heard.s_hz.expect("S unheard");
         assert!(s_hz.abs() <= 0.1, "{mode:?}: S read {s_hz:+.3} Hz");
-        assert!(
-            heard.sequences.contains(&r1()),
-            "{mode:?}: R1 not read: {}",
-            describe(&heard)
-        );
+        assert!(heard.sequences.contains(&r1()), "{mode:?}: R1 not read: {}", describe(&heard));
     }
 }
 
 #[test]
 fn our_own_training_holds_at_35_db_with_seven_hertz_and_200_ppm() {
-    for (k, (hz, ppm)) in [(7.0, 200.0), (-7.0, -200.0), (7.0, -200.0), (-7.0, 200.0)]
-        .into_iter()
-        .enumerate()
-    {
+    for (k, (hz, ppm)) in [(7.0, 200.0), (-7.0, -200.0), (7.0, -200.0), (-7.0, 200.0)].into_iter().enumerate() {
         for mode in [Mode::Call, Mode::Answer] {
             let (clean, s_starts) = our_conditioning(mode);
             let line = through(&clean, hz, ppm, 35.0, s_starts, 0x9300 + k as u64);
             let heard = listen(&line, mode.peer(), s_starts / 2, line.len());
-            println!(
-                "our {mode:?} end's, {hz:+} Hz and {ppm:+} ppm at 35 dB: {}",
-                describe(&heard)
-            );
+            println!("our {mode:?} end's, {hz:+} Hz and {ppm:+} ppm at 35 dB: {}", describe(&heard));
             let (db, _) = heard.trained.expect("never trained");
-            assert!(
-                db >= 34.0,
-                "{mode:?}, {hz:+} Hz, {ppm:+} ppm: trained to {db:.1} dB"
-            );
+            assert!(db >= 34.0, "{mode:?}, {hz:+} Hz, {ppm:+} ppm: trained to {db:.1} dB");
             // A far clock fast by `ppm` runs its carrier fast with it, as a
             // real modem's one crystal does: 200 ppm of 1807 Hz is 0.36 Hz.
             let offset = (1800.0 + hz) * (1.0 + ppm * 1e-6) - 1800.0;
@@ -295,10 +250,7 @@ fn our_own_training_holds_at_35_db_with_seven_hertz_and_200_ppm() {
                 (s_hz - offset).abs() <= 0.1,
                 "{mode:?}, {hz:+} Hz, {ppm:+} ppm: S read {s_hz:+.3} Hz against {offset:+.3}"
             );
-            assert!(
-                heard.sequences.contains(&r1()),
-                "{mode:?}, {hz:+} Hz, {ppm:+} ppm: R1 not read"
-            );
+            assert!(heard.sequences.contains(&r1()), "{mode:?}, {hz:+} Hz, {ppm:+} ppm: R1 not read");
         }
     }
 }
@@ -333,20 +285,8 @@ fn a_real_modems_trn_trains_the_receiver() {
     let line: Vec<f64> = wav.mono().iter().map(|&s| f64::from(s)).collect();
     let at = |seconds: f64| (seconds * FS) as usize;
     for (name, mode, from, until, rate_signal) in [
-        (
-            "the answering modem's",
-            Mode::Call,
-            3.75,
-            7.25,
-            0b0000_1111_1111_1001,
-        ),
-        (
-            "the calling modem's",
-            Mode::Answer,
-            7.2,
-            9.6,
-            0b0000_0111_1001_0001,
-        ),
+        ("the answering modem's", Mode::Call, 3.75, 7.25, 0b0000_1111_1111_1001),
+        ("the calling modem's", Mode::Answer, 7.2, 9.6, 0b0000_0111_1001_0001),
     ] {
         let heard = listen(&line, mode, at(from), at(until));
         println!("{name}, heard at the {mode:?} end: {}", describe(&heard));
@@ -400,29 +340,16 @@ fn the_blind_start_finds_our_own_transmitter() {
             }
             found_everywhere &= found.is_some() && rx.stage() == Stage::Tracking;
             row += &match found {
-                Some(at) => format!(
-                    " {phase}: {at:.0} sym {:.1}/{:.1} dB,",
-                    rx.trained_snr_db(),
-                    rx.snr_db()
-                ),
+                Some(at) => format!(" {phase}: {at:.0} sym {:.1}/{:.1} dB,", rx.trained_snr_db(), rx.snr_db()),
                 None => format!(" {phase}: never,"),
             };
             let contract = bps == 4800 || (bps == 9600 && coding == Coding::Trellis && phase == 0);
             if contract {
-                assert!(
-                    found.is_some_and(|at| at <= 300.0),
-                    "{bps} {coding:?}, phase {phase}: found at {found:?}"
-                );
-                assert!(
-                    rx.snr_db() >= 30.0,
-                    "{bps} {coding:?}, phase {phase}: tracking at {:.1} dB",
-                    rx.snr_db()
-                );
+                assert!(found.is_some_and(|at| at <= 300.0), "{bps} {coding:?}, phase {phase}: found at {found:?}");
+                assert!(rx.snr_db() >= 30.0, "{bps} {coding:?}, phase {phase}: tracking at {:.1} dB", rx.snr_db());
             }
         }
-        println!(
-            "blind, {bps} {coding:?} (found, trained / tracking):{row} everywhere {found_everywhere}"
-        );
+        println!("blind, {bps} {coding:?} (found, trained / tracking):{row} everywhere {found_everywhere}");
     }
 }
 
@@ -442,31 +369,18 @@ fn a_slip_across_the_join_of_s_and_s_bar_still_trains() {
         let (clean, s_starts) = our_conditioning(mode);
         // The first sample of S-bar's first symbol, near enough.
         let join = s_starts + (256.0 * FS / BAUD) as usize;
-        let power =
-            clean[s_starts..join].iter().map(|x| x * x).sum::<f64>() / (join - s_starts) as f64;
+        let power = clean[s_starts..join].iter().map(|x| x * x).sum::<f64>() / (join - s_starts) as f64;
         let mut rng = Rng::new(0x5117);
         let noise: Vec<f64> = (0..packet).map(|_| power.sqrt() * rng.gaussian()).collect();
         for (what, line) in [
-            (
-                "a packet dropped",
-                [&clean[..join], &clean[join + packet..]].concat(),
-            ),
-            (
-                "a packet of comfort noise",
-                [&clean[..join], &noise[..], &clean[join..]].concat(),
-            ),
+            ("a packet dropped", [&clean[..join], &clean[join + packet..]].concat()),
+            ("a packet of comfort noise", [&clean[..join], &noise[..], &clean[join..]].concat()),
         ] {
             let heard = listen(&line, mode.peer(), s_starts / 2, line.len());
-            println!(
-                "our {mode:?} end's, {what} at the join: {}",
-                describe(&heard)
-            );
+            println!("our {mode:?} end's, {what} at the join: {}", describe(&heard));
             let (db, _) = heard.trained.expect("never trained");
             assert!(db >= 34.0, "{mode:?}, {what}: trained to {db:.1} dB");
-            assert!(
-                heard.sequences.contains(&r1()),
-                "{mode:?}, {what}: R1 not read"
-            );
+            assert!(heard.sequences.contains(&r1()), "{mode:?}, {what}: R1 not read");
         }
     }
 }
@@ -492,10 +406,7 @@ fn trace_the_vector() {
         Ok("answer") => (Mode::Answer, 7.2, 9.6),
         _ => (Mode::Call, 3.75, 7.25),
     };
-    let until = std::env::var("V32_UNTIL")
-        .ok()
-        .and_then(|t| t.parse().ok())
-        .unwrap_or(until);
+    let until = std::env::var("V32_UNTIL").ok().and_then(|t| t.parse().ok()).unwrap_or(until);
     let states = std::env::var("V32_STATES").is_ok();
     let mut rx = Receiver::new(mode, FS);
     rx.idle();
@@ -512,9 +423,7 @@ fn trace_the_vector() {
             // Which of the four the point is nearest, by its angle from A's
             // (-3, -1): a quarter turn to each state after it.
             let turn = (point.1.atan2(point.0) - (-1f64).atan2(-3.0)).rem_euclid(TAU);
-            decided.push(char::from(
-                b"ABCD"[((turn / (TAU / 4.0)).round() as usize) % 4],
-            ));
+            decided.push(char::from(b"ABCD"[((turn / (TAU / 4.0)).round() as usize) % 4]));
         }
         for bit in rx.take_bits() {
             if let Some(s) = rates.feed(bit) {

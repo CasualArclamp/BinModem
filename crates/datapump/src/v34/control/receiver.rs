@@ -56,10 +56,7 @@ use dsp::qam::{Band, Constellation, Core, Heard as CoreHeard, Options, Slicer, T
 use dsp::{Complex, fir_lowpass_kaiser, rrc_at};
 
 use super::watch::{Hearing, Seen, Watch};
-use super::{
-    BAUD, E_BITS, PPH_SYMBOLS, Rate, Reading, SH_SYMBOLS, far, samples_per_symbol, scrambler_of,
-    sh, sh_bar, unit_point,
-};
+use super::{BAUD, E_BITS, PPH_SYMBOLS, Rate, Reading, SH_SYMBOLS, far, samples_per_symbol, scrambler_of, sh, sh_bar, unit_point};
 use crate::v34::constellation::{Point, clockwise, quarter};
 use crate::v34::dpsk::{ROLLOFF, Side};
 use crate::v34::signals::{Reader, Size};
@@ -179,11 +176,7 @@ pub enum Heard {
     Reversal { at: u64 },
     /// All of PPh, found: where its first symbol began and its last ended,
     /// and in which of 10-2's readings.
-    Pph {
-        reading: Reading,
-        began: u64,
-        ended: u64,
-    },
+    Pph { reading: Reading, began: u64, ended: u64 },
     /// The equaliser is trained, and the core has taken over.
     Trained { on: Reference, snr_db: f64 },
     /// Nothing fitted; the receiver is hunting again.
@@ -209,13 +202,10 @@ fn tables() -> &'static Tables {
     static TABLES: OnceLock<Tables> = OnceLock::new();
     TABLES.get_or_init(|| {
         let four_points: Vec<Point> = (0..4).map(|turn| clockwise(quarter(0), turn)).collect();
-        let sixteen_points: Vec<Point> = (0..4)
-            .flat_map(|label| (0..4).map(move |turn| clockwise(quarter(label), turn)))
-            .collect();
+        let sixteen_points: Vec<Point> =
+            (0..4).flat_map(|label| (0..4).map(move |turn| clockwise(quarter(label), turn))).collect();
         let table = |points: &[Point], size: Size| {
-            Slicer::table(Constellation::new(
-                points.iter().map(|&p| unit_point(p, size)).collect(),
-            ))
+            Slicer::table(Constellation::new(points.iter().map(|&p| unit_point(p, size)).collect()))
         };
         Tables {
             four: table(&four_points, Size::Four),
@@ -258,17 +248,10 @@ impl Select {
         let middle = (prototype.len() / 2) as f64;
         // Moved up to the carrier about its own middle, which keeps it
         // symmetric and so of linear phase.
-        let taps: Vec<f64> = prototype
-            .iter()
-            .enumerate()
-            .map(|(i, h)| 2.0 * h * (TAU * carrier * (i as f64 - middle) / fs).cos())
-            .collect();
+        let taps: Vec<f64> =
+            prototype.iter().enumerate().map(|(i, h)| 2.0 * h * (TAU * carrier * (i as f64 - middle) / fs).cos()).collect();
         let n = taps.len();
-        Self {
-            taps,
-            buffer: vec![0.0; 2 * n],
-            at: 0,
-        }
+        Self { taps, buffer: vec![0.0; 2 * n], at: 0 }
     }
 
     /// Samples the output lags the input by.
@@ -285,22 +268,13 @@ impl Select {
         let window = &self.buffer[self.at..self.at + n];
         // Four sums side by side, which the compiler can keep in step.
         let mut lanes = [0.0; 4];
-        for (chunk, taps) in window
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(self.taps.as_chunks::<4>().0)
-        {
+        for (chunk, taps) in window.as_chunks::<4>().0.iter().zip(self.taps.as_chunks::<4>().0) {
             for ((lane, x), h) in lanes.iter_mut().zip(chunk).zip(taps) {
                 *lane += x * h;
             }
         }
         let rest = n % 4;
-        let tail: f64 = window[n - rest..]
-            .iter()
-            .zip(&self.taps[n - rest..])
-            .map(|(x, h)| x * h)
-            .sum();
+        let tail: f64 = window[n - rest..].iter().zip(&self.taps[n - rest..]).map(|(x, h)| x * h).sum();
         lanes.iter().sum::<f64>() + tail
     }
 }
@@ -321,17 +295,11 @@ impl Matched {
         let reach = (edge * sps).ceil() as i64;
         let width = (2 * reach + 2) as usize;
         let pulse = |u: f64| {
-            if u.abs() >= edge {
-                0.0
-            } else {
-                rrc_at(u, ROLLOFF) * (0.5 + 0.5 * (std::f64::consts::PI * u / edge).cos())
-            }
+            if u.abs() >= edge { 0.0 } else { rrc_at(u, ROLLOFF) * (0.5 + 0.5 * (std::f64::consts::PI * u / edge).cos()) }
         };
         // Scaled so that a symbol sent through the far end's pulse comes out
         // at its own size: the pulse against itself sums to one.
-        let gain: f64 = (-reach..=reach)
-            .map(|n| pulse(n as f64 / sps) * rrc_at(n as f64 / sps, ROLLOFF))
-            .sum();
+        let gain: f64 = (-reach..=reach).map(|n| pulse(n as f64 / sps) * rrc_at(n as f64 / sps, ROLLOFF)).sum();
         let mut table = vec![0.0; MATCHED_PHASES * width];
         for phase in 0..MATCHED_PHASES {
             let mu = phase as f64 / MATCHED_PHASES as f64;
@@ -341,11 +309,7 @@ impl Matched {
                 table[phase * width + i] = pulse(tau / sps) / gain;
             }
         }
-        Self {
-            reach,
-            width,
-            table,
-        }
+        Self { reach, width, table }
     }
 }
 
@@ -642,8 +606,7 @@ impl Receiver {
         self.core.feed(selected);
         let angle = TAU * self.mixer;
         self.mixer = (self.mixer + self.mixer_step).fract();
-        self.baseband
-            .push_back(Complex::new(angle.cos(), -angle.sin()).scale(2.0 * selected));
+        self.baseband.push_back(Complex::new(angle.cos(), -angle.sin()).scale(2.0 * selected));
         if self.baseband.len() > self.kept {
             self.baseband.pop_front();
             self.first += 1;
@@ -703,11 +666,7 @@ impl Receiver {
                 let at = self.line_time(self.grid_time(self.watch_now()));
                 self.heard.push_back(Heard::Carrier { on, at });
             }
-            Seen::Began {
-                hearing,
-                since,
-                turn,
-            } => {
+            Seen::Began { hearing, since, turn } => {
                 let at = self.line_time(self.grid_time(since));
                 match hearing {
                     Hearing::Tone | Hearing::Ac | Hearing::Sh => {
@@ -725,12 +684,7 @@ impl Receiver {
                         let heard = self.grid_time(self.watch_now());
                         let (from, to) = (heard + PPH_FROM * self.sps, heard + PPH_TO * self.sps);
                         let due = to + PPH_SYMBOLS as f64 * self.sps;
-                        self.pph.get_or_insert(Search {
-                            from,
-                            to,
-                            due,
-                            turn,
-                        });
+                        self.pph.get_or_insert(Search { from, to, due, turn });
                     }
                     Hearing::Nothing | Hearing::Modulated => {}
                 }
@@ -739,12 +693,7 @@ impl Receiver {
                 let reversal = self.grid_time(at);
                 let (from, to) = (reversal + SH_FROM * self.sps, reversal + SH_TO * self.sps);
                 let due = to + KNOWN as f64 * self.sps;
-                self.sh = Some(Search {
-                    from,
-                    to,
-                    due,
-                    turn,
-                });
+                self.sh = Some(Search { from, to, due, turn });
             }
         }
     }
@@ -768,11 +717,7 @@ impl Receiver {
             {
                 let began = self.line_time(found.start - 0.5 * self.sps);
                 let ended = self.line_time(found.start + (PPH_SYMBOLS as f64 - 0.5) * self.sps);
-                self.heard.push_back(Heard::Pph {
-                    reading,
-                    began,
-                    ended,
-                });
+                self.heard.push_back(Heard::Pph { reading, began, ended });
                 self.begin(found);
             }
         }
@@ -810,9 +755,7 @@ impl Receiver {
             return None;
         }
         let count = ((to - earliest) / step).floor() as usize + 1 + STEPS * (KNOWN - 1);
-        let outputs: Vec<Complex> = (0..count)
-            .map_while(|j| self.matched_at(earliest + j as f64 * step))
-            .collect();
+        let outputs: Vec<Complex> = (0..count).map_while(|j| self.matched_at(earliest + j as f64 * step)).collect();
         if outputs.len() < STEPS * (KNOWN - 1) + 1 {
             return None;
         }
@@ -821,17 +764,10 @@ impl Receiver {
         let mut scores = Vec::new();
         for &reference in references {
             let known = known(reference);
-            let turned: Vec<Complex> = (0..KNOWN)
-                .map(|k| known[k].conj() * Complex::from_polar(1.0, -turn * (k as f64 - middle)))
-                .collect();
+            let turned: Vec<Complex> =
+                (0..KNOWN).map(|k| known[k].conj() * Complex::from_polar(1.0, -turn * (k as f64 - middle))).collect();
             let row: Vec<f64> = (0..outputs.len() - STEPS * (KNOWN - 1))
-                .map(|j| {
-                    (0..KNOWN)
-                        .fold(Complex::ZERO, |sum, k| {
-                            sum + outputs[j + STEPS * k] * turned[k]
-                        })
-                        .norm_sqr()
-                })
+                .map(|j| (0..KNOWN).fold(Complex::ZERO, |sum, k| sum + outputs[j + STEPS * k] * turned[k]).norm_sqr())
                 .collect();
             for (j, &score) in row.iter().enumerate() {
                 if best.is_none_or(|b| score > b.0) {
@@ -853,35 +789,24 @@ impl Receiver {
             }
         }
         let start = earliest + (j as f64 + offset) * step;
-        let symbols: Vec<Complex> = (0..KNOWN)
-            .map(|k| self.matched_at(start + k as f64 * self.sps))
-            .collect::<Option<_>>()?;
+        let symbols: Vec<Complex> = (0..KNOWN).map(|k| self.matched_at(start + k as f64 * self.sps)).collect::<Option<_>>()?;
         let known = known(reference);
         // The turn, left over from the watch's: from the first half of the
         // sequence against the second.
         let lean = |range: std::ops::Range<usize>, turn: f64| {
             range.fold(Complex::ZERO, |sum, k| {
-                sum + symbols[k]
-                    * known[k].conj()
-                    * Complex::from_polar(1.0, -turn * (k as f64 - middle))
+                sum + symbols[k] * known[k].conj() * Complex::from_polar(1.0, -turn * (k as f64 - middle))
             })
         };
         let half = KNOWN / 2;
-        let turn =
-            turn + (lean(half..KNOWN, turn) * lean(0..half, turn).conj()).arg() / half as f64;
+        let turn = turn + (lean(half..KNOWN, turn) * lean(0..half, turn).conj()).arg() / half as f64;
         let whole = lean(0..KNOWN, turn);
         let energy: f64 = symbols.iter().map(|s| s.norm_sqr()).sum();
         let power: f64 = known.iter().map(|k| k.norm_sqr()).sum();
         if energy <= 0.0 || whole.abs() / (energy * power).sqrt() < MATCHED {
             return None;
         }
-        Some(Found {
-            reference,
-            start,
-            phase: whole.arg(),
-            turn,
-            gain: whole.abs() / power,
-        })
+        Some(Found { reference, start, phase: whole.arg(), turn, gain: whole.abs() / power })
     }
 
     /// A sequence found: the receiver reads what follows it from here.
@@ -898,12 +823,7 @@ impl Receiver {
         self.e_seen = false;
         self.lost_since = None;
         let targets = known(found.reference).to_vec();
-        self.work = Work::Deciding(Box::new(Deciding {
-            found,
-            targets,
-            correction: 0.0,
-            end: WINDOW_END,
-        }));
+        self.work = Work::Deciding(Box::new(Deciding { found, targets, correction: 0.0, end: WINDOW_END }));
     }
 
     /// Decide every symbol after the sequence that has come, on its
@@ -913,15 +833,10 @@ impl Receiver {
         let middle = (KNOWN as f64 - 1.0) / 2.0;
         while deciding.targets.len() < deciding.end {
             let k = deciding.targets.len();
-            let Some(y) = self.matched_at(found.start + k as f64 * self.sps) else {
-                return false;
-            };
+            let Some(y) = self.matched_at(found.start + k as f64 * self.sps) else { return false };
             let phase = found.phase + found.turn * (k as f64 - middle) + deciding.correction;
             let z = y * Complex::from_polar(1.0 / found.gain, -phase);
-            let point = (
-                if z.re < 0.0 { -1 } else { 1 },
-                if z.im < 0.0 { -1 } else { 1 },
-            );
+            let point = (if z.re < 0.0 { -1 } else { 1 }, if z.im < 0.0 { -1 } else { 1 });
             let target = unit_point(point, Size::Four);
             deciding.correction += DECIDING_GAIN * (z * target.conj()).arg();
             deciding.targets.push(target);
@@ -939,9 +854,7 @@ impl Receiver {
     fn train(&mut self, deciding: Deciding) {
         let Deciding { found, targets, .. } = deciding;
         let Some(start) = self.half_at(found.start) else {
-            self.heard.push_back(Heard::Untrained {
-                on: found.reference,
-            });
+            self.heard.push_back(Heard::Untrained { on: found.reference });
             self.stop();
             return;
         };
@@ -949,11 +862,7 @@ impl Receiver {
         self.core.train(Training {
             targets,
             start,
-            first: Window {
-                align: (0, n),
-                solve: (0, n),
-                search: TRAINING_SEARCH,
-            },
+            first: Window { align: (0, n), solve: (0, n), search: TRAINING_SEARCH },
             retry: None,
             turn: Some(found.turn),
             drift: None,
@@ -1029,15 +938,11 @@ impl Receiver {
             return;
         }
         while let Some(point) = self.core.next() {
-            let Some(symbol) = self.core.settle(point.nearest) else {
-                break;
-            };
+            let Some(symbol) = self.core.settle(point.nearest) else { break };
             self.last = symbol.point;
             let grid = tables().point(self.size, symbol.label.unwrap_or(0));
             // The symbol just settled is centred two halves before the next.
-            let end = self
-                .half_time(self.core.next_half().saturating_sub(1))
-                .unwrap_or(self.taken as f64);
+            let end = self.half_time(self.core.next_half().saturating_sub(1)).unwrap_or(self.taken as f64);
             self.absorb(grid, self.size, end);
         }
     }
@@ -1077,31 +982,19 @@ impl Receiver {
     /// Where the core's half `half` is centred.
     fn half_time(&self, half: u64) -> Option<f64> {
         let first = self.halves.front()?.0;
-        self.halves
-            .get(half.checked_sub(first)? as usize)
-            .map(|&(_, t)| t)
+        self.halves.get(half.checked_sub(first)? as usize).map(|&(_, t)| t)
     }
 
     /// Drop the far end once it has plainly gone.
     fn supervise(&mut self) {
         let now = self.taken;
-        self.off_since = if self.watch.carrier() {
-            None
-        } else {
-            self.off_since.or(Some(now))
-        };
+        self.off_since = if self.watch.carrier() { None } else { self.off_since.or(Some(now)) };
         let lost = matches!(self.work, Work::Idle) && self.core.is_lost();
-        self.lost_since = if lost {
-            self.lost_since.or(Some(now))
-        } else {
-            None
-        };
+        self.lost_since = if lost { self.lost_since.or(Some(now)) } else { None };
         if self.phase == Phase::Hunting && matches!(self.work, Work::Idle) {
             return;
         }
-        let too_long = |since: Option<u64>, seconds: f64| {
-            since.is_some_and(|s| (now - s) as f64 > seconds * self.fs)
-        };
+        let too_long = |since: Option<u64>, seconds: f64| since.is_some_and(|s| (now - s) as f64 > seconds * self.fs);
         if too_long(self.off_since, OFF_SECONDS) || too_long(self.lost_since, LOST_SECONDS) {
             self.lose();
         }
@@ -1122,21 +1015,11 @@ impl Receiver {
 fn known(reference: Reference) -> [Complex; KNOWN] {
     match reference {
         Reference::Pph(reading) => std::array::from_fn(|i| reading.point(i)),
-        Reference::Sh => std::array::from_fn(|i| {
-            if i < SH_SYMBOLS {
-                sh(i)
-            } else {
-                sh_bar(i - SH_SYMBOLS)
-            }
-        }),
+        Reference::Sh => std::array::from_fn(|i| if i < SH_SYMBOLS { sh(i) } else { sh_bar(i - SH_SYMBOLS) }),
     }
 }
 
 /// A core for the far carrier at 600 baud, with every fix the core has.
 fn new_core(fs: f64, carrier: f64) -> Core {
-    Core::new(
-        Band::new(fs, BAUD, carrier),
-        Options::fixed(),
-        tables().slicer(Size::Four),
-    )
+    Core::new(Band::new(fs, BAUD, carrier), Options::fixed(), tables().slicer(Size::Four))
 }

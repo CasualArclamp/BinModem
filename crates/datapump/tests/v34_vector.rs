@@ -13,10 +13,7 @@
 use datapump::v34::dpsk::{Receiver, Side};
 use datapump::v34::info::{Info, SymbolRate};
 
-const VECTOR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/vectors/v34-33600.wav"
-);
+const VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v34-33600.wav");
 
 fn sequences() -> Vec<(f64, Side, Info)> {
     let wav = line::wav::read(VECTOR).expect("could not read the vector");
@@ -72,41 +69,19 @@ fn the_info_sequences_of_a_real_call_check() {
         .collect();
     assert_eq!(
         kinds,
-        vec![
-            (Side::Answer, "INFO0"),
-            (Side::Call, "INFO1c"),
-            (Side::Answer, "INFO1a")
-        ]
+        vec![(Side::Answer, "INFO0"), (Side::Call, "INFO1c"), (Side::Answer, "INFO1a")]
     );
 }
 
 #[test]
 fn the_real_capabilities_and_results_are_what_a_33600_modem_says() {
     let found = sequences();
-    let info0a = found
-        .iter()
-        .find_map(|(_, _, i)| {
-            if let Info::Info0(x) = i {
-                Some(*x)
-            } else {
-                None
-            }
-        })
-        .unwrap();
+    let info0a = found.iter().find_map(|(_, _, i)| if let Info::Info0(x) = i { Some(*x) } else { None }).unwrap();
     // A modem that did 33 600 on this call: every symbol rate, both carriers
     // at 3000 and 3200, and the 1664-point constellation that 33 600 needs.
     assert!(info0a.rate_2743 && info0a.rate_2800 && info0a.rate_3429 && info0a.transmit_3429);
     assert!(info0a.constellation_1664);
-    let info1c = found
-        .iter()
-        .find_map(|(_, _, i)| {
-            if let Info::Info1c(x) = i {
-                Some(*x)
-            } else {
-                None
-            }
-        })
-        .unwrap();
+    let info1c = found.iter().find_map(|(_, _, i)| if let Info::Info1c(x) = i { Some(*x) } else { None }).unwrap();
     // Probing results that climb with the symbol rate, as they should on a
     // clean line: each step up in symbol rate a step up in projected rate.
     let rates: Vec<u8> = info1c.probed.iter().map(|p| p.max_rate).collect();
@@ -119,32 +94,21 @@ fn the_real_call_settled_on_what_a_33600_call_needs() {
     // A call at 33 600 bit/s is 14 times 2400 in at least one direction, and
     // only the two fastest symbol rates carry that many bits.
     let found = sequences();
-    let Some((_, _, Info::Info1a(settled))) =
-        found.iter().find(|(_, _, i)| matches!(i, Info::Info1a(_)))
-    else {
+    let Some((_, _, Info::Info1a(settled))) = found.iter().find(|(_, _, i)| matches!(i, Info::Info1a(_))) else {
         panic!("no INFO1a");
     };
     assert!(
-        matches!(
-            settled.answer_to_call,
-            SymbolRate::S3200 | SymbolRate::S3429
-        ) || matches!(
-            settled.call_to_answer,
-            SymbolRate::S3200 | SymbolRate::S3429
-        ),
+        matches!(settled.answer_to_call, SymbolRate::S3200 | SymbolRate::S3429)
+            || matches!(settled.call_to_answer, SymbolRate::S3200 | SymbolRate::S3429),
         "{settled:?}"
     );
     // And the two INFO0 sequences are in front of the two INFO1 sequences, as
     // Figure 16 draws them.
-    let first =
-        |which: fn(&Info) -> bool| found.iter().find(|(_, _, i)| which(i)).map(|(t, _, _)| *t);
+    let first = |which: fn(&Info) -> bool| found.iter().find(|(_, _, i)| which(i)).map(|(t, _, _)| *t);
     let info0 = first(|i| matches!(i, Info::Info0(_))).unwrap();
     let info1c = first(|i| matches!(i, Info::Info1c(_))).unwrap();
     let info1a = first(|i| matches!(i, Info::Info1a(_))).unwrap();
-    assert!(
-        info0 < info1c && info1c < info1a,
-        "{info0} {info1c} {info1a}"
-    );
+    assert!(info0 < info1c && info1c < info1a, "{info0} {info1c} {info1a}");
 }
 
 /// What a call modem's receiver makes of the answer modem's phase 3 on the
@@ -178,12 +142,7 @@ fn answer_phase3_in(path: &str, channel: usize, from: f64, to: f64) -> Phase3 {
     let mut reader = Reader::new(Mode::Answer);
     let mut bits: Vec<bool> = Vec::new();
     let mut in_trn = true;
-    let mut found = Phase3 {
-        reversal_at: 0.0,
-        trained_db: 0.0,
-        trn_symbols: 0,
-        j: None,
-    };
+    let mut found = Phase3 { reversal_at: 0.0, trained_db: 0.0, trn_symbols: 0, j: None };
     let first = (from * fs) as usize;
     for (i, &x) in samples[first..(to * fs) as usize].iter().enumerate() {
         rx.feed(f64::from(x));
@@ -210,8 +169,7 @@ fn answer_phase3_in(path: &str, channel: usize, from: f64, to: f64) -> Phase3 {
                     bits.extend(reader.differential(symbol.decided, Size::Four));
                     let tail = &bits[bits.len().saturating_sub(48)..];
                     for j in [J_FOUR, J_SIXTEEN] {
-                        if found.j.is_none() && tail.len() == 48 && tail.chunks(16).all(|c| c == j)
-                        {
+                        if found.j.is_none() && tail.len() == 48 && tail.chunks(16).all(|c| c == j) {
                             found.j = Some((now, j));
                         }
                     }
@@ -228,29 +186,13 @@ fn a_real_answer_modems_phase_3_trains_this_receiver_and_asks_for_16_points() {
     // PP, and TRN from 6.19 s -- 1.87 s of it on this call -- and then J,
     // until the call modem's own S comes in on top at 8.45 s.
     let phase3 = answer_phase3(5.99, 8.45);
-    assert!(
-        (6.09..6.12).contains(&phase3.reversal_at),
-        "S-bar at {:.3} s",
-        phase3.reversal_at
-    );
-    assert!(
-        phase3.trained_db > 15.0,
-        "trained to {:.1} dB",
-        phase3.trained_db
-    );
+    assert!((6.09..6.12).contains(&phase3.reversal_at), "S-bar at {:.3} s", phase3.reversal_at);
+    assert!(phase3.trained_db > 15.0, "trained to {:.1} dB", phase3.trained_db);
     // Every TRN symbol after training descrambles to ones, which checks the
     // scrambler, the four-point mapping and the bit order against the modem.
-    assert!(
-        phase3.trn_symbols > 5000,
-        "{} symbols of TRN read",
-        phase3.trn_symbols
-    );
+    assert!(phase3.trn_symbols > 5000, "{} symbols of TRN read", phase3.trn_symbols);
     let (at, j) = phase3.j.expect("no J");
-    assert_eq!(
-        j,
-        datapump::v34::signals::J_SIXTEEN,
-        "J asked for four points"
-    );
+    assert_eq!(j, datapump::v34::signals::J_SIXTEEN, "J asked for four points");
     assert!((8.0..8.2).contains(&at), "J read at {at:.3} s");
 }
 
@@ -260,23 +202,14 @@ fn a_real_answer_modems_phase_3_trains_this_receiver_and_asks_for_16_points() {
 #[test]
 #[ignore]
 fn a_captured_answer_modems_phase_3() {
-    let Ok(path) = std::env::var("V34_CAPTURE") else {
-        return;
-    };
+    let Ok(path) = std::env::var("V34_CAPTURE") else { return };
     let seconds = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok());
-    let phase3 = answer_phase3_in(
-        &path,
-        0,
-        seconds("V34_FROM").unwrap_or(0.0),
-        seconds("V34_TO").unwrap_or(30.0),
-    );
+    let phase3 = answer_phase3_in(&path, 0, seconds("V34_FROM").unwrap_or(0.0), seconds("V34_TO").unwrap_or(30.0));
     println!(
         "S-bar at {:.4} s, trained to {:.1} dB, {} TRN symbols read, J {:?}",
         phase3.reversal_at,
         phase3.trained_db,
         phase3.trn_symbols,
-        phase3
-            .j
-            .map(|(at, j)| (at, j == datapump::v34::signals::J_SIXTEEN))
+        phase3.j.map(|(at, j)| (at, j == datapump::v34::signals::J_SIXTEEN))
     );
 }

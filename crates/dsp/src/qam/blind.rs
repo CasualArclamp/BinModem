@@ -53,9 +53,7 @@ impl Core {
     }
 
     pub(super) fn blind_half(&mut self, half: Complex) {
-        let Mode::Blind(blind) = &mut self.mode else {
-            return;
-        };
+        let Mode::Blind(blind) = &mut self.mode else { return };
         blind.quick += (half.norm_sqr() - blind.quick) / 16.0;
         if blind.quick >= AUDIBLE {
             blind.signal += 1;
@@ -92,22 +90,14 @@ impl Core {
         }
         let mut turns = vec![0.0];
         if long {
-            let fourth = outputs.windows(2).fold(Complex::ZERO, |sum, pair| {
-                sum + pair[1]
-                    * pair[1]
-                    * pair[1]
-                    * pair[1]
-                    * (pair[0] * pair[0] * pair[0] * pair[0]).conj()
-            });
+            let fourth = outputs
+                .windows(2)
+                .fold(Complex::ZERO, |sum, pair| sum + pair[1] * pair[1] * pair[1] * pair[1] * (pair[0] * pair[0] * pair[0] * pair[0]).conj());
             turns.push(fourth.arg() / 4.0);
         }
         let dense = self.slicer.density() == Density::Dense;
         for turn in turns {
-            let found = if dense {
-                self.search_dense(turn)
-            } else {
-                self.search_sparse(turn)
-            };
+            let found = if dense { self.search_dense(turn) } else { self.search_sparse(turn) };
             let Some(found) = found else { continue };
             // No settled error to judge by yet: the reading has to stand
             // clear of the other shifts, and be well clear of garbage.
@@ -122,10 +112,7 @@ impl Core {
             self.trained_snr = -10.0 * found.mse.max(1e-9).log10();
             self.ever_trained = true;
             self.mode = Mode::Tracking;
-            self.heard.push_back(Heard::Trained {
-                snr_db: self.trained_snr,
-                via: Via::Blind,
-            });
+            self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, via: Via::Blind });
             return;
         }
         // Not found: the matched filter as it was, for the next look to
@@ -148,12 +135,7 @@ impl Core {
 /// The pulse's matched filter at two samples a symbol, scaled so that a
 /// symbol sent through that pulse comes out at its own size.
 fn matched(rolloff: f64) -> Vec<Complex> {
-    let pulse: Vec<f64> = (0..=2 * REACH)
-        .map(|i| rrc_at((i as f64 - REACH as f64) / 2.0, rolloff))
-        .collect();
+    let pulse: Vec<f64> = (0..=2 * REACH).map(|i| rrc_at((i as f64 - REACH as f64) / 2.0, rolloff)).collect();
     let energy: f64 = pulse.iter().map(|p| p * p).sum();
-    pulse
-        .iter()
-        .map(|p| Complex::new(p / energy, 0.0))
-        .collect()
+    pulse.iter().map(|p| Complex::new(p / energy, 0.0)).collect()
 }

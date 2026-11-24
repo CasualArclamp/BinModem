@@ -41,8 +41,8 @@ use dsp::{OnePole, ReversalDetector, ToneDetector};
 use super::dpsk;
 use super::info::{Info, Info0, InfoH, Probed, SymbolRate};
 use super::phase2::{
-    self, AFTER_REVERSAL, AUDIBLE, GIVE_UP, L2_SETTLE, Presence, RETRAIN_SILENCE,
-    REVERSAL_BANDWIDTH, Speaking, TONE_HELD, TURN,
+    self, AFTER_REVERSAL, AUDIBLE, GIVE_UP, L2_SETTLE, Presence, RETRAIN_SILENCE, REVERSAL_BANDWIDTH, Speaking,
+    TONE_HELD, TURN,
 };
 pub use super::phase2::{Role, Status};
 use super::probe::{self, Analyzer, Reading};
@@ -248,14 +248,10 @@ impl Stage {
     fn name(self) -> &'static str {
         match self {
             Self::SourceInfo0 | Self::RecipientInfo0 => "V.34 INFO0",
-            Self::SourceAwaitReversal | Self::RecipientAwaitTone | Self::RecipientAwaitReversal => {
-                "V.34 tones"
-            }
+            Self::SourceAwaitReversal | Self::RecipientAwaitTone | Self::RecipientAwaitReversal => "V.34 tones",
             Self::SourceProbing => "V.34 sending the probe",
             Self::RecipientReadProbe => "V.34 reading the probe",
-            Self::SourceAwaitInfoH | Self::RecipientAwaitTone2 | Self::RecipientInfoH => {
-                "V.34 INFOh"
-            }
+            Self::SourceAwaitInfoH | Self::RecipientAwaitTone2 | Self::RecipientInfoH => "V.34 INFOh",
             Self::Finished => "V.34 phase 2 done",
         }
     }
@@ -427,13 +423,7 @@ impl Modem {
 
     /// A retrain of this phase 2 (12.7): the same end, the same far end.
     pub fn again(&self) -> Self {
-        Self::retrain(
-            self.role,
-            self.part,
-            self.fs,
-            self.ours,
-            self.far.unwrap_or_default(),
-        )
+        Self::retrain(self.role, self.part, self.fs, self.ours, self.far.unwrap_or_default())
     }
 
     /// The recipient's way back from a phase 3 that failed (12.3.3): "if
@@ -551,8 +541,7 @@ impl Modem {
         }
         let reversed = self.reversals.feed(line) && self.now >= self.ignore_reversals_until;
         // Where the reversal was on the line, as against where it was noticed.
-        let reversal =
-            reversed.then(|| self.now.saturating_sub(u64::from(self.reversals.latency())));
+        let reversal = reversed.then(|| self.now.saturating_sub(u64::from(self.reversals.latency())));
         if (self.read_from..self.read_until).contains(&self.now) {
             self.analyzer.feed(line);
         }
@@ -600,9 +589,7 @@ impl Modem {
             if let Some(at) = self.probe_at.take() {
                 // The tone's ten milliseconds are up and L1 follows at once.
                 debug_assert!(at <= self.now + 1);
-                self.speaking = Speaking::Probe {
-                    l1_until: self.now + self.ms(probe::L1_SECONDS),
-                };
+                self.speaking = Speaking::Probe { l1_until: self.now + self.ms(probe::L1_SECONDS) };
             }
         }
         if self.infoh_at == Some(self.now) {
@@ -783,9 +770,7 @@ impl Modem {
                 // clause's own (12.2.1.3.2, 12.2.2.4.2).
             }
             Stage::SourceProbing => {
-                let Speaking::Probe { l1_until } = self.speaking else {
-                    return;
-                };
+                let Speaking::Probe { l1_until } = self.speaking else { return };
                 if now > l1_until && self.presence.stood(held) {
                     // 12.2.1.1.4, 12.2.2.2.4: the recipient's tone, heard over
                     // the echo of L2. This end's tone, and INFOh awaited
@@ -831,10 +816,7 @@ impl Modem {
                 // "condition its receiver to detect Tone B. Upon detecting
                 // Tone B, the answer modem transmits Tone A". Not while a
                 // retrain's tone is already due after its silence.
-                if matches!(self.speaking, Speaking::Silent)
-                    && self.tone_at.is_none()
-                    && self.steady.is_tone()
-                {
+                if matches!(self.speaking, Speaking::Silent) && self.tone_at.is_none() && self.steady.is_tone() {
                     self.start_tone();
                     return;
                 }
@@ -843,9 +825,7 @@ impl Modem {
                 // the tone, silence, and the source's reversal awaited "within
                 // 2000 ms from the transmission of the Tone A phase reversal"
                 // (12.2.1.4.2).
-                let own = self
-                    .tone_since
-                    .is_some_and(|t| now - t >= self.ms(TONE_BEFORE_REVERSAL + PULSE_SPAN));
+                let own = self.tone_since.is_some_and(|t| now - t >= self.ms(TONE_BEFORE_REVERSAL + PULSE_SPAN));
                 if own && self.steady.is_tone() {
                     self.reverse_at = Some(now + 1);
                     self.enter(Stage::RecipientAwaitReversal);
@@ -964,38 +944,26 @@ impl Modem {
             high_carrier_3200: far.high_carrier_3200 && self.ours.high_carrier_3200,
             ..far
         };
-        let projected = |rate: SymbolRate| {
-            self.reading
-                .as_ref()
-                .map_or_else(Probed::default, |r| r.probed(rate, &both, wide))
-        };
+        let projected =
+            |rate: SymbolRate| self.reading.as_ref().map_or_else(Probed::default, |r| r.probed(rate, &both, wide));
         let (symbol_rate, probed) = SymbolRate::ALL
             .iter()
             .map(|&rate| (rate, projected(rate)))
             .filter(|(_, p)| p.max_rate > 0)
-            .max_by(|a, b| {
-                a.1.max_rate
-                    .cmp(&b.1.max_rate)
-                    .then(b.0.index().cmp(&a.0.index()))
-            })
+            .max_by(|a, b| a.1.max_rate.cmp(&b.1.max_rate).then(b.0.index().cmp(&a.0.index())))
             // Nothing projected -- no reading, or none the source can send
             // at -- and INFOh must still say something: the symbol rate
             // every V.34 modem has, the least of them, and the plainest
             // training.
             .unwrap_or((SymbolRate::S2400, Probed::default()));
-        let bits_per_symbol =
-            f64::from(probed.max_rate) * 2400.0 / probe::symbols_per_second(symbol_rate);
+        let bits_per_symbol = f64::from(probed.max_rate) * 2400.0 / probe::symbols_per_second(symbol_rate);
         InfoH {
             power_reduction: 0,
             trn_length: TRN_STEPS,
             high_carrier: probed.high_carrier,
             pre_emphasis: probed.pre_emphasis,
             symbol_rate,
-            trn_size: if bits_per_symbol > 4.0 {
-                Size::Sixteen
-            } else {
-                Size::Four
-            },
+            trn_size: if bits_per_symbol > 4.0 { Size::Sixteen } else { Size::Four },
         }
     }
 }
@@ -1019,17 +987,9 @@ mod tests {
         /// repetitions of L2, so the tones and the probe do not notice one;
         /// an INFO sequence caught by one is lost. The line's delay has to
         /// hold the stretch.
-        Insert {
-            at: f64,
-            seconds: f64,
-            towards: Role,
-        },
+        Insert { at: f64, seconds: f64, towards: Role },
         /// A stretch of silence: a hole.
-        Mute {
-            at: f64,
-            seconds: f64,
-            towards: Role,
-        },
+        Mute { at: f64, seconds: f64, towards: Role },
     }
 
     /// The line's frequency response.
@@ -1053,9 +1013,7 @@ mod tests {
         fn new(shape: Shape) -> Self {
             match shape {
                 Shape::Flat => Self::Flat,
-                Shape::Tilted => {
-                    Self::Pole(OnePole::new(1.0 / (std::f64::consts::TAU * 1500.0), FS))
-                }
+                Shape::Tilted => Self::Pole(OnePole::new(1.0 / (std::f64::consts::TAU * 1500.0), FS)),
                 Shape::Narrow => Self::Cascade(butter_lowpass(8, 2300.0, FS)),
             }
         }
@@ -1072,12 +1030,7 @@ mod tests {
     /// What phase 3 would do at a recipient whose INFOh got no answer: with
     /// no S within 2000 ms of it, back to the tone and INFOh (12.3.3). There
     /// is no phase 3 here, so the harness stands in for it.
-    fn stand_in_for_phase_3(
-        recipient: &mut Modem,
-        source: &Modem,
-        done_at: &mut Option<usize>,
-        i: usize,
-    ) {
+    fn stand_in_for_phase_3(recipient: &mut Modem, source: &Modem, done_at: &mut Option<usize>, i: usize) {
         if recipient.part() != Part::Recipient {
             return;
         }
@@ -1107,11 +1060,7 @@ mod tests {
         for i in 0..(seconds * FS) as usize {
             for fault in faults {
                 match *fault {
-                    Fault::Insert {
-                        at,
-                        seconds,
-                        towards,
-                    } if (at * FS) as usize == i => {
+                    Fault::Insert { at, seconds, towards } if (at * FS) as usize == i => {
                         let queue = match towards {
                             Role::Answer => &mut line.to_answer,
                             Role::Call => &mut line.to_call,
@@ -1123,11 +1072,7 @@ mod tests {
                         all.splice(n..n, again);
                         queue.extend(all);
                     }
-                    Fault::Mute {
-                        at,
-                        seconds,
-                        towards,
-                    } if (at * FS) as usize == i => match towards {
+                    Fault::Mute { at, seconds, towards } if (at * FS) as usize == i => match towards {
                         Role::Answer => mute_to_answer = (seconds * FS) as usize,
                         Role::Call => mute_to_call = (seconds * FS) as usize,
                     },
@@ -1135,8 +1080,7 @@ mod tests {
                 }
             }
             let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
-            let at_answer =
-                line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
+            let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
             from_call = caller.step(at_call);
             from_answer = answerer.step(at_answer);
             let mut to_answer = shape_to_answer.process(from_call * line.loss);
@@ -1164,37 +1108,18 @@ mod tests {
     /// the answer modem as recipient (12.2.1), or the other way about
     /// (12.2.2).
     fn pair(source: Role) -> (Modem, Modem) {
-        let part = |role| {
-            if role == source {
-                Part::Source
-            } else {
-                Part::Recipient
-            }
-        };
-        (
-            Modem::new(Role::Call, part(Role::Call), FS),
-            Modem::new(Role::Answer, part(Role::Answer), FS),
-        )
+        let part = |role| if role == source { Part::Source } else { Part::Recipient };
+        (Modem::new(Role::Call, part(Role::Call), FS), Modem::new(Role::Answer, part(Role::Answer), FS))
     }
 
     /// The source and the recipient of a pair, in that order.
     fn ends<'a>(caller: &'a Modem, answerer: &'a Modem) -> (&'a Modem, &'a Modem) {
-        if caller.part() == Part::Source {
-            (caller, answerer)
-        } else {
-            (answerer, caller)
-        }
+        if caller.part() == Part::Source { (caller, answerer) } else { (answerer, caller) }
     }
 
     /// Both ends done, with the one INFOh between them.
     fn through(source: &Modem, recipient: &Modem) -> InfoH {
-        assert_eq!(
-            source.status(),
-            Status::Done,
-            "source ({:?}) stuck at {}",
-            source.role(),
-            source.phase()
-        );
+        assert_eq!(source.status(), Status::Done, "source ({:?}) stuck at {}", source.role(), source.phase());
         assert_eq!(
             recipient.status(),
             Status::Done,
@@ -1203,11 +1128,7 @@ mod tests {
             recipient.phase()
         );
         let infoh = recipient.infoh().expect("the recipient sent no INFOh");
-        assert_eq!(
-            source.infoh(),
-            Some(infoh),
-            "the source has a different INFOh"
-        );
+        assert_eq!(source.infoh(), Some(infoh), "the source has a different INFOh");
         infoh
     }
 
@@ -1232,20 +1153,8 @@ mod tests {
             let (s, r) = ends(&c, &a);
             let infoh = through(s, r);
             for m in [s, r] {
-                assert_eq!(
-                    m.recoveries(),
-                    0,
-                    "{:?} {:?} took a way out",
-                    m.role(),
-                    m.part()
-                );
-                assert_eq!(
-                    m.info0_repeats(),
-                    0,
-                    "{:?} {:?} repeated INFO0",
-                    m.role(),
-                    m.part()
-                );
+                assert_eq!(m.recoveries(), 0, "{:?} {:?} took a way out", m.role(), m.part());
+                assert_eq!(m.info0_repeats(), 0, "{:?} {:?} repeated INFO0", m.role(), m.part());
                 assert!(m.far_capabilities().is_some_and(|far| !far.acknowledge));
             }
             assert!(!r.blind());
@@ -1258,11 +1167,7 @@ mod tests {
             assert!(infoh.trn_symbols() >= 512, "{infoh:?}");
             // Done inside a second and a half: INFO0, the tones, 570 ms of
             // probe, the tones again, INFOh.
-            assert!(
-                s.now < (1.5 * FS) as u64,
-                "the source took {:.2} s",
-                s.now as f64 / FS
-            );
+            assert!(s.now < (1.5 * FS) as u64, "the source took {:.2} s", s.now as f64 / FS);
         }
     }
 
@@ -1274,11 +1179,7 @@ mod tests {
             let (s, r) = ends(&c, &a);
             let infoh = through(s, r);
             assert_eq!(s.recoveries() + r.recoveries(), 0, "a way out was taken");
-            assert_eq!(
-                s.info0_repeats() + r.info0_repeats(),
-                0,
-                "an INFO0 was repeated"
-            );
+            assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "an INFO0 was repeated");
             assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{infoh:?}");
         }
     }
@@ -1295,27 +1196,12 @@ mod tests {
         for (noise_db, trn_size) in [(50.0, Size::Sixteen), (26.0, Size::Four)] {
             for source in [Role::Call, Role::Answer] {
                 let (caller, answerer) = pair(source);
-                let (c, a) = run(
-                    &mut Line::new(0.750, 20.0, 15.0, noise_db),
-                    20.0,
-                    caller,
-                    answerer,
-                    Shape::Flat,
-                    &[],
-                );
+                let (c, a) = run(&mut Line::new(0.750, 20.0, 15.0, noise_db), 20.0, caller, answerer, Shape::Flat, &[]);
                 let (s, r) = ends(&c, &a);
                 let infoh = through(s, r);
                 let case = format!("{source:?} as source with noise at -{noise_db} dB");
-                assert_eq!(
-                    s.recoveries() + r.recoveries(),
-                    0,
-                    "{case}: a way out was taken"
-                );
-                assert_eq!(
-                    s.info0_repeats() + r.info0_repeats(),
-                    0,
-                    "{case}: an INFO0 was repeated"
-                );
+                assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a way out was taken");
+                assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "{case}: an INFO0 was repeated");
                 assert_eq!(infoh.trn_size, trn_size, "{case}: {infoh:?}");
                 if trn_size == Size::Sixteen {
                     assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{case}: {infoh:?}");
@@ -1334,22 +1220,14 @@ mod tests {
                 let faults: Vec<Fault> = (0..30)
                     .flat_map(|k| {
                         let at = first + 0.7 * f64::from(k);
-                        [Role::Call, Role::Answer].map(|towards| Fault::Insert {
-                            at,
-                            seconds: 0.020,
-                            towards,
-                        })
+                        [Role::Call, Role::Answer].map(|towards| Fault::Insert { at, seconds: 0.020, towards })
                     })
                     .collect();
                 let (caller, answerer) = pair(source);
                 let (c, a) = run(&mut voip(), 20.0, caller, answerer, Shape::Flat, &faults);
                 let (s, r) = ends(&c, &a);
                 let infoh = through(s, r);
-                assert_eq!(
-                    infoh.symbol_rate,
-                    SymbolRate::S3429,
-                    "inserts from {first}: {infoh:?}"
-                );
+                assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "inserts from {first}: {infoh:?}");
             }
         }
     }
@@ -1363,14 +1241,7 @@ mod tests {
     #[test]
     fn infoh_answers_to_the_line_and_to_the_source() {
         let settle = |caller: Modem, answerer: Modem, shape: Shape, noise_db: f64| {
-            let (c, a) = run(
-                &mut Line::new(0.020, 6.0, f64::INFINITY, noise_db),
-                12.0,
-                caller,
-                answerer,
-                shape,
-                &[],
-            );
+            let (c, a) = run(&mut Line::new(0.020, 6.0, f64::INFINITY, noise_db), 12.0, caller, answerer, shape, &[]);
             let (s, r) = ends(&c, &a);
             through(s, r)
         };
@@ -1378,11 +1249,7 @@ mod tests {
             let (c, a) = pair(Role::Call);
             settle(c, a, Shape::Flat, 55.0)
         };
-        assert_eq!(
-            (clean.symbol_rate, clean.pre_emphasis, clean.trn_size),
-            (SymbolRate::S3429, 0, Size::Sixteen),
-            "{clean:?}"
-        );
+        assert_eq!((clean.symbol_rate, clean.pre_emphasis, clean.trn_size), (SymbolRate::S3429, 0, Size::Sixteen), "{clean:?}");
         let tilted = {
             let (c, a) = pair(Role::Call);
             settle(c, a, Shape::Tilted, 55.0)
@@ -1397,10 +1264,7 @@ mod tests {
             let (c, a) = pair(Role::Call);
             settle(c, a, Shape::Narrow, 35.0)
         };
-        assert!(
-            narrow.symbol_rate.index() < SymbolRate::S3429.index(),
-            "{narrow:?}"
-        );
+        assert!(narrow.symbol_rate.index() < SymbolRate::S3429.index(), "{narrow:?}");
         let poor = {
             let (c, a) = pair(Role::Call);
             settle(c, a, Shape::Flat, 20.0)
@@ -1414,38 +1278,17 @@ mod tests {
                 ..phase2::Modem::capabilities()
             };
             let source = Modem::with_capabilities(Role::Answer, Part::Source, FS, ours);
-            settle(
-                Modem::new(Role::Call, Part::Recipient, FS),
-                source,
-                Shape::Flat,
-                55.0,
-            )
+            settle(Modem::new(Role::Call, Part::Recipient, FS), source, Shape::Flat, 55.0)
         };
-        assert_eq!(
-            (lesser.symbol_rate, lesser.high_carrier),
-            (SymbolRate::S3200, false),
-            "{lesser:?}"
-        );
+        assert_eq!((lesser.symbol_rate, lesser.high_carrier), (SymbolRate::S3200, false), "{lesser:?}");
         // A source whose INFO0 bit 20 says it could send quieter is not asked
         // to: no power reduction is ever asked for, as none is in INFO1a.
         let willing = {
-            let ours = Info0 {
-                can_reduce_power: true,
-                ..phase2::Modem::capabilities()
-            };
+            let ours = Info0 { can_reduce_power: true, ..phase2::Modem::capabilities() };
             let source = Modem::with_capabilities(Role::Call, Part::Source, FS, ours);
-            settle(
-                source,
-                Modem::new(Role::Answer, Part::Recipient, FS),
-                Shape::Flat,
-                55.0,
-            )
+            settle(source, Modem::new(Role::Answer, Part::Recipient, FS), Shape::Flat, 55.0)
         };
-        assert_eq!(
-            (willing.power_reduction, willing.symbol_rate),
-            (0, SymbolRate::S3429),
-            "{willing:?}"
-        );
+        assert_eq!((willing.power_reduction, willing.symbol_rate), (0, SymbolRate::S3429), "{willing:?}");
     }
 
     /// 12.7: a retrain runs the tone exchange again, from 70 ms of silence
@@ -1454,14 +1297,7 @@ mod tests {
     fn a_retrain_runs_the_tone_exchange_without_info0() {
         for source in [Role::Call, Role::Answer] {
             let (caller, answerer) = pair(source);
-            let (c, a) = run(
-                &mut Line::new(0.030, 10.0, 20.0, 50.0),
-                12.0,
-                caller,
-                answerer,
-                Shape::Flat,
-                &[],
-            );
+            let (c, a) = run(&mut Line::new(0.030, 10.0, 20.0, 50.0), 12.0, caller, answerer, Shape::Flat, &[]);
             let first = {
                 let (s, r) = ends(&c, &a);
                 through(s, r)
@@ -1470,40 +1306,15 @@ mod tests {
             // tone, from either end.
             for mut m in [c.again(), a.again()] {
                 let out: Vec<f64> = (0..(0.2 * FS) as usize).map(|_| m.step(0.0)).collect();
-                let at = out
-                    .iter()
-                    .position(|s| s.abs() > 1e-9)
-                    .expect("no tone at all") as f64
-                    / FS
-                    * 1000.0;
-                assert!(
-                    (65.0..=75.0).contains(&at),
-                    "{:?}: the tone began after {at} ms",
-                    m.role()
-                );
+                let at = out.iter().position(|s| s.abs() > 1e-9).expect("no tone at all") as f64 / FS * 1000.0;
+                assert!((65.0..=75.0).contains(&at), "{:?}: the tone began after {at} ms", m.role());
             }
-            let (c2, a2) = run(
-                &mut Line::new(0.030, 10.0, 20.0, 50.0),
-                12.0,
-                c.again(),
-                a.again(),
-                Shape::Flat,
-                &[],
-            );
+            let (c2, a2) = run(&mut Line::new(0.030, 10.0, 20.0, 50.0), 12.0, c.again(), a.again(), Shape::Flat, &[]);
             let (s, r) = ends(&c2, &a2);
             assert_eq!(through(s, r), first);
-            assert_eq!(
-                s.info0_repeats() + r.info0_repeats(),
-                0,
-                "an INFO0 went in a retrain"
-            );
+            assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "an INFO0 went in a retrain");
             assert_eq!(s.recoveries() + r.recoveries(), 0, "a way out was taken");
-            assert_eq!(
-                s.far_capabilities(),
-                c.far_capabilities()
-                    .filter(|_| s.role() == Role::Call)
-                    .or(a.far_capabilities())
-            );
+            assert_eq!(s.far_capabilities(), c.far_capabilities().filter(|_| s.role() == Role::Call).or(a.far_capabilities()));
         }
     }
 
@@ -1523,11 +1334,7 @@ mod tests {
                 let (c, a) = clean_run(source);
                 let (s, r) = ends(&c, &a);
                 let first = through(s, r);
-                let (begins, answers) = if beginner == Part::Source {
-                    (s, r)
-                } else {
-                    (r, s)
-                };
+                let (begins, answers) = if beginner == Part::Source { (s, r) } else { (r, s) };
                 let case = format!("{source:?} as source, the {beginner:?} beginning");
                 let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
                 let mut begun = begins.again();
@@ -1540,17 +1347,10 @@ mod tests {
                 let (mut heard, mut begun_tone, mut answered_tone) = (None, None, None);
                 let (mut from_call, mut from_answer) = (0.0, 0.0);
                 for i in 0..(12.0 * FS) as usize {
-                    let at_call =
-                        line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
-                    let at_answer = line.to_answer.pop_front().unwrap()
-                        + line.echo * from_answer
-                        + line.noise();
+                    let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
+                    let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
                     let begins_call = begins.role() == Role::Call;
-                    let (at_begun, at_answering) = if begins_call {
-                        (at_call, at_answer)
-                    } else {
-                        (at_answer, at_call)
-                    };
+                    let (at_begun, at_answering) = if begins_call { (at_call, at_answer) } else { (at_answer, at_call) };
                     let out_begun = begun.step(at_begun);
                     if out_begun.abs() > 1e-9 {
                         begun_tone.get_or_insert(i);
@@ -1584,59 +1384,27 @@ mod tests {
                             chatter.next_sample()
                         }
                     };
-                    (from_call, from_answer) = if begins_call {
-                        (out_begun, out_answering)
-                    } else {
-                        (out_answering, out_begun)
-                    };
+                    (from_call, from_answer) = if begins_call { (out_begun, out_answering) } else { (out_answering, out_begun) };
                     line.to_answer.push_back(from_call * line.loss);
                     line.to_call.push_back(from_answer * line.loss);
-                    if begun.status() != Status::Running
-                        && answered
-                            .as_ref()
-                            .is_some_and(|m| m.status() != Status::Running)
-                    {
+                    if begun.status() != Status::Running && answered.as_ref().is_some_and(|m| m.status() != Status::Running) {
                         break;
                     }
                 }
-                let answered = answered
-                    .unwrap_or_else(|| panic!("{case}: the tone was never heard for 50 ms"));
-                let (s, r) = if beginner == Part::Source {
-                    (&begun, &answered)
-                } else {
-                    (&answered, &begun)
-                };
+                let answered = answered.unwrap_or_else(|| panic!("{case}: the tone was never heard for 50 ms"));
+                let (s, r) = if beginner == Part::Source { (&begun, &answered) } else { (&answered, &begun) };
                 assert_eq!(through(s, r), first, "{case}");
-                assert_eq!(
-                    s.recoveries() + r.recoveries(),
-                    0,
-                    "{case}: a way out was taken"
-                );
-                assert_eq!(
-                    s.info0_repeats() + r.info0_repeats(),
-                    0,
-                    "{case}: an INFO0 went in a retrain"
-                );
+                assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a way out was taken");
+                assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "{case}: an INFO0 went in a retrain");
                 let ms = |n: usize| n as f64 / FS * 1000.0;
-                let (heard, begun_tone, answered_tone) =
-                    (heard.unwrap(), begun_tone.unwrap(), answered_tone.unwrap());
-                assert!(
-                    (65.0..=75.0).contains(&ms(begun_tone)),
-                    "{case}: the beginner's tone came after {} ms",
-                    ms(begun_tone)
-                );
+                let (heard, begun_tone, answered_tone) = (heard.unwrap(), begun_tone.unwrap(), answered_tone.unwrap());
+                assert!((65.0..=75.0).contains(&ms(begun_tone)), "{case}: the beginner's tone came after {} ms", ms(begun_tone));
                 // The tone crossed the line and was heard 50 ms, and not much
                 // more: the answering end's own detector took what it took.
                 let listened = ms(heard - begun_tone) - 30.0;
-                assert!(
-                    (50.0..=70.0).contains(&listened),
-                    "{case}: the tone was listened to for {listened:.1} ms before it was answered"
-                );
+                assert!((50.0..=70.0).contains(&listened), "{case}: the tone was listened to for {listened:.1} ms before it was answered");
                 let silent = ms(answered_tone - heard);
-                assert!(
-                    (65.0..=75.0).contains(&silent),
-                    "{case}: the answering end was silent for {silent:.1} ms"
-                );
+                assert!((65.0..=75.0).contains(&silent), "{case}: the answering end was silent for {silent:.1} ms");
             }
         }
     }
@@ -1654,39 +1422,18 @@ mod tests {
         for (line, name) in [(short as fn() -> Line, "short"), (voip, "VoIP")] {
             for source in [Role::Call, Role::Answer] {
                 for lost in [Role::Call, Role::Answer] {
-                    let towards = if lost == Role::Call {
-                        Role::Answer
-                    } else {
-                        Role::Call
-                    };
-                    let hole = Fault::Mute {
-                        at: 0.030,
-                        seconds: 0.030,
-                        towards,
-                    };
+                    let towards = if lost == Role::Call { Role::Answer } else { Role::Call };
+                    let hole = Fault::Mute { at: 0.030, seconds: 0.030, towards };
                     let (caller, answerer) = pair(source);
                     let (c, a) = run(&mut line(), 20.0, caller, answerer, Shape::Flat, &[hole]);
                     let (s, r) = ends(&c, &a);
                     let infoh = through(s, r);
                     let case = format!("{name} line, {source:?} source, {lost:?} INFO0 lost");
                     assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{case}: {infoh:?}");
-                    let (missed, sent) = if lost == Role::Call {
-                        (&a, &c)
-                    } else {
-                        (&c, &a)
-                    };
-                    assert!(
-                        missed.info0_repeats() >= 1,
-                        "{case}: the end that missed it did not repeat its own"
-                    );
-                    assert!(
-                        sent.info0_repeats() >= 1,
-                        "{case}: the end whose INFO0 was lost did not send it again"
-                    );
-                    assert!(
-                        missed.far_capabilities().unwrap().acknowledge,
-                        "{case}: the INFO0 that got through did not acknowledge"
-                    );
+                    let (missed, sent) = if lost == Role::Call { (&a, &c) } else { (&c, &a) };
+                    assert!(missed.info0_repeats() >= 1, "{case}: the end that missed it did not repeat its own");
+                    assert!(sent.info0_repeats() >= 1, "{case}: the end whose INFO0 was lost did not send it again");
+                    assert!(missed.far_capabilities().unwrap().acknowledge, "{case}: the INFO0 that got through did not acknowledge");
                     assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a wait ran out");
                 }
             }
@@ -1705,19 +1452,12 @@ mod tests {
     fn reversals_on_a_clean_line(source: Role) -> (f64, f64) {
         let (c, a) = clean_run(source);
         let (s, r) = ends(&c, &a);
-        (
-            s.reversed_at.unwrap() as f64 / FS,
-            r.reversed_at.unwrap() as f64 / FS,
-        )
+        (s.reversed_at.unwrap() as f64 / FS, r.reversed_at.unwrap() as f64 / FS)
     }
 
     /// The direction from the source of a chain to its recipient.
     fn towards_recipient(source: Role) -> Role {
-        if source == Role::Call {
-            Role::Answer
-        } else {
-            Role::Call
-        }
+        if source == Role::Call { Role::Answer } else { Role::Call }
     }
 
     /// 12.2.1.4.2 and 12.2.1.3.3 (12.2.2.3.2 and 12.2.2.4.3 the other way):
@@ -1730,30 +1470,14 @@ mod tests {
     fn a_source_reversal_lost_in_a_hole_is_probed_again() {
         for source in [Role::Call, Role::Answer] {
             let (source_reversal, _) = reversals_on_a_clean_line(source);
-            let hole = Fault::Mute {
-                at: source_reversal - 0.050,
-                seconds: 0.200,
-                towards: towards_recipient(source),
-            };
+            let hole = Fault::Mute { at: source_reversal - 0.050, seconds: 0.200, towards: towards_recipient(source) };
             let (caller, answerer) = pair(source);
             let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
             let (s, r) = ends(&c, &a);
             let infoh = through(s, r);
-            assert_eq!(
-                infoh.symbol_rate,
-                SymbolRate::S3429,
-                "{source:?} as source: {infoh:?}"
-            );
-            assert_eq!(
-                s.recoveries(),
-                1,
-                "{source:?} as source: the source did not take 12.2.1.3.3's way out"
-            );
-            assert_eq!(
-                r.recoveries(),
-                1,
-                "{source:?} as source: the recipient did not take 12.2.1.4.2's way out"
-            );
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert_eq!(s.recoveries(), 1, "{source:?} as source: the source did not take 12.2.1.3.3's way out");
+            assert_eq!(r.recoveries(), 1, "{source:?} as source: the recipient did not take 12.2.1.4.2's way out");
             assert!(!r.blind());
         }
     }
@@ -1767,25 +1491,13 @@ mod tests {
     fn a_recipient_reversal_lost_in_a_hole_is_made_again() {
         for source in [Role::Call, Role::Answer] {
             let (_, recipient_reversal) = reversals_on_a_clean_line(source);
-            let hole = Fault::Mute {
-                at: recipient_reversal - 0.050,
-                seconds: 0.150,
-                towards: source,
-            };
+            let hole = Fault::Mute { at: recipient_reversal - 0.050, seconds: 0.150, towards: source };
             let (caller, answerer) = pair(source);
             let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
             let (s, r) = ends(&c, &a);
             through(s, r);
-            assert_eq!(
-                s.recoveries(),
-                0,
-                "{source:?} as source: the source has no way out of 12.2.1.1.3 to take"
-            );
-            assert_eq!(
-                r.recoveries(),
-                1,
-                "{source:?} as source: the recipient did not take 12.2.1.4.2's way out"
-            );
+            assert_eq!(s.recoveries(), 0, "{source:?} as source: the source has no way out of 12.2.1.1.3 to take");
+            assert_eq!(r.recoveries(), 1, "{source:?} as source: the recipient did not take 12.2.1.4.2's way out");
         }
     }
 
@@ -1799,43 +1511,20 @@ mod tests {
         for source in [Role::Call, Role::Answer] {
             let sent = {
                 let (c, a) = clean_run(source);
-                ends(&c, &a)
-                    .1
-                    .infoh_sent_at
-                    .expect("no INFOh in a clean run") as f64
-                    / FS
+                ends(&c, &a).1.infoh_sent_at.expect("no INFOh in a clean run") as f64 / FS
             };
-            let hole = Fault::Mute {
-                at: sent - 0.010,
-                seconds: 0.120,
-                towards: source,
-            };
+            let hole = Fault::Mute { at: sent - 0.010, seconds: 0.120, towards: source };
             let (caller, answerer) = pair(source);
             let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
             let (s, r) = ends(&c, &a);
             let infoh = through(s, r);
-            assert_eq!(
-                infoh.symbol_rate,
-                SymbolRate::S3429,
-                "{source:?} as source: {infoh:?}"
-            );
-            assert_eq!(
-                s.recoveries(),
-                1,
-                "{source:?} as source: the source did not take 12.2.1.3.4's way out"
-            );
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert_eq!(s.recoveries(), 1, "{source:?} as source: the source did not take 12.2.1.3.4's way out");
             assert!(!r.blind());
             // The second INFOh came from a recipient that came back to its
             // tone, two seconds after the first.
-            assert!(
-                r.now < (0.5 * FS) as u64,
-                "{source:?} as source: the recipient is the one that started phase 2"
-            );
-            assert!(
-                s.now > (3.0 * FS) as u64,
-                "{source:?} as source: the source was done at {:.2} s",
-                s.now as f64 / FS
-            );
+            assert!(r.now < (0.5 * FS) as u64, "{source:?} as source: the recipient is the one that started phase 2");
+            assert!(s.now > (3.0 * FS) as u64, "{source:?} as source: the source was done at {:.2} s", s.now as f64 / FS);
         }
     }
 
@@ -1848,24 +1537,13 @@ mod tests {
         for source in [Role::Call, Role::Answer] {
             let (source_reversal, _) = reversals_on_a_clean_line(source);
             // From after the recipient has read its L2 until past its wait.
-            let hole = Fault::Mute {
-                at: source_reversal + 0.620,
-                seconds: 2.600,
-                towards: towards_recipient(source),
-            };
+            let hole = Fault::Mute { at: source_reversal + 0.620, seconds: 2.600, towards: towards_recipient(source) };
             let (caller, answerer) = pair(source);
             let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
             let (s, r) = ends(&c, &a);
             let infoh = through(s, r);
-            assert_eq!(
-                infoh.symbol_rate,
-                SymbolRate::S3429,
-                "{source:?} as source: {infoh:?}"
-            );
-            assert!(
-                r.blind(),
-                "{source:?} as source: the recipient waited for a tone it could not hear"
-            );
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert!(r.blind(), "{source:?} as source: the recipient waited for a tone it could not hear");
             assert_eq!(r.recoveries(), 1);
         }
     }
@@ -1885,8 +1563,7 @@ mod tests {
             // When the recipient's tone was first on the line, when it began
             // its tone after the probe, when the source began its tone after
             // the probe, and when L1 began.
-            let (mut recipient_tone, mut recipient_tone_again, mut source_tone, mut l1) =
-                (None, None, None, None);
+            let (mut recipient_tone, mut recipient_tone_again, mut source_tone, mut l1) = (None, None, None, None);
             for _ in 0..(12.0 * FS) as usize {
                 let at_call = line.to_call.pop_front().unwrap() + line.noise();
                 let at_answer = line.to_answer.pop_front().unwrap() + line.noise();
@@ -1904,8 +1581,7 @@ mod tests {
                 if s.stage == Stage::SourceAwaitInfoH {
                     source_tone.get_or_insert(s.now);
                 }
-                if let (Stage::SourceProbing, Speaking::Probe { l1_until }) = (s.stage, s.speaking)
-                {
+                if let (Stage::SourceProbing, Speaking::Probe { l1_until }) = (s.stage, s.speaking) {
                     l1.get_or_insert(l1_until - s.ms(probe::L1_SECONDS));
                 }
                 if caller.status() != Status::Running && answerer.status() != Status::Running {
@@ -1918,30 +1594,14 @@ mod tests {
             let delay = (one_way * FS) as u64;
             let (rr, sr) = (r.reversed_at.unwrap(), s.reversed_at.unwrap());
             let turn = ms(sr - (rr + delay));
-            assert!(
-                (30.0..=50.0).contains(&turn),
-                "{source:?} as source: the source reversed {turn:.1} ms after the recipient's reversal arrived"
-            );
+            assert!((30.0..=50.0).contains(&turn), "{source:?} as source: the source reversed {turn:.1} ms after the recipient's reversal arrived");
             let own = ms(rr - recipient_tone.unwrap()) - PULSE_SPAN * 1000.0;
-            assert!(
-                own >= 50.0,
-                "{source:?} as source: {own:.1} ms of the recipient's tone before its reversal"
-            );
-            assert_eq!(
-                l1.unwrap() - sr,
-                s.ms(AFTER_REVERSAL),
-                "{source:?} as source: L1 did not follow the reversal by 10 ms"
-            );
+            assert!(own >= 50.0, "{source:?} as source: {own:.1} ms of the recipient's tone before its reversal");
+            assert_eq!(l1.unwrap() - sr, s.ms(AFTER_REVERSAL), "{source:?} as source: L1 did not follow the reversal by 10 ms");
             let answered = ms(recipient_tone_again.unwrap() - (sr + delay));
-            assert!(
-                answered <= 670.0,
-                "{source:?} as source: the recipient's tone came {answered:.1} ms after the source's reversal arrived"
-            );
+            assert!(answered <= 670.0, "{source:?} as source: the recipient's tone came {answered:.1} ms after the source's reversal arrived");
             let before_infoh = ms(r.infoh_sent_at.unwrap() - (source_tone.unwrap() + delay));
-            assert!(
-                (25.0..=95.0).contains(&before_infoh),
-                "{source:?} as source: INFOh came {before_infoh:.1} ms after the source's tone arrived"
-            );
+            assert!((25.0..=95.0).contains(&before_infoh), "{source:?} as source: INFOh came {before_infoh:.1} ms after the source's tone arrived");
         }
     }
 
@@ -1952,11 +1612,7 @@ mod tests {
             for _ in 0..(21.0 * FS) as usize {
                 m.step(0.0);
             }
-            assert!(
-                matches!(m.status(), Status::Failed(_)),
-                "{part:?}: {:?}",
-                m.status()
-            );
+            assert!(matches!(m.status(), Status::Failed(_)), "{part:?}: {:?}", m.status());
         }
     }
 }

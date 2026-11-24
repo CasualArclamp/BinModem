@@ -13,8 +13,8 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
 
 use eframe::egui::{
-    self, Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, RichText, Sense, Stroke,
-    StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
+    self, Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
+    TextureHandle, TextureOptions, pos2, vec2,
 };
 use line::{AudioSink, Monitor};
 use review::{End, Event, Layer, Plot, Report, Tap, Waterfall};
@@ -75,8 +75,7 @@ impl Tiles {
         let span = CEILING_DB - FLOOR_DB;
         let ramp: Vec<Color32> = (0..=255u32)
             .map(|cell| {
-                let db = cell as f32 / 255.0 * -(Waterfall::FLOOR_DB as f32)
-                    + Waterfall::FLOOR_DB as f32;
+                let db = cell as f32 / 255.0 * -(Waterfall::FLOOR_DB as f32) + Waterfall::FLOOR_DB as f32;
                 heat((db - FLOOR_DB) / span)
             })
             .collect();
@@ -92,19 +91,11 @@ impl Tiles {
                     image.pixels[(bins - 1 - bin) * count + x] = ramp[cell as usize];
                 }
             }
-            let texture = ctx.load_texture(
-                format!("review-{name}-{first}"),
-                image,
-                TextureOptions::LINEAR,
-            );
+            let texture = ctx.load_texture(format!("review-{name}-{first}"), image, TextureOptions::LINEAR);
             tiles.push((texture, first, count));
             first += count;
         }
-        Self {
-            tiles,
-            columns_per_sec: waterfall.columns_per_sec,
-            hz_top: bins as f64 * waterfall.hz_per_bin,
-        }
+        Self { tiles, columns_per_sec: waterfall.columns_per_sec, hz_top: bins as f64 * waterfall.hz_per_bin }
     }
 }
 
@@ -180,10 +171,8 @@ impl ReviewPane {
         let owned = path.to_path_buf();
         let for_thread = owned.clone();
         std::thread::spawn(move || {
-            let name = for_thread.file_name().map_or_else(
-                || "recording".to_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            );
+            let name =
+                for_thread.file_name().map_or_else(|| "recording".to_owned(), |n| n.to_string_lossy().into_owned());
             let result = line::wav::read(&for_thread)
                 .map(|wav| review::analyse(&wav, &name))
                 .map_err(|error| format!("{}: {error}", for_thread.display()));
@@ -194,9 +183,7 @@ impl ReviewPane {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let Some((path, rx)) = &self.loading else {
-            return;
-        };
+        let Some((path, rx)) = &self.loading else { return };
         match rx.try_recv() {
             Ok(Ok(report)) => {
                 self.tiles = report
@@ -233,12 +220,9 @@ impl ReviewPane {
                 self.error = Some(error);
                 self.loading = None;
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50))
-            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.error =
-                    Some("the reading of the recording stopped without a result".to_owned());
+                self.error = Some("the reading of the recording stopped without a result".to_owned());
                 self.loading = None;
             }
         }
@@ -255,10 +239,7 @@ impl ReviewPane {
             return;
         }
         self.audio_error = None;
-        let sink = self
-            .sink
-            .get_or_insert_with(|| Arc::new(AudioSink::new((fs * 0.5) as usize)))
-            .clone();
+        let sink = self.sink.get_or_insert_with(|| Arc::new(AudioSink::new((fs * 0.5) as usize))).clone();
         // Off and on again empties whatever the last stretch left queued.
         sink.set_enabled(false);
         sink.set_enabled(true);
@@ -272,12 +253,7 @@ impl ReviewPane {
                 }
             }
         }
-        self.playing = Some(Playing {
-            from,
-            to,
-            pushed: from,
-            started: Instant::now(),
-        });
+        self.playing = Some(Playing { from, to, pushed: from, started: Instant::now() });
     }
 
     fn stop(&mut self) {
@@ -289,29 +265,16 @@ impl ReviewPane {
 
     /// Hand the sound card what it is due, and move the playhead.
     fn pump(&mut self, ctx: &egui::Context) {
-        let (Some(report), Some(playing), Some(sink)) =
-            (&self.report, &mut self.playing, &self.sink)
-        else {
-            return;
-        };
+        let (Some(report), Some(playing), Some(sink)) = (&self.report, &mut self.playing, &self.sink) else { return };
         let fs = f64::from(report.sample_rate);
         let elapsed = playing.started.elapsed().as_secs_f64();
         let wanted = (playing.from + ((elapsed + LEAD) * fs) as usize).min(playing.to);
         if wanted > playing.pushed {
             let block: Vec<f32> = (playing.pushed..wanted)
                 .map(|n| match self.heard {
-                    Some(channel) => report
-                        .channels
-                        .get(channel)
-                        .and_then(|c| c.samples.get(n))
-                        .copied()
-                        .unwrap_or(0.0),
+                    Some(channel) => report.channels.get(channel).and_then(|c| c.samples.get(n)).copied().unwrap_or(0.0),
                     None => {
-                        let sum: f32 = report
-                            .channels
-                            .iter()
-                            .map(|c| c.samples.get(n).copied().unwrap_or(0.0))
-                            .sum();
+                        let sum: f32 = report.channels.iter().map(|c| c.samples.get(n).copied().unwrap_or(0.0)).sum();
                         sum / report.channels.len().max(1) as f32
                     }
                 })
@@ -347,30 +310,20 @@ impl ReviewPane {
         }
         // A recording dropped on the window is a recording to read.
         let dropped = ui.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .find(|p| !p.as_os_str().is_empty())
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())
         });
         if let Some(path) = dropped {
             self.open(&path);
         }
         self.symbols_window(ui.ctx());
-        egui::Panel::right("review-detail")
-            .resizable(false)
-            .exact_size(DETAIL_W)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("review-detail-scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(DETAIL_W - 16.0);
-                        if let Some((start, end)) = self.detail(ui) {
-                            self.play(start, end);
-                        }
-                    });
+        egui::Panel::right("review-detail").resizable(false).exact_size(DETAIL_W).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("review-detail-scroll").auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_width(DETAIL_W - 16.0);
+                if let Some((start, end)) = self.detail(ui) {
+                    self.play(start, end);
+                }
             });
+        });
         self.bar(ui);
         ui.add_space(2.0);
         if self.report.is_some() {
@@ -488,15 +441,9 @@ impl ReviewPane {
         // Room on the left for the frequencies, along the top for the parts
         // of the call, along the bottom for the time.
         let left = whole.left() + 38.0;
-        let ribbon = Rect::from_min_max(
-            pos2(left, whole.top()),
-            pos2(whole.right(), whole.top() + 18.0),
-        );
+        let ribbon = Rect::from_min_max(pos2(left, whole.top()), pos2(whole.right(), whole.top() + 18.0));
         let axis_top = whole.bottom() - 18.0;
-        let lanes_rect = Rect::from_min_max(
-            pos2(left, ribbon.bottom() + 2.0),
-            pos2(whole.right(), axis_top),
-        );
+        let lanes_rect = Rect::from_min_max(pos2(left, ribbon.bottom() + 2.0), pos2(whole.right(), axis_top));
         let lanes = report.channels.len().max(1);
         let gap = 6.0;
         let lane_h = (lanes_rect.height() - gap * (lanes as f32 - 1.0)) / lanes as f32;
@@ -508,9 +455,7 @@ impl ReviewPane {
         // The pointer first, so that what is drawn is drawn where the view
         // has just been moved to.
         let width = (whole.right() - left).max(1.0) as f64;
-        let pointer = ui
-            .input(|i| i.pointer.hover_pos())
-            .filter(|p| whole.contains(*p));
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| whole.contains(*p));
         if let Some(p) = pointer {
             let wheel = ui.input_mut(|i| {
                 let y = i.smooth_scroll_delta.y;
@@ -518,8 +463,7 @@ impl ReviewPane {
                 y
             });
             if wheel != 0.0 {
-                let at =
-                    self.view.0 + (f64::from(p.x - left) / width).clamp(0.0, 1.0) * self.view.1;
+                let at = self.view.0 + (f64::from(p.x - left) / width).clamp(0.0, 1.0) * self.view.1;
                 let scale = (-f64::from(wheel) * 0.0035).exp();
                 let span = (self.view.1 * scale).clamp(0.02, seconds);
                 self.view.0 = at - (at - self.view.0) * span / self.view.1;
@@ -543,11 +487,7 @@ impl ReviewPane {
         // Which events go in which lane.
         let lane_of = |event: &Event| match report.tap {
             Tap::Summed => 0,
-            Tap::Split { .. } => report
-                .channels
-                .iter()
-                .position(|c| c.from == event.from)
-                .unwrap_or(0),
+            Tap::Split { .. } => report.channels.iter().position(|c| c.from == event.from).unwrap_or(0),
         };
 
         let mut hit: Option<(usize, f32)> = None;
@@ -570,20 +510,13 @@ impl ReviewPane {
                 }
             }
             let hz_top = self.tiles.get(index).map_or(4000.0, |t| t.hz_top);
-            let y_of =
-                |hz: f64| rect.bottom() - (hz / hz_top).clamp(0.0, 1.0) as f32 * rect.height();
+            let y_of = |hz: f64| rect.bottom() - (hz / hz_top).clamp(0.0, 1.0) as f32 * rect.height();
 
             // The frequencies, down the left.
             for khz in 1..(hz_top / 1000.0).ceil() as usize {
                 let y = y_of(khz as f64 * 1000.0);
                 painter.line_segment([pos2(left - 4.0, y), pos2(left, y)], Stroke::new(1.0, GRID));
-                painter.text(
-                    pos2(left - 6.0, y),
-                    Align2::RIGHT_CENTER,
-                    format!("{khz}k"),
-                    FontId::monospace(10.0),
-                    DIM,
-                );
+                painter.text(pos2(left - 6.0, y), Align2::RIGHT_CENTER, format!("{khz}k"), FontId::monospace(10.0), DIM);
             }
             let who = match channel.from {
                 End::Caller => "caller",
@@ -608,8 +541,7 @@ impl ReviewPane {
                 }
                 let (a, b) = (x_of(event.start), x_of(event.end));
                 let (low, high) = event.band.unwrap_or((0.0, hz_top));
-                let frame =
-                    Rect::from_min_max(pos2(a, y_of(high)), pos2(b.max(a + 1.5), y_of(low)));
+                let frame = Rect::from_min_max(pos2(a, y_of(high)), pos2(b.max(a + 1.5), y_of(low)));
                 let picked = self.selected == Some(number);
                 let tint = if picked { PICKED } else { colour(event.from) };
                 if picked {
@@ -621,12 +553,7 @@ impl ReviewPane {
                         Stroke::new(if picked { 2.0 } else { 1.0 }, tint),
                     );
                 } else {
-                    clipped.rect_stroke(
-                        frame,
-                        0.0,
-                        Stroke::new(if picked { 2.0 } else { 1.0 }, tint),
-                        StrokeKind::Inside,
-                    );
+                    clipped.rect_stroke(frame, 0.0, Stroke::new(if picked { 2.0 } else { 1.0 }, tint), StrokeKind::Inside);
                 }
                 if let Some(p) = pointer
                     && frame.expand(2.0).contains(p)
@@ -646,17 +573,13 @@ impl ReviewPane {
                 }
                 // A label that starts off the left of the view is brought
                 // in to its edge, as long as its box is still on show.
-                at.x =
-                    at.x.max(rect.left() + 2.0)
-                        .min(frame.right().max(rect.left() + 2.0));
+                at.x = at.x.max(rect.left() + 2.0).min(frame.right().max(rect.left() + 2.0));
                 let first = Rect::from_min_size(at, size).expand2(vec2(2.0, 0.0));
                 // Where it would go, then up a line at a time while there is
                 // lane above, then down inside the box.
                 let step = size.y + 1.0;
                 let free = |label: &Rect, placed: &[Rect]| {
-                    label.top() >= rect.top()
-                        && label.bottom() <= rect.bottom()
-                        && !placed.iter().any(|o| o.intersects(*label))
+                    label.top() >= rect.top() && label.bottom() <= rect.bottom() && !placed.iter().any(|o| o.intersects(*label))
                 };
                 let label = (0..4)
                     .map(|k| first.translate(vec2(0.0, -step * k as f32)))
@@ -690,11 +613,7 @@ impl ReviewPane {
             let now = parts.last().map(|p| p.0);
             let retrain = now == Some(4) && event.layer == Layer::Phase2;
             if now.is_none_or(|n| order > n) || retrain {
-                parts.push((
-                    order,
-                    if retrain { "retrain  phase 2" } else { name },
-                    event.start,
-                ));
+                parts.push((order, if retrain { "retrain  phase 2" } else { name }, event.start));
             }
         }
         let ribbon_clip = painter.with_clip_rect(ribbon);
@@ -705,11 +624,7 @@ impl ReviewPane {
                 continue;
             }
             let bar = Rect::from_min_max(pos2(a, ribbon.top()), pos2(b, ribbon.bottom()));
-            ribbon_clip.rect_filled(
-                bar.shrink2(vec2(1.0, 1.0)),
-                2.0,
-                Color32::from_rgb(30, 34, 42),
-            );
+            ribbon_clip.rect_filled(bar.shrink2(vec2(1.0, 1.0)), 2.0, Color32::from_rgb(30, 34, 42));
             ribbon_clip.with_clip_rect(bar.intersect(ribbon)).text(
                 pos2(a.max(ribbon.left()) + 5.0, ribbon.center().y),
                 Align2::LEFT_CENTER,
@@ -726,10 +641,7 @@ impl ReviewPane {
         if head >= left && head <= whole.right() {
             painter.line_segment(
                 [pos2(head, ribbon.bottom()), pos2(head, axis_top)],
-                Stroke::new(
-                    if self.playing.is_some() { 2.0 } else { 1.0 },
-                    Color32::WHITE,
-                ),
+                Stroke::new(if self.playing.is_some() { 2.0 } else { 1.0 }, Color32::WHITE),
             );
         }
         if response.clicked()
@@ -756,9 +668,7 @@ impl ReviewPane {
 
         if let Some((number, _)) = hit {
             let event = &report.events[number];
-            response
-                .clone()
-                .on_hover_text_at_pointer(format!("{}  {}", event.tag, event.summary));
+            response.clone().on_hover_text_at_pointer(format!("{}  {}", event.tag, event.summary));
             if response.clicked() {
                 self.selected = Some(number);
             }
@@ -768,8 +678,7 @@ impl ReviewPane {
 
         // Left and right step through the signals in the order they came.
         let step = ui.input(|i| {
-            i32::from(i.key_pressed(egui::Key::ArrowRight))
-                - i32::from(i.key_pressed(egui::Key::ArrowLeft))
+            i32::from(i.key_pressed(egui::Key::ArrowRight)) - i32::from(i.key_pressed(egui::Key::ArrowLeft))
         });
         if step != 0 && !report.events.is_empty() {
             let last = report.events.len() as i32 - 1;
@@ -781,8 +690,7 @@ impl ReviewPane {
             self.selected = Some(next);
             let event = &report.events[next];
             if event.start < self.view.0 || event.end > self.view.0 + self.view.1 {
-                self.view.0 =
-                    (event.start - self.view.1 * 0.3).clamp(0.0, (seconds - self.view.1).max(0.0));
+                self.view.0 = (event.start - self.view.1 * 0.3).clamp(0.0, (seconds - self.view.1).max(0.0));
             }
         }
     }
@@ -791,34 +699,17 @@ impl ReviewPane {
     fn symbols(ui: &mut egui::Ui, event: &Event, view: PcmView, height: f32) -> bool {
         let (tones, pcm, label) = match event.plot {
             Plot::None => return false,
-            Plot::Qam(points) => (
-                points,
-                None,
-                format!("{}  {} symbols", event.tag, event.symbols.len()),
-            ),
-            Plot::Pcm => (
-                2,
-                Some(view),
-                format!("{}  {} symbols  PCM", event.tag, event.symbols.len()),
-            ),
+            Plot::Qam(points) => (points, None, format!("{}  {} symbols", event.tag, event.symbols.len())),
+            Plot::Pcm => (2, Some(view), format!("{}  {} symbols  PCM", event.tag, event.symbols.len())),
             Plot::Phasor => (4, None, format!("{}  the tone's phasor", event.tag)),
             Plot::Fsk => {
                 // One line a bit, along the axis the two tones are the ends of.
                 let margins: Vec<f32> = event.symbols.iter().map(|(_, m)| *m).collect();
-                let label = format!(
-                    "{}  {} bits  space left, mark right",
-                    event.tag,
-                    margins.len()
-                );
+                let label = format!("{}  {} bits  space left, mark right", event.tag, margins.len());
                 return scopes::symbol_scope(
                     ui,
                     &margins,
-                    scopes::Constellation {
-                        points: &[],
-                        tones: 2,
-                        peak: 1.0,
-                        pcm: None,
-                    },
+                    scopes::Constellation { points: &[], tones: 2, peak: 1.0, pcm: None },
                     &label,
                     None,
                     height.min(150.0),
@@ -833,31 +724,18 @@ impl ReviewPane {
             // so that one click on the line does not shrink the rest.
             let mut sizes: Vec<f32> = event.symbols.iter().map(|(_, level)| level.abs()).collect();
             sizes.sort_by(f32::total_cmp);
-            let most = sizes
-                .get(sizes.len().saturating_sub(1) * 998 / 1000)
-                .copied()
-                .unwrap_or(0.0);
+            let most = sizes.get(sizes.len().saturating_sub(1) * 998 / 1000).copied().unwrap_or(0.0);
             let scale = 1.0 / (1.04 * most).max(1e-6);
             let fitted: Vec<(f32, f32)> = event
                 .symbols
                 .iter()
-                .map(|(before, level)| {
-                    (
-                        (before * scale).clamp(-1.0, 1.0),
-                        (level * scale).clamp(-1.0, 1.0),
-                    )
-                })
+                .map(|(before, level)| ((before * scale).clamp(-1.0, 1.0), (level * scale).clamp(-1.0, 1.0)))
                 .collect();
             let label = format!("{label}  full height {:.0} of 32768", 32768.0 / scale);
             return scopes::symbol_scope(
                 ui,
                 &[],
-                scopes::Constellation {
-                    points: &fitted,
-                    tones,
-                    peak: 1.0,
-                    pcm,
-                },
+                scopes::Constellation { points: &fitted, tones, peak: 1.0, pcm },
                 &label,
                 None,
                 height,
@@ -865,21 +743,11 @@ impl ReviewPane {
             .clicked();
         }
         // A constellation of unit mean power reaches a little past one.
-        let peak = event
-            .symbols
-            .iter()
-            .map(|(a, b)| a.abs().max(b.abs()))
-            .fold(0.0f32, f32::max)
-            .clamp(1.0, 2.0);
+        let peak = event.symbols.iter().map(|(a, b)| a.abs().max(b.abs())).fold(0.0f32, f32::max).clamp(1.0, 2.0);
         scopes::symbol_scope(
             ui,
             &[],
-            scopes::Constellation {
-                points: &event.symbols,
-                tones,
-                peak,
-                pcm,
-            },
+            scopes::Constellation { points: &event.symbols, tones, peak, pcm },
             &label,
             None,
             height,
@@ -893,12 +761,7 @@ impl ReviewPane {
         if !self.symbols_open {
             return;
         }
-        let Some(event) = self
-            .selected
-            .and_then(|n| self.report.as_ref()?.events.get(n))
-        else {
-            return;
-        };
+        let Some(event) = self.selected.and_then(|n| self.report.as_ref()?.events.get(n)) else { return };
         if event.plot == Plot::None {
             return;
         }
@@ -937,40 +800,24 @@ impl ReviewPane {
             return None;
         };
         let rows = |ui: &mut egui::Ui, id: &str, rows: &[(String, String)]| {
-            egui::Grid::new(id)
-                .num_columns(2)
-                .spacing([10.0, 4.0])
-                .show(ui, |ui| {
-                    for (key, value) in rows {
-                        ui.label(RichText::new(key).monospace().small().color(DIM));
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(value).monospace().small().color(BRIGHT),
-                            )
-                            .wrap(),
-                        );
-                        ui.end_row();
-                    }
-                });
+            egui::Grid::new(id).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                for (key, value) in rows {
+                    ui.label(RichText::new(key).monospace().small().color(DIM));
+                    ui.add(egui::Label::new(RichText::new(value).monospace().small().color(BRIGHT)).wrap());
+                    ui.end_row();
+                }
+            });
         };
         let Some(event) = self.selected.and_then(|n| report.events.get(n)) else {
             ui.label(RichText::new("the call").strong());
             ui.add_space(4.0);
             if report.verdict.is_empty() {
-                ui.label(
-                    RichText::new("Nothing recognised in this recording.")
-                        .small()
-                        .color(DIM),
-                );
+                ui.label(RichText::new("Nothing recognised in this recording.").small().color(DIM));
             }
             rows(ui, "review-verdict", &report.verdict);
             for caveat in &report.caveats {
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(caveat)
-                        .small()
-                        .color(Color32::from_rgb(240, 180, 90)),
-                );
+                ui.label(RichText::new(caveat).small().color(Color32::from_rgb(240, 180, 90)));
             }
             ui.add_space(10.0);
             ui.add(
@@ -986,12 +833,7 @@ impl ReviewPane {
             return None;
         };
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(&event.tag)
-                    .strong()
-                    .monospace()
-                    .color(colour(event.from)),
-            );
+            ui.label(RichText::new(&event.tag).strong().monospace().color(colour(event.from)));
             ui.label(RichText::new(event.layer.label()).small().color(DIM));
             if ui
                 .small_button("play this")
@@ -1010,10 +852,7 @@ impl ReviewPane {
         let mut head = vec![
             ("from".to_owned(), event.from.label().to_owned()),
             ("starts".to_owned(), format!("{:.3} s", event.start)),
-            (
-                "lasts".to_owned(),
-                format!("{:.0} ms", 1000.0 * event.duration()),
-            ),
+            ("lasts".to_owned(), format!("{:.0} ms", 1000.0 * event.duration())),
         ];
         if let Some((low, high)) = event.band {
             head.push(("band".to_owned(), format!("{low:.0} to {high:.0} Hz")));
@@ -1024,22 +863,14 @@ impl ReviewPane {
             if event.plot == Plot::Pcm {
                 ui.horizontal(|ui| {
                     for choice in PcmView::ALL {
-                        ui.selectable_value(
-                            &mut self.pcm_view,
-                            choice,
-                            RichText::new(choice.name()).small(),
-                        );
+                        ui.selectable_value(&mut self.pcm_view, choice, RichText::new(choice.name()).small());
                     }
                 });
             }
             if Self::symbols(ui, event, self.pcm_view, DETAIL_W - 24.0) {
                 self.symbols_open = true;
             }
-            ui.label(
-                RichText::new("click the plot for a larger one")
-                    .small()
-                    .color(DIM),
-            );
+            ui.label(RichText::new("click the plot for a larger one").small().color(DIM));
         }
         if !event.fields.is_empty() {
             ui.add_space(6.0);
@@ -1049,27 +880,13 @@ impl ReviewPane {
         if !event.octets.is_empty() {
             ui.add_space(6.0);
             ui.separator();
-            ui.label(
-                RichText::new(format!("{} octets", event.octets.len()))
-                    .small()
-                    .color(DIM),
-            );
+            ui.label(RichText::new(format!("{} octets", event.octets.len())).small().color(DIM));
             let dump: Vec<String> = event
                 .octets
                 .chunks(12)
-                .map(|row| {
-                    row.iter()
-                        .map(|o| format!("{o:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
+                .map(|row| row.iter().map(|o| format!("{o:02X}")).collect::<Vec<_>>().join(" "))
                 .collect();
-            ui.label(
-                RichText::new(dump.join("\n"))
-                    .monospace()
-                    .small()
-                    .color(BRIGHT),
-            );
+            ui.label(RichText::new(dump.join("\n")).monospace().small().color(BRIGHT));
         }
         wanted
     }
@@ -1080,16 +897,8 @@ fn time_axis(painter: &Painter, left: f32, right: f32, top: f32, t0: f64, span: 
     let width = f64::from(right - left).max(1.0);
     let wanted = span * 90.0 / width;
     let decade = 10f64.powf(wanted.log10().floor());
-    let step = [1.0, 2.0, 5.0, 10.0]
-        .into_iter()
-        .map(|m| m * decade)
-        .find(|s| *s >= wanted)
-        .unwrap_or(decade * 10.0);
-    let places = if step >= 1.0 {
-        0
-    } else {
-        (-step.log10()).ceil() as usize
-    };
+    let step = [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * decade).find(|s| *s >= wanted).unwrap_or(decade * 10.0);
+    let places = if step >= 1.0 { 0 } else { (-step.log10()).ceil() as usize };
     let mut t = (t0 / step).ceil() * step;
     while t <= t0 + span {
         let x = left + ((t - t0) / span * width) as f32;

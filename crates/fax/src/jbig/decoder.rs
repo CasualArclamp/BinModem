@@ -195,11 +195,7 @@ impl Decoder {
                 }
             }
             Stage::Table(left) => {
-                self.stage = if left > 1 {
-                    Stage::Table(left - 1)
-                } else {
-                    Stage::Data
-                };
+                self.stage = if left > 1 { Stage::Table(left - 1) } else { Stage::Data };
             }
             Stage::Data => self.data(byte),
             Stage::Aborted | Stage::Spoiled => {}
@@ -215,11 +211,7 @@ impl Decoder {
                 self.slntp = slntp_context(header.two_line);
                 self.height = u64::from(header.height);
                 self.header = Some(header);
-                self.stage = if table {
-                    Stage::Table(DP_TABLE)
-                } else {
-                    Stage::Data
-                };
+                self.stage = if table { Stage::Table(DP_TABLE) } else { Stage::Data };
             }
             Err(_) => self.stage = Stage::Spoiled,
         }
@@ -514,9 +506,7 @@ mod tests {
             .map(|y| {
                 let within = y % 24;
                 (0..width)
-                    .map(|x| {
-                        within < 18 && ((x + y / 24 * 7) % 29 < 4 || (within == 8 && x % 29 < 20))
-                    })
+                    .map(|x| within < 18 && ((x + y / 24 * 7) % 29 < 4 || (within == 8 && x % 29 < 20)))
                     .collect()
             })
             .collect()
@@ -531,17 +521,8 @@ mod tests {
     #[test]
     fn bits_go_in_least_significant_first() {
         let page = text(40, 200);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 16,
-                ..Options::FAX
-            },
-        );
-        let bits: Vec<bool> = bie
-            .iter()
-            .flat_map(|&b| (0..8).map(move |i| b >> i & 1 == 1))
-            .collect();
+        let bie = encode(&page, Options { stripe: 16, ..Options::FAX });
+        let bits: Vec<bool> = bie.iter().flat_map(|&b| (0..8).map(move |i| b >> i & 1 == 1)).collect();
         let mut decoder = Decoder::new(200);
         decoder.feed_bits(&bits);
         assert!(decoder.is_done());
@@ -551,34 +532,21 @@ mod tests {
     #[test]
     fn a_byte_at_a_time_it_keeps_up_and_ends_in_the_same_place() {
         let page = text(100, 300);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 32,
-                ..Options::FAX
-            },
-        );
+        let bie = encode(&page, Options { stripe: 32, ..Options::FAX });
         let mut decoder = Decoder::new(300);
         let mut heights = Vec::new();
         for &byte in &bie {
             decoder.feed_bytes(&[byte]);
             heights.push(decoder.lines().len());
             assert!(decoder.lines().len() <= page.len());
-            assert_eq!(
-                decoder.lines(),
-                &page[..decoder.lines().len()],
-                "a wrong line on the way"
-            );
+            assert_eq!(decoder.lines(), &page[..decoder.lines().len()], "a wrong line on the way");
         }
         assert!(decoder.is_done());
         assert_eq!(decoder.lines(), page.as_slice());
         // Lines arrive while the stripes are still arriving, not all at the
         // ends of them.
         let before_the_end = heights[bie.len() * 3 / 4];
-        assert!(
-            before_the_end > 50,
-            "only {before_the_end} lines three quarters of the way in"
-        );
+        assert!(before_the_end > 50, "only {before_the_end} lines three quarters of the way in");
     }
 
     #[test]
@@ -586,32 +554,15 @@ mod tests {
         let page = text(20, 100);
         let bie = encode(&page, Options::FAX);
         let wide = decode(&bie, 120);
-        assert!(
-            wide.lines()
-                .iter()
-                .zip(&page)
-                .all(|(got, want)| got[..100] == want[..] && !got[100..].contains(&true))
-        );
+        assert!(wide.lines().iter().zip(&page).all(|(got, want)| got[..100] == want[..] && !got[100..].contains(&true)));
         let narrow = decode(&bie, 60);
-        assert!(
-            narrow
-                .lines()
-                .iter()
-                .zip(&page)
-                .all(|(got, want)| got[..] == want[..60])
-        );
+        assert!(narrow.lines().iter().zip(&page).all(|(got, want)| got[..] == want[..60]));
     }
 
     #[test]
     fn a_comment_is_stepped_over_whatever_is_in_it() {
         let page = text(30, 200);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 10,
-                ..Options::FAX
-            },
-        );
+        let bie = encode(&page, Options { stripe: 10, ..Options::FAX });
         // A comment of ESC bytes and an SDNORM between the header and the
         // first stripe: counted, so none of it is a marker.
         let mut with = bie[..20].to_vec();
@@ -625,13 +576,7 @@ mod tests {
     #[test]
     fn an_abort_ends_the_page_where_it_is() {
         let page = text(64, 200);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 16,
-                ..Options::FAX
-            },
-        );
+        let bie = encode(&page, Options { stripe: 16, ..Options::FAX });
         // Cut after the second stripe's SDNORM.
         let second = bie
             .windows(2)
@@ -652,13 +597,7 @@ mod tests {
     #[test]
     fn a_marker_that_is_not_one_spoils_the_page() {
         let page = text(30, 200);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 10,
-                ..Options::FAX
-            },
-        );
+        let bie = encode(&page, Options { stripe: 10, ..Options::FAX });
         for marker in [0x01u8, 0x08, 0x80, ESC] {
             let mut bad = bie[..20].to_vec();
             bad.extend_from_slice(&[ESC, marker]);
@@ -675,10 +614,7 @@ mod tests {
         // stripe after an SDRST is: estimates, AT pixel, typical prediction
         // and the lines above all as at the top.
         let page = text(40, 200);
-        let options = Options {
-            stripe: 20,
-            ..Options::FAX
-        };
+        let options = Options { stripe: 20, ..Options::FAX };
         let top = encode(&page[..20], options);
         let bottom = encode(&page[20..], options);
         let mut joined = top[..top.len() - 1].to_vec();
@@ -696,13 +632,7 @@ mod tests {
         // (T.85 Amendment 1, I.2): its last lines are not guessed at from
         // zeros until a NEWLEN says how many there are.
         let page = text(50, 200);
-        let bie = encode(
-            &page,
-            Options {
-                stripe: 50,
-                ..Options::FAX
-            },
-        );
+        let bie = encode(&page, Options { stripe: 50, ..Options::FAX });
         let mut unknown = bie.clone();
         unknown[8..16].fill(0xff);
         let mut decoder = decode(&unknown, 200);

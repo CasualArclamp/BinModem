@@ -161,11 +161,7 @@ impl Kind {
 
     /// How many bits the whole sequence is: [`QC_BITS`] or [`QCA_BITS`].
     pub fn length(self) -> usize {
-        if self.acknowledgement() {
-            QCA_BITS
-        } else {
-            QC_BITS
-        }
+        if self.acknowledgement() { QCA_BITS } else { QC_BITS }
     }
 
     /// The `b0` and `b1` of the information octet, which is all of it that
@@ -201,10 +197,7 @@ impl Table2Ucode {
     /// twenty-eight can be asked for, and a modem that wants one of the other
     /// hundred and thirteen has to settle for a neighbour.
     pub fn new(ucode: u8) -> Option<Self> {
-        UCODES
-            .iter()
-            .position(|&c| c == ucode)
-            .map(|p| Self(p as u8))
+        UCODES.iter().position(|&c| c == ucode).map(|p| Self(p as u8))
     }
 
     /// The Ucode itself, as Table 1/V.90 numbers it.
@@ -430,38 +423,22 @@ pub struct Qc {
 impl Qc {
     /// QC1a: the analogue modem calling (8.2.1).
     pub fn qc1a(uqts: Uqts, lapm: bool) -> Self {
-        Self {
-            kind: Kind::Qc1a,
-            lapm,
-            field: Field::Uqts(uqts),
-        }
+        Self { kind: Kind::Qc1a, lapm, field: Field::Uqts(uqts) }
     }
 
     /// QCA1a: the analogue modem answering (8.2.3).
     pub fn qca1a(uqts: Uqts, lapm: bool) -> Self {
-        Self {
-            kind: Kind::Qca1a,
-            lapm,
-            field: Field::Uqts(uqts),
-        }
+        Self { kind: Kind::Qca1a, lapm, field: Field::Uqts(uqts) }
     }
 
     /// QC1d: the digital modem calling (8.3.2).
     pub fn qc1d(level: AnspcmLevel, lapm: bool) -> Self {
-        Self {
-            kind: Kind::Qc1d,
-            lapm,
-            field: Field::Level(level),
-        }
+        Self { kind: Kind::Qc1d, lapm, field: Field::Level(level) }
     }
 
     /// QCA1d: the digital modem answering (8.3.4).
     pub fn qca1d(level: AnspcmLevel, lapm: bool) -> Self {
-        Self {
-            kind: Kind::Qca1d,
-            lapm,
-            field: Field::Level(level),
-        }
+        Self { kind: Kind::Qca1d, lapm, field: Field::Level(level) }
     }
 
     /// Whether the field is the one this kind's table defines.
@@ -492,10 +469,7 @@ impl Qc {
     /// from `lapm` and bits 24 to 28 from the field -- and `b4`, which is bit
     /// 25, is zero in both field layouts.
     pub fn octet(&self) -> u8 {
-        debug_assert!(
-            self.consistent(),
-            "the field is not the one this kind's table defines"
-        );
+        debug_assert!(self.consistent(), "the field is not the one this kind's table defines");
         self.kind.octet_bits() | (u8::from(self.lapm) << 2) | self.field.octet_bits()
     }
 
@@ -522,21 +496,13 @@ impl Qc {
             if bit(3) || bit(5) {
                 return None;
             }
-            Field::Level(AnspcmLevel::from_pattern(
-                (u8::from(bit(6)) << 1) | u8::from(bit(7)),
-            )?)
+            Field::Level(AnspcmLevel::from_pattern((u8::from(bit(6)) << 1) | u8::from(bit(7)))?)
         } else {
-            let pattern = (u8::from(bit(3)) << 3)
-                | (u8::from(bit(5)) << 2)
-                | (u8::from(bit(6)) << 1)
-                | u8::from(bit(7));
+            let pattern =
+                (u8::from(bit(3)) << 3) | (u8::from(bit(5)) << 2) | (u8::from(bit(6)) << 1) | u8::from(bit(7));
             Field::Uqts(Uqts::from_pattern(pattern)?)
         };
-        Some(Self {
-            kind,
-            lapm: bit(2),
-            field,
-        })
+        Some(Self { kind, lapm: bit(2), field })
     }
 
     /// The whole sequence, every bit of it, in the order it goes on the line.
@@ -641,9 +607,7 @@ impl BitWatcher {
         if self.at(position) || !self.at(position + 9) {
             return None;
         }
-        Some((1..=8).fold(0u8, |acc, n| {
-            acc | (u8::from(self.at(position + n)) << (n - 1))
-        }))
+        Some((1..=8).fold(0u8, |acc, n| acc | (u8::from(self.at(position + n)) << (n - 1))))
     }
 
     /// The window read as a whole sequence, if it is one.
@@ -753,11 +717,7 @@ mod tests {
         assert_eq!(Uqts::from_pattern(0b1_0000), None, "there are only sixteen");
         // A Ucode beside one of Table 2's is not one of Table 2's.
         for ucode in [0, 60, 64, 65, 88, 127] {
-            assert_eq!(
-                Uqts::from_ucode(ucode),
-                None,
-                "Ucode {ucode} is not in Table 2"
-            );
+            assert_eq!(Uqts::from_ucode(ucode), None, "Ucode {ucode} is not in Table 2");
         }
     }
 
@@ -814,11 +774,7 @@ mod tests {
             // would send ANSpcm 12 dB and 18 dB too quiet.
             assert_eq!(mu, 2 * a, "Table 6: {mu} is twice {a}");
         }
-        assert_eq!(
-            AnspcmLevel::from_pattern(0b100),
-            None,
-            "there are only four"
-        );
+        assert_eq!(AnspcmLevel::from_pattern(0b100), None, "there are only four");
 
         // And scl is an RMS amplitude on one linear scale, so the ratio
         // between two rows is the gap between the levels they name: 2.5 dB
@@ -863,11 +819,7 @@ mod tests {
         assert_eq!(text(&bits[10..20]), text(&frame(SYNC_QC)));
         assert_eq!(text(&bits[40..50]), text(&frame(SYNC_QC)));
         assert_eq!(heard(&bits), vec![qc], "and a watcher reads it back");
-        assert_eq!(
-            qc.kind.channel(),
-            Channel::Low,
-            "8.2.1: V.21(L), like the CM after it"
-        );
+        assert_eq!(qc.kind.channel(), Channel::Low, "8.2.1: V.21(L), like the CM after it");
     }
 
     #[test]
@@ -885,10 +837,7 @@ mod tests {
             text(&bits),
             printed("1111111111 0101010101 0011001011 1111111111 0101010101 0011001011 1111111111")
         );
-        assert!(
-            bits[60..].iter().all(|&b| b),
-            "Table 4 bits 60:69, ten ONEs"
-        );
+        assert!(bits[60..].iter().all(|&b| b), "Table 4 bits 60:69, ten ONEs");
         assert_eq!(qca.kind.channel(), Channel::High, "8.2.3: V.21(H), like JM");
         assert_eq!(heard(&bits), vec![qca]);
     }
@@ -918,54 +867,14 @@ mod tests {
         // pages. The digital sequences put three zeros where the analogue
         // ones put W and X, so LM lands on b6 and b7 alone.
         let rows = [
-            (
-                Kind::Qc1d,
-                false,
-                0b00,
-                "1111111111 0101010101 0100000001 1111111111 0101010101 0100000001",
-            ),
-            (
-                Kind::Qc1d,
-                false,
-                0b01,
-                "1111111111 0101010101 0100000011 1111111111 0101010101 0100000011",
-            ),
-            (
-                Kind::Qc1d,
-                false,
-                0b10,
-                "1111111111 0101010101 0100000101 1111111111 0101010101 0100000101",
-            ),
-            (
-                Kind::Qc1d,
-                false,
-                0b11,
-                "1111111111 0101010101 0100000111 1111111111 0101010101 0100000111",
-            ),
-            (
-                Kind::Qc1d,
-                true,
-                0b00,
-                "1111111111 0101010101 0101000001 1111111111 0101010101 0101000001",
-            ),
-            (
-                Kind::Qc1d,
-                true,
-                0b01,
-                "1111111111 0101010101 0101000011 1111111111 0101010101 0101000011",
-            ),
-            (
-                Kind::Qc1d,
-                true,
-                0b10,
-                "1111111111 0101010101 0101000101 1111111111 0101010101 0101000101",
-            ),
-            (
-                Kind::Qc1d,
-                true,
-                0b11,
-                "1111111111 0101010101 0101000111 1111111111 0101010101 0101000111",
-            ),
+            (Kind::Qc1d, false, 0b00, "1111111111 0101010101 0100000001 1111111111 0101010101 0100000001"),
+            (Kind::Qc1d, false, 0b01, "1111111111 0101010101 0100000011 1111111111 0101010101 0100000011"),
+            (Kind::Qc1d, false, 0b10, "1111111111 0101010101 0100000101 1111111111 0101010101 0100000101"),
+            (Kind::Qc1d, false, 0b11, "1111111111 0101010101 0100000111 1111111111 0101010101 0100000111"),
+            (Kind::Qc1d, true, 0b00, "1111111111 0101010101 0101000001 1111111111 0101010101 0101000001"),
+            (Kind::Qc1d, true, 0b01, "1111111111 0101010101 0101000011 1111111111 0101010101 0101000011"),
+            (Kind::Qc1d, true, 0b10, "1111111111 0101010101 0101000101 1111111111 0101010101 0101000101"),
+            (Kind::Qc1d, true, 0b11, "1111111111 0101010101 0101000111 1111111111 0101010101 0101000111"),
             (
                 Kind::Qca1d,
                 false,
@@ -1017,17 +926,8 @@ mod tests {
         ];
         for (kind, lapm, pattern, string) in rows {
             let level = AnspcmLevel::from_pattern(pattern).unwrap();
-            let qc = if kind == Kind::Qc1d {
-                Qc::qc1d(level, lapm)
-            } else {
-                Qc::qca1d(level, lapm)
-            };
-            assert_eq!(
-                text(&qc.bits()),
-                printed(string),
-                "{} P={lapm} LM={pattern:02b}",
-                kind.name()
-            );
+            let qc = if kind == Kind::Qc1d { Qc::qc1d(level, lapm) } else { Qc::qca1d(level, lapm) };
+            assert_eq!(text(&qc.bits()), printed(string), "{} P={lapm} LM={pattern:02b}", kind.name());
             assert_eq!(heard(&qc.bits()), vec![qc]);
         }
         // The four octets the digests worked out by hand, as a check on the
@@ -1071,11 +971,7 @@ mod tests {
         assert_eq!(heard(&ci.bits()), vec![ci]);
 
         let menu = Qc::qc1a(Uqts::from_ucode(74).unwrap(), false);
-        assert_eq!(
-            menu.octet(),
-            SYNC_MENU,
-            "the CM and JM synchronisation, 0000001111"
-        );
+        assert_eq!(menu.octet(), SYNC_MENU, "the CM and JM synchronisation, 0000001111");
         assert_eq!(heard(&menu.bits()), vec![menu]);
 
         let mut stream = Vec::new();
@@ -1103,9 +999,7 @@ mod tests {
         }
         assert!(!misread.is_empty(), "Decoder reads something out of a QC1a");
         assert!(
-            misread
-                .iter()
-                .all(|h| *h == crate::Heard::Ci(crate::CallFunction::Textphone)),
+            misread.iter().all(|h| *h == crate::Heard::Ci(crate::CallFunction::Textphone)),
             "a bogus CI, and nothing else: {misread:?}"
         );
     }
@@ -1117,10 +1011,7 @@ mod tests {
         // one -- so a CM can carry the QC synchronisation in its body. What
         // makes it a synchronisation is sitting directly behind ten ONEs, and
         // in a CM the octets run back to back with no idle between them.
-        assert!(
-            crate::is_extension(SYNC_QC),
-            "5.2/V.8, and why this test exists"
-        );
+        assert!(crate::is_extension(SYNC_QC), "5.2/V.8, and why this test exists");
         let menu = crate::Menu {
             function: crate::CallFunction::Data,
             modulations: crate::Modulations::of(&[crate::Modulation::V34Duplex]),
@@ -1170,16 +1061,8 @@ mod tests {
             text(&frame(category)),
             "a framed octet where a QC has its ten ONEs"
         );
-        assert_eq!(
-            text(&stream[10..20]),
-            text(&frame(SYNC_QC)),
-            "and the synchronisation behind it"
-        );
-        assert_eq!(
-            heard(&stream),
-            vec![],
-            "ten ONEs, and nothing else, is what marks a QC"
-        );
+        assert_eq!(text(&stream[10..20]), text(&frame(SYNC_QC)), "and the synchronisation behind it");
+        assert_eq!(heard(&stream), vec![], "ten ONEs, and nothing else, is what marks a QC");
     }
 
     #[test]
@@ -1193,11 +1076,7 @@ mod tests {
         for position in (0..20).chain(30..50) {
             let mut bits = qc.bits();
             bits[position] = !bits[position];
-            assert_eq!(
-                heard(&bits),
-                vec![],
-                "bit {position} of the preamble or synchronisation"
-            );
+            assert_eq!(heard(&bits), vec![], "bit {position} of the preamble or synchronisation");
         }
     }
 
@@ -1214,22 +1093,14 @@ mod tests {
         for position in 21..29 {
             let mut bits = qc.bits();
             bits[30 + position] = !bits[30 + position];
-            assert_eq!(
-                heard(&bits),
-                vec![],
-                "bit {position} of the second copy flipped"
-            );
+            assert_eq!(heard(&bits), vec![], "bit {position} of the second copy flipped");
         }
         // The same damage in the first copy is just as fatal, and for the
         // same reason.
         for position in 21..29 {
             let mut bits = qc.bits();
             bits[position] = !bits[position];
-            assert_eq!(
-                heard(&bits),
-                vec![],
-                "bit {position} of the first copy flipped"
-            );
+            assert_eq!(heard(&bits), vec![], "bit {position} of the first copy flipped");
         }
         // A broken frame is not a frame, whichever bit broke it.
         for position in [20, 29, 50, 59] {
@@ -1267,16 +1138,8 @@ mod tests {
         // are fixed in Tables 11 and 13 alone, because Tables 2 and 4 put W
         // and X there.
         assert_eq!(Qc::from_octet(1 << 4), None, "b4 set");
-        assert_eq!(
-            Qc::from_octet(0x05 | (1 << 3)),
-            None,
-            "QC1d with a one where 000LM1 begins"
-        );
-        assert_eq!(
-            Qc::from_octet(0x05 | (1 << 5)),
-            None,
-            "QC1d with a one in the third zero"
-        );
+        assert_eq!(Qc::from_octet(0x05 | (1 << 3)), None, "QC1d with a one where 000LM1 begins");
+        assert_eq!(Qc::from_octet(0x05 | (1 << 5)), None, "QC1d with a one in the third zero");
         assert_eq!(Qc::from_octet(0x07 | (1 << 3)), None, "QCA1d likewise");
         // The analogue sequences have no such check to make: every one of the
         // sixteen patterns is a legal W0XYZ1.
@@ -1294,10 +1157,7 @@ mod tests {
         for qc in all_sequences() {
             assert!(qc.consistent(), "{qc:?}");
             let read_back = Qc::from_octet(qc.octet()).expect("reads back");
-            assert!(
-                read_back.consistent(),
-                "{read_back:?} came out of from_octet"
-            );
+            assert!(read_back.consistent(), "{read_back:?} came out of from_octet");
         }
         // A struct literal is the one way that does not, and what it makes is
         // not a malformed sequence but a well-formed one saying something
@@ -1305,32 +1165,13 @@ mod tests {
         // Their octets are deliberately not taken here: octet() asserts on
         // them in debug builds, which is the point.
         let crossed = [
-            Qc {
-                kind: Kind::Qc1a,
-                lapm: true,
-                field: Field::Level(AnspcmLevel::Minus18),
-            },
-            Qc {
-                kind: Kind::Qca1a,
-                lapm: false,
-                field: Field::Level(AnspcmLevel::Minus9_5),
-            },
-            Qc {
-                kind: Kind::Qc1d,
-                lapm: true,
-                field: Field::Uqts(Uqts::Cleardown),
-            },
-            Qc {
-                kind: Kind::Qca1d,
-                lapm: false,
-                field: Field::Uqts(Uqts::from_ucode(61).unwrap()),
-            },
+            Qc { kind: Kind::Qc1a, lapm: true, field: Field::Level(AnspcmLevel::Minus18) },
+            Qc { kind: Kind::Qca1a, lapm: false, field: Field::Level(AnspcmLevel::Minus9_5) },
+            Qc { kind: Kind::Qc1d, lapm: true, field: Field::Uqts(Uqts::Cleardown) },
+            Qc { kind: Kind::Qca1d, lapm: false, field: Field::Uqts(Uqts::from_ucode(61).unwrap()) },
         ];
         for qc in crossed {
-            assert!(
-                !qc.consistent(),
-                "{qc:?} pairs one table's kind with the other's field"
-            );
+            assert!(!qc.consistent(), "{qc:?} pairs one table's kind with the other's field");
         }
     }
 

@@ -6,7 +6,9 @@
 //! at all: with both directions in the one band, no filter can tell the two
 //! apart, and there is nothing to fall back on.
 
-use datapump::v32::startup::{Modem, Rates, Role, Status, UNSATISFACTORY_GAP, rate_signal};
+use datapump::v32::startup::{
+    Modem, Rates, Role, Status, UNSATISFACTORY_GAP, rate_signal,
+};
 
 const FS: f64 = 16_000.0;
 
@@ -18,10 +20,7 @@ const FAR: f64 = 0.1;
 
 /// Run a call and return the two modems along with when they both connected.
 fn call(seconds: f64, echo: f64) -> (Modem, Modem, f64) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
@@ -86,10 +85,7 @@ fn the_echo_canceller_learns_during_the_training_segment() {
 
 #[test]
 fn data_flows_in_both_directions_once_connected() {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
@@ -156,10 +152,7 @@ fn contains_at_any_bit_offset(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 #[ignore]
 fn trace() {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut a, mut b) = (0.0, 0.0);
@@ -174,19 +167,15 @@ fn trace() {
             println!(
                 "{:>7.3}s  call {cp:>12} (err {:.2}, echo {:>5.1} dB)   answer {ap:>12} (err {:.2}, echo {:>5.1} dB)",
                 i as f64 / FS,
-                calling.residual_error(),
-                calling.echo_return_loss(),
-                answering.residual_error(),
-                answering.echo_return_loss()
+                calling.residual_error(), calling.echo_return_loss(),
+                answering.residual_error(), answering.echo_return_loss()
             );
         }
     }
     println!(
         "round trip: call {} answer {}; echo loss {:.1} / {:.1} dB",
-        calling.round_trip(),
-        answering.round_trip(),
-        calling.echo_return_loss(),
-        answering.echo_return_loss()
+        calling.round_trip(), answering.round_trip(),
+        calling.echo_return_loss(), answering.echo_return_loss()
     );
 }
 
@@ -232,10 +221,7 @@ impl Line {
 
 /// Run a call over a line of the given one-way delay in samples.
 fn long_call(seconds: f64, delay: usize) -> (Modem, Modem, f64) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut line = Line::new(delay);
@@ -332,10 +318,7 @@ fn trace_cable() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(700);
     const HEADROOM: f64 = 0.45;
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut wire: VecDeque<f64> = VecDeque::from(vec![0.0; crossing]);
@@ -418,11 +401,7 @@ fn nine_thousand_six_hundred_carries_four_bits_to_the_symbol() {
     // encoded into the quadrant and two choosing a point inside it. Twice the
     // data at the same 2400 baud, which is the whole of what the extra twelve
     // points buy.
-    let both = rate_signal(Rates {
-        at_4800: true,
-        at_9600: true,
-        ..Rates::default()
-    });
+    let both = rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() });
     let payload = b"the quick brown fox jumps over the lazy dog, 0123456789";
     let (rate, bits, at_caller, at_host) = exchange(both, both, payload);
 
@@ -451,18 +430,8 @@ fn a_far_end_that_can_only_do_4800_gets_4800() {
     // that put its whole offer in E would tell this one to read 9600 off a
     // line carrying 4800.
     let payload = b"login: cactus";
-    let (rate, bits, at_caller, at_host) = exchange(
-        rate_signal(Rates {
-            at_4800: true,
-            at_9600: true,
-            ..Rates::default()
-        }),
-        rate_signal(Rates {
-            at_4800: true,
-            ..Rates::default()
-        }),
-        payload,
-    );
+    let (rate, bits, at_caller, at_host) =
+        exchange(rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() }), rate_signal(Rates { at_4800: true, ..Rates::default() }), payload);
 
     assert_eq!(rate, 4800, "the faster end did not come down to the slower");
     assert!(
@@ -474,11 +443,13 @@ fn a_far_end_that_can_only_do_4800_gets_4800() {
 }
 
 /// As `long_call`, but with the two reflections given rather than fixed.
-fn custom_call(seconds: f64, delay: usize, echo: f64, far: f64) -> (Modem, Modem, f64) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+fn custom_call(
+    seconds: f64,
+    delay: usize,
+    echo: f64,
+    far: f64,
+) -> (Modem, Modem, f64) {
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut a = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
@@ -591,10 +562,7 @@ fn late_call(
     far: f64,
     quiet_ms: f64,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut a = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
@@ -612,15 +580,8 @@ fn late_call(
         let to_answering = echo * b[0] + far * a[delay] + TALKER * b[there_and_back];
         from_calling = calling.step(to_calling);
         // The far end is not on the line yet.
-        from_answering = if i < starts {
-            answering.step(0.0) * 0.0
-        } else {
-            answering.step(to_answering)
-        };
-        for (modem, went) in [
-            (&calling, &mut calling_went),
-            (&answering, &mut answering_went),
-        ] {
+        from_answering = if i < starts { answering.step(0.0) * 0.0 } else { answering.step(to_answering) };
+        for (modem, went) in [(&calling, &mut calling_went), (&answering, &mut answering_went)] {
             if went.last() != Some(&modem.phase()) {
                 went.push(modem.phase());
             }
@@ -678,21 +639,14 @@ fn a_quiet_far_end_is_heard_through_an_echo_at_full_strength() {
 /// separates V.25's answering tone from V.8's, and `am` whether it also carries
 /// V.8's fifteen hertz of amplitude modulation.
 fn answered_with(reversal_s: f64, am: bool, db: f64) -> (f64, &'static str) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let level = 0.3 * 10.0f64.powf(db / 20.0);
     let mut peak = 0.0f64;
     let mut phase = 0.0f64;
     for i in 0..(FS * 4.0) as usize {
         let t = i as f64 / FS;
-        let flips = if reversal_s > 0.0 {
-            (t / reversal_s) as u64
-        } else {
-            0
-        };
+        let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
         let sign = if flips % 2 == 0 { 1.0 } else { -1.0 };
         let envelope = if am {
             1.0 + 0.2 * (std::f64::consts::TAU * 15.0 * t).sin()
@@ -751,12 +705,10 @@ fn a_line_with_nothing_on_it_is_not_answered() {
     // until the far end speaks, and a modem that transmits into silence would
     // be talking over the answering tone it is supposed to be waiting for.
     let (peak, phase) = answered_with(0.0, false, -120.0);
-    assert!(
-        peak < 1.0e-6,
-        "transmitted into a silent line, reaching {phase}"
-    );
+    assert!(peak < 1.0e-6, "transmitted into a silent line, reaching {phase}");
     assert_eq!(phase, "listening");
 }
+
 
 /// A whole call at 9600 with the trellis coding, negotiated rather than set.
 ///
@@ -767,11 +719,7 @@ fn a_line_with_nothing_on_it_is_not_answered() {
 /// can reach.
 #[test]
 fn a_call_at_9600_settles_on_trellis_coding_and_carries_data() {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        at_9600: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
@@ -897,10 +845,7 @@ fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
         }
     }
 
-    assert!(
-        connected_at.is_finite(),
-        "never connected in the first place"
-    );
+    assert!(connected_at.is_finite(), "never connected in the first place");
     assert!(asked, "never got far enough to ask");
     assert!(
         retrained_at.is_finite(),
@@ -927,11 +872,7 @@ fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
         "the calling end ended at {}",
         calling.phase()
     );
-    assert_eq!(
-        calling.retrains(),
-        1,
-        "the calling end counted its retrains wrong"
-    );
+    assert_eq!(calling.retrains(), 1, "the calling end counted its retrains wrong");
     assert_eq!(answering.retrains(), 1);
 
     assert!(
@@ -1033,11 +974,7 @@ fn retrain_again_and_again(
         step(&mut calling, &mut answering);
     }
     if !up(&calling, &answering) {
-        return Err(format!(
-            "never connected: {} and {}",
-            calling.phase(),
-            answering.phase()
-        ));
+        return Err(format!("never connected: {} and {}", calling.phase(), answering.phase()));
     }
     let mut took = Vec::new();
     for attempt in 0..attempts {
@@ -1116,10 +1053,7 @@ fn a_retrain_comes_back_whenever_it_is_asked_for_and_whoever_asks() {
 /// how much of it was left on the line when the answering modem finished
 /// waiting out 5.4.2's MT and looked for it again.
 fn s_and_its_margin(delay: usize) -> (i64, i64, u64, u64) {
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut line = Line::new(delay);
@@ -1192,6 +1126,7 @@ fn the_s_sequence_is_still_going_when_the_far_end_looks_for_it_again() {
     );
 }
 
+
 #[test]
 fn r2_is_not_held_up_for_ever_when_no_r3_is_coming() {
     // 5.4.1 says "Transmission of R2 shall continue until an incoming rate
@@ -1208,10 +1143,7 @@ fn r2_is_not_held_up_for_ever_when_no_r3_is_coming() {
     // S-bar and a training segment 5.2.3 caps at 8192. Here the answering
     // modem is taken off the line the moment this end starts R2, so no R3 is
     // ever coming and the whole of that bound has to run out.
-    let offer = rate_signal(Rates {
-        at_4800: true,
-        ..Rates::default()
-    });
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
@@ -1257,6 +1189,7 @@ fn r2_is_not_held_up_for_ever_when_no_r3_is_coming() {
         "connected to a modem that was not there"
     );
 }
+
 
 #[test]
 fn a_rate_that_cannot_be_read_is_given_up() {
@@ -1305,10 +1238,7 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         calling.retrains(),
         calling.residual_error() / calling.point_spacing(),
     );
-    assert_eq!(
-        first, 14_400,
-        "did not start at the rate that cannot be read"
-    );
+    assert_eq!(first, 14_400, "did not start at the rate that cannot be read");
     assert!(
         here < first,
         "stayed at {here} on a line it cannot read it on"

@@ -16,24 +16,14 @@ pub struct Nco {
 
 impl Nco {
     pub fn new(freq_hz: f64, fs: f64) -> Self {
-        Self {
-            phase: 0.0,
-            step: freq_hz / fs,
-            fs,
-        }
+        Self { phase: 0.0, step: freq_hz / fs, fs }
     }
 
-    pub fn set_frequency(&mut self, freq_hz: f64) {
-        self.step = freq_hz / self.fs;
-    }
-    pub fn frequency(&self) -> f64 {
-        self.step * self.fs
-    }
+    pub fn set_frequency(&mut self, freq_hz: f64) { self.step = freq_hz / self.fs; }
+    pub fn frequency(&self) -> f64 { self.step * self.fs }
 
     /// Nudge the frequency, as a carrier-tracking loop would.
-    pub fn adjust(&mut self, delta_hz: f64) {
-        self.step += delta_hz / self.fs;
-    }
+    pub fn adjust(&mut self, delta_hz: f64) { self.step += delta_hz / self.fs; }
 
     /// Advance one sample and return `(cos, sin)` of the new phase.
     #[inline]
@@ -46,9 +36,7 @@ impl Nco {
         (r.cos(), r.sin())
     }
 
-    pub fn reset(&mut self) {
-        self.phase = 0.0;
-    }
+    pub fn reset(&mut self) { self.phase = 0.0; }
 }
 
 #[cfg(test)]
@@ -69,10 +57,7 @@ mod tests {
             }
             prev = s;
         }
-        assert!(
-            (crossings as i64 - 2000).abs() <= 2,
-            "crossings {crossings}"
-        );
+        assert!((crossings as i64 - 2000).abs() <= 2, "crossings {crossings}");
     }
 
     #[test]
@@ -81,11 +66,7 @@ mod tests {
         for _ in 0..8_000_000 {
             nco.step();
         }
-        assert!(
-            (0.0..1.0).contains(&nco.phase),
-            "phase escaped: {}",
-            nco.phase
-        );
+        assert!((0.0..1.0).contains(&nco.phase), "phase escaped: {}", nco.phase);
     }
 
     #[test]

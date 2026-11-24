@@ -86,17 +86,7 @@ fn a_terminal_talks_to_the_modem_before_there_is_a_call() {
 /// commands it held and whatever they asked the modem to do.
 #[test]
 fn every_command_line_is_answered_once() {
-    for line in [
-        "AT+MS=V90",
-        "ATH",
-        "ATZ",
-        "AT&F",
-        "AT+ES=3",
-        "AT+DS=3",
-        "AT+FCLASS=0",
-        "AT+MS=V34;+ES=3;+DS=0",
-        "ATE1",
-    ] {
+    for line in ["AT+MS=V90", "ATH", "ATZ", "AT&F", "AT+ES=3", "AT+DS=3", "AT+FCLASS=0", "AT+MS=V34;+ES=3;+DS=0", "ATE1"] {
         let mut p = Pair::new();
         Pair::type_at(&mut p.caller, line);
         p.run(0.05);
@@ -131,16 +121,8 @@ fn dialling_reaches_a_connection_and_says_so() {
     );
     assert_eq!(p.caller.rate(), p.host.rate(), "the two ends disagree");
     // And what each end sends at is what the other receives at.
-    assert_eq!(
-        p.caller.transmit_rate(),
-        p.host.rate(),
-        "the caller's sending rate"
-    );
-    assert_eq!(
-        p.host.transmit_rate(),
-        p.caller.rate(),
-        "the host's sending rate"
-    );
+    assert_eq!(p.caller.transmit_rate(), p.host.rate(), "the caller's sending rate");
+    assert_eq!(p.host.transmit_rate(), p.caller.rate(), "the host's sending rate");
 }
 
 #[test]
@@ -307,12 +289,7 @@ fn hanging_up_ends_the_call_at_both_ends() {
         "the host's terminal saw {:?}",
         p.host_saw()
     );
-    assert_eq!(
-        p.caller_saw().matches("OK").count(),
-        2,
-        "the caller saw {:?}",
-        p.caller_saw()
-    );
+    assert_eq!(p.caller_saw().matches("OK").count(), 2, "the caller saw {:?}", p.caller_saw());
 }
 
 #[test]
@@ -375,11 +352,7 @@ fn ms_chooses_which_modulation_the_call_uses() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(12.0);
 
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "the V.32 caller never connected"
-    );
+    assert_eq!(p.caller.state(), State::Data, "the V.32 caller never connected");
     assert_eq!(p.host.state(), State::Data, "the V.32 host never connected");
     // V.250 gives V.32 and V.32bis separate carrier names, and what
     // separates them is a ceiling: this is the older one, so 9600 is as fast
@@ -408,11 +381,7 @@ fn the_two_v32_carriers_are_two_ceilings() {
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(14.0);
-    assert_eq!(
-        p.caller.rate(),
-        Some(14_400),
-        "V.32bis should reach the top"
-    );
+    assert_eq!(p.caller.rate(), Some(14_400), "V.32bis should reach the top");
     assert_eq!(p.caller.standard(), "V.32bis");
     assert_eq!(p.caller.states(), 128);
 }
@@ -440,22 +409,10 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
         }
     }
     assert!(phases.contains(&"V.34 ranging"), "never ranged: {phases:?}");
-    assert!(
-        phases.contains(&"V.34 phase 4: MP"),
-        "never reached MP: {phases:?}"
-    );
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "still in {phases:?}: {}",
-        p.caller_saw()
-    );
+    assert!(phases.contains(&"V.34 phase 4: MP"), "never reached MP: {phases:?}");
+    assert_eq!(p.caller.state(), State::Data, "still in {phases:?}: {}", p.caller_saw());
     assert_eq!(p.host.state(), State::Data, "{}", p.host_saw());
-    assert!(
-        p.caller_saw().contains("CONNECT 33600"),
-        "{}",
-        p.caller_saw()
-    );
+    assert!(p.caller_saw().contains("CONNECT 33600"), "{}", p.caller_saw());
     assert_eq!(p.caller.rate(), Some(33_600));
     assert_eq!(p.caller.transmit_rate(), Some(33_600));
 
@@ -468,59 +425,27 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
         p.host.feed_dte(*b);
     }
     p.run(4.0);
-    assert!(
-        p.host_saw().contains("cactus"),
-        "the host saw {:?}",
-        p.host_saw()
-    );
-    assert!(
-        p.caller_saw().contains("Password:"),
-        "the caller saw {:?}",
-        p.caller_saw()
-    );
+    assert!(p.host_saw().contains("cactus"), "the host saw {:?}", p.host_saw());
+    assert!(p.caller_saw().contains("Password:"), "the caller saw {:?}", p.caller_saw());
 
     for (who, modem) in [("caller", &p.caller), ("host", &p.host)] {
-        let report = modem
-            .v34_report()
-            .unwrap_or_else(|| panic!("{who}: no report"));
+        let report = modem.v34_report().unwrap_or_else(|| panic!("{who}: no report"));
         assert_eq!(report.failed, None, "{who}: {:?}", report.failed);
         let info1a = report.info1a.expect("no INFO1a");
         assert_eq!(info1a.answer_to_call.nominal(), 3429, "{who}: {info1a:?}");
         assert_eq!(info1a.call_to_answer.nominal(), 3429, "{who}: {info1a:?}");
         assert_eq!(info1a.probed.max_rate, 14, "{who}: {info1a:?}");
         let rtd = report.round_trip.expect("no round trip");
-        assert!(
-            rtd < 0.003,
-            "{who}: {rtd} s round trip on a direct connection"
-        );
-        let training = report
-            .training
-            .as_ref()
-            .expect("phases 3 and 4 never started");
+        assert!(rtd < 0.003, "{who}: {rtd} s round trip on a direct connection");
+        let training = report.training.as_ref().expect("phases 3 and 4 never started");
         assert!(training.done, "{who}: {:?}", training.stopped);
         assert_eq!(training.connected, Some((33_600, 33_600)), "{who}");
-        assert_eq!(
-            training.far_asked,
-            Some(datapump::v34::signals::Size::Sixteen),
-            "{who}"
-        );
-        assert!(
-            training.phase3_snr.unwrap() > 30.0,
-            "{who}: {:?}",
-            training.phase3_snr
-        );
+        assert_eq!(training.far_asked, Some(datapump::v34::signals::Size::Sixteen), "{who}");
+        assert!(training.phase3_snr.unwrap() > 30.0, "{who}: {:?}", training.phase3_snr);
         assert_eq!(training.rates, Some((14, 14)), "{who}");
         let rows = modem.distant();
-        assert!(
-            rows.iter()
-                .any(|(k, v)| *k == "V.34 to this end" && v.contains("33600")),
-            "{rows:?}"
-        );
-        assert!(
-            rows.iter()
-                .any(|(k, v)| *k == "V.34 rates" && v == "33600 bit/s to this end, 33600 from it"),
-            "{rows:?}"
-        );
+        assert!(rows.iter().any(|(k, v)| *k == "V.34 to this end" && v.contains("33600")), "{rows:?}");
+        assert!(rows.iter().any(|(k, v)| *k == "V.34 rates" && v == "33600 bit/s to this end, 33600 from it"), "{rows:?}");
     }
 
     // A rate renegotiation from the caller (11.6): down two steps towards it,
@@ -532,33 +457,15 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
     p.run(3.0);
     assert_eq!(p.caller.retrains(), 1);
     assert_eq!(p.host.retrains(), 1, "the host never heard S");
-    assert_eq!(
-        (p.caller.state(), p.host.state()),
-        (State::Data, State::Data),
-        "{} / {}",
-        p.caller_saw(),
-        p.host_saw()
-    );
-    assert!(
-        !p.caller_saw().contains("NO CARRIER") && !p.caller_saw().contains("CONNECT"),
-        "{}",
-        p.caller_saw()
-    );
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{} / {}", p.caller_saw(), p.host_saw());
+    assert!(!p.caller_saw().contains("NO CARRIER") && !p.caller_saw().contains("CONNECT"), "{}", p.caller_saw());
     assert_eq!(p.caller.rate(), Some(28_800));
     // The renegotiation asked the host to send slower and nothing of the
     // caller, so the two directions have parted: the caller still sends at
     // 33 600, and the host, which receives that, says so.
-    assert_eq!(
-        p.caller.transmit_rate(),
-        Some(33_600),
-        "the caller's sending rate moved"
-    );
+    assert_eq!(p.caller.transmit_rate(), Some(33_600), "the caller's sending rate moved");
     assert_eq!(p.host.rate(), Some(33_600));
-    assert_eq!(
-        p.host.transmit_rate(),
-        Some(28_800),
-        "the host is not sending at what the caller receives"
-    );
+    assert_eq!(p.host.transmit_rate(), Some(28_800), "the host is not sending at what the caller receives");
     for b in b"ls -l\r" {
         p.caller.feed_dte(*b);
     }
@@ -566,27 +473,11 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
         p.host.feed_dte(*b);
     }
     p.run(4.0);
-    assert!(
-        p.host_saw().contains("ls -l"),
-        "the host saw {:?}",
-        p.host_saw()
-    );
-    assert!(
-        p.caller_saw().contains("total 42"),
-        "the caller saw {:?}",
-        p.caller_saw()
-    );
+    assert!(p.host_saw().contains("ls -l"), "the host saw {:?}", p.host_saw());
+    assert!(p.caller_saw().contains("total 42"), "the caller saw {:?}", p.caller_saw());
     let rows = p.caller.distant();
-    assert!(
-        rows.iter()
-            .any(|(k, v)| *k == "V.34 rates" && v == "28800 bit/s to this end, 33600 from it"),
-        "{rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .any(|(k, v)| *k == "V.34 renegotiated" && v == "1 time"),
-        "{rows:?}"
-    );
+    assert!(rows.iter().any(|(k, v)| *k == "V.34 rates" && v == "28800 bit/s to this end, 33600 from it"), "{rows:?}");
+    assert!(rows.iter().any(|(k, v)| *k == "V.34 renegotiated" && v == "1 time"), "{rows:?}");
 }
 
 /// The Retrain button: a full retrain (11.5) from data mode, back through
@@ -605,12 +496,7 @@ fn a_v34_call_retrains_the_whole_way_and_comes_back() {
             break;
         }
     }
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "never connected: {}",
-        p.caller_saw()
-    );
+    assert_eq!(p.caller.state(), State::Data, "never connected: {}", p.caller_saw());
     assert_eq!(p.caller.rate(), Some(33_600));
 
     p.at_caller.clear();
@@ -623,10 +509,7 @@ fn a_v34_call_retrains_the_whole_way_and_comes_back() {
             break;
         }
     }
-    assert!(
-        p.caller.retraining() || p.caller.rate().is_some(),
-        "the retrain never started"
-    );
+    assert!(p.caller.retraining() || p.caller.rate().is_some(), "the retrain never started");
     p.run(25.0);
     assert_eq!(
         (p.caller.state(), p.host.state()),
@@ -635,26 +518,14 @@ fn a_v34_call_retrains_the_whole_way_and_comes_back() {
         p.caller_saw(),
         p.host_saw()
     );
-    assert!(
-        !p.caller_saw().contains("NO CARRIER"),
-        "the call dropped: {}",
-        p.caller_saw()
-    );
-    assert_eq!(
-        p.caller.rate(),
-        Some(33_600),
-        "came back at a different rate"
-    );
+    assert!(!p.caller_saw().contains("NO CARRIER"), "the call dropped: {}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(33_600), "came back at a different rate");
     // And the terminals are still talking over it.
     for b in b"after\r" {
         p.caller.feed_dte(*b);
     }
     p.run(4.0);
-    assert!(
-        p.host_saw().contains("after"),
-        "the host saw {:?}",
-        p.host_saw()
-    );
+    assert!(p.host_saw().contains("after"), "the host saw {:?}", p.host_saw());
 }
 
 /// A V.34 caller and a far end without it: V.8 settles on V.32bis, and the
@@ -721,22 +592,10 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
         host_saw.extend(host.take_dte());
         let caller_log = caller.take_frame_log();
         let host_log = host.take_frame_log();
-        asked += caller_log
-            .iter()
-            .filter(|f| f.outbound && sabme(&f.body))
-            .count();
-        answered += host_log
-            .iter()
-            .filter(|f| f.outbound && ua(&f.body))
-            .count();
-        caller_xids += caller_log
-            .iter()
-            .filter(|f| f.outbound && xid(&f.body))
-            .count();
-        host_xids += host_log
-            .iter()
-            .filter(|f| f.outbound && xid(&f.body))
-            .count();
+        asked += caller_log.iter().filter(|f| f.outbound && sabme(&f.body)).count();
+        answered += host_log.iter().filter(|f| f.outbound && ua(&f.body)).count();
+        caller_xids += caller_log.iter().filter(|f| f.outbound && xid(&f.body)).count();
+        host_xids += host_log.iter().filter(|f| f.outbound && xid(&f.body)).count();
         if settled_at.is_none() && caller.state() == State::Data && host.state() == State::Data {
             settled_at = Some(i);
         }
@@ -786,10 +645,7 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
         assert!(sent <= 4, "the {who} put {sent} XID frames on the line");
     }
     for (who, modem) in [("caller", &caller), ("host", &host)] {
-        assert!(
-            modem.compression_name().is_some(),
-            "the {who} negotiated no compression"
-        );
+        assert!(modem.compression_name().is_some(), "the {who} negotiated no compression");
     }
 }
 
@@ -806,8 +662,7 @@ fn a_v32_call_carries_data_both_ways() {
     p.at_caller.clear();
     p.at_host.clear();
     for b in b"cactus
-"
-    {
+" {
         p.caller.feed_dte(*b);
     }
     for b in b"Password:" {
@@ -894,16 +749,8 @@ fn a_bell_103_call_carries_a_bbs_session() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(5.0);
 
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "the 300 bit/s caller never connected"
-    );
-    assert_eq!(
-        p.host.state(),
-        State::Data,
-        "the 300 bit/s host never connected"
-    );
+    assert_eq!(p.caller.state(), State::Data, "the 300 bit/s caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the 300 bit/s host never connected");
     assert_eq!(p.caller.rate(), Some(300));
     assert!(
         p.caller_saw().contains("300"),
@@ -950,11 +797,7 @@ fn a_v21_call_carries_a_bbs_session() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(8.0);
 
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "the V.21 caller never connected"
-    );
+    assert_eq!(p.caller.state(), State::Data, "the V.21 caller never connected");
     assert_eq!(p.host.state(), State::Data, "the V.21 host never connected");
     assert_eq!(p.caller.standard(), "V.21");
     assert_eq!(p.caller.rate(), Some(300));
@@ -1022,10 +865,7 @@ fn a_scope_can_see_what_the_modem_is_doing() {
     assert_eq!(p.caller.states(), 128);
     assert_eq!(p.caller.shape(), "128TCM");
     assert!(p.caller.carrier(), "connected with no carrier");
-    let point = p
-        .caller
-        .constellation_point()
-        .expect("no point once connected");
+    let point = p.caller.constellation_point().expect("no point once connected");
     let radius = point.0.hypot(point.1);
     // Thirty-two points on five rings, normalised by the constellation's own
     // A hundred and twenty-eight points on many rings, normalised by the
@@ -1056,11 +896,7 @@ fn a_three_hundred_baud_scope_gets_an_eye_and_not_a_constellation() {
     assert_eq!(p.caller.standard(), "Bell 103");
     assert_eq!(p.caller.shape(), "2FSK");
     assert_eq!(p.caller.states(), 2);
-    assert_eq!(
-        p.caller.constellation_point(),
-        None,
-        "FSK has no constellation"
-    );
+    assert_eq!(p.caller.constellation_point(), None, "FSK has no constellation");
     let level = p.caller.discriminator().expect("no discriminator");
     assert!(
         level > 0.5,
@@ -1108,10 +944,7 @@ fn every_modulation_goes_out_at_the_same_level() {
     let mut measured = Vec::new();
     for (carrier, seconds) in [("B103", 5.0), ("V22B", 10.0), ("V32", 14.0)] {
         let (rms, peak) = level_of(carrier, seconds);
-        println!(
-            "{carrier:>5}: rms {rms:.3}  peak {peak:.3}  crest {:.2}",
-            peak / rms
-        );
+        println!("{carrier:>5}: rms {rms:.3}  peak {peak:.3}  crest {:.2}", peak / rms);
         measured.push((carrier, rms, peak));
     }
     let quietest = measured.iter().map(|m| m.1).fold(f64::MAX, f64::min);
@@ -1283,14 +1116,8 @@ fn error_control_is_settled_in_v8_and_not_only_after_it() {
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(20.0);
-    assert!(
-        p.caller.error_control_negotiated(),
-        "the caller never asked in V.8"
-    );
-    assert!(
-        p.host.error_control_negotiated(),
-        "the host never answered in V.8"
-    );
+    assert!(p.caller.error_control_negotiated(), "the caller never asked in V.8");
+    assert!(p.host.error_control_negotiated(), "the host never answered in V.8");
     assert!(p.caller.error_controlled(), "and it never came up");
     assert!(p.host.error_controlled());
 }
@@ -1305,16 +1132,9 @@ fn a_modem_told_not_to_do_error_control_does_not_ask_for_it_in_v8() {
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(20.0);
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "the call should still connect"
-    );
+    assert_eq!(p.caller.state(), State::Data, "the call should still connect");
     assert!(!p.caller.error_control_negotiated());
-    assert!(
-        !p.host.error_control_negotiated(),
-        "there was nothing to answer"
-    );
+    assert!(!p.host.error_control_negotiated(), "there was nothing to answer");
 }
 
 #[test]
@@ -1357,11 +1177,7 @@ fn a_rate_ceiling_is_honoured_through_the_negotiation() {
     p.run(20.0);
 
     assert_eq!(p.caller.state(), State::Data, "never connected");
-    assert_eq!(
-        p.caller.standard(),
-        "V.22bis",
-        "went faster than it was allowed"
-    );
+    assert_eq!(p.caller.standard(), "V.22bis", "went faster than it was allowed");
     assert_eq!(p.caller.rate(), Some(1200));
     assert_eq!(p.host.rate(), Some(1200));
 }
@@ -1406,10 +1222,7 @@ fn the_reports_come_out_in_the_order_v250_gives_them() {
     let dr = saw.find("+DR: V44").expect("no compression report");
     let connect = saw.find("CONNECT").expect("never connected");
     assert!(er < dr, "+DR should follow +ER");
-    assert!(
-        dr < connect,
-        "CONNECT is the final result code and comes last"
-    );
+    assert!(dr < connect, "CONNECT is the final result code and comes last");
 }
 
 /// The far-end panel says what a call is compressing with.
@@ -1424,11 +1237,7 @@ fn the_reports_come_out_in_the_order_v250_gives_them() {
 #[test]
 fn the_panel_says_which_compression_the_call_is_running() {
     let row = |m: &Modem, name: &str| {
-        m.distant()
-            .into_iter()
-            .find(|(k, _)| *k == name)
-            .map(|(_, v)| v)
-            .unwrap_or_default()
+        m.distant().into_iter().find(|(k, _)| *k == name).map(|(_, v)| v).unwrap_or_default()
     };
 
     let mut p = Pair::new();
@@ -1440,10 +1249,7 @@ fn the_panel_says_which_compression_the_call_is_running() {
         let running = row(modem, "compression");
         assert!(running.starts_with("V.44, "), "{who}: {running:?}");
         let offered = row(modem, "compression offered");
-        assert!(
-            offered.contains("V.42bis") && offered.contains("V.44"),
-            "{who}: {offered:?}"
-        );
+        assert!(offered.contains("V.42bis") && offered.contains("V.44"), "{who}: {offered:?}");
     }
 
     let mut p = Pair::new();
@@ -1454,10 +1260,7 @@ fn the_panel_says_which_compression_the_call_is_running() {
     let running = row(&p.host, "compression");
     assert!(running.starts_with("V.42bis, "), "{running:?}");
     let offered = row(&p.host, "compression offered");
-    assert!(
-        offered.starts_with("V.42bis") && !offered.contains("V.44"),
-        "{offered:?}"
-    );
+    assert!(offered.starts_with("V.42bis") && !offered.contains("V.44"), "{offered:?}");
 }
 
 #[test]
@@ -1679,16 +1482,8 @@ fn report_loss_tolerance() {
         "\n  over {} at {} bit/s, error control {}, compression {}",
         sample.caller.standard(),
         sample.caller.rate().unwrap_or(0),
-        if sample.caller.error_controlled() {
-            "V.42"
-        } else {
-            "off"
-        },
-        if sample.caller.compressing() {
-            "V.42bis"
-        } else {
-            "off"
-        }
+        if sample.caller.error_controlled() { "V.42" } else { "off" },
+        if sample.caller.compressing() { "V.42bis" } else { "off" }
     );
     println!("\n  1 ms of line lost every  damaged  delivered");
     for ms in [2000.0, 1000.0, 500.0, 200.0, 100.0, 50.0, 20.0] {
@@ -1881,10 +1676,7 @@ fn why_there_is_no_error_control_survives_there_being_none() {
     p.run(25.0);
 
     assert_eq!(p.caller.state(), State::Data, "never connected");
-    assert!(
-        !p.caller.error_controlled(),
-        "the far end had it turned off"
-    );
+    assert!(!p.caller.error_controlled(), "the far end had it turned off");
 
     let distant = p.caller.distant();
     // The row itself is the point. Whether it says the far end declined, or
@@ -1928,11 +1720,7 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
     // was what was wrong, and the data pump's own tests now ask at many moments
     // (`a_retrain_comes_back_whenever_it_is_asked_for_and_whoever_asks`).
     p.run(14.0);
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "never connected to begin with"
-    );
+    assert_eq!(p.caller.state(), State::Data, "never connected to begin with");
     assert!(p.caller.compressing(), "compression never came up");
     let before = p.caller.retrains();
 
@@ -1970,6 +1758,7 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
         "nothing crossed after the retrain: {:?}",
         p.host_saw(),
     );
+    
 }
 
 #[test]
@@ -1990,7 +1779,8 @@ fn a_fax_call_carries_the_identification_it_was_given() {
         fax::frames::Message::new(fax::t30::Frame::Csi, false)
             .and_more()
             .with_fif(b"       909 863  0031"),
-        fax::frames::Message::new(fax::t30::Frame::Dis, false).with_fif(&[0x00, 0x6e, 0xf8, 0x00]),
+        fax::frames::Message::new(fax::t30::Frame::Dis, false)
+            .with_fif(&[0x00, 0x6e, 0xf8, 0x00]),
     ]);
     let mut far = datapump::v21::Sender::new(FS);
     far.set_transmitting(true);
@@ -2077,7 +1867,9 @@ fn one_modem_faxes_a_page_to_another_over_at_commands() {
         if arrived.is_none() {
             arrived = answerer.take_received_page().map(|(_, page)| page);
         }
-        let both_done = caller.fax_call().is_some_and(|c| c.phase().is_over())
+        let both_done = caller
+            .fax_call()
+            .is_some_and(|c| c.phase().is_over())
             && answerer.fax_call().is_some_and(|c| c.phase().is_over());
         if both_done && arrived.is_some() {
             break;
@@ -2127,11 +1919,7 @@ fn a_fax_that_answers_does_not_go_looking_for_v8() {
         answerer.fax_call().is_some(),
         "answering in fax class did not make a fax call"
     );
-    assert_ne!(
-        answerer.standard(),
-        "V.8",
-        "a fax call started a negotiation"
-    );
+    assert_ne!(answerer.standard(), "V.8", "a fax call started a negotiation");
 
     // A tone that holds one phase for two whole seconds correlates with
     // itself; one that turns over every 450 ms, as V.8 asks, does not. That
@@ -2217,9 +2005,7 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
         Pair::type_at(&mut answerer, "ATA");
 
         let faxed = fax_between(&mut caller, &mut answerer);
-        let got = faxed
-            .page
-            .unwrap_or_else(|| panic!("offering {offer:?}, no page arrived"));
+        let got = faxed.page.unwrap_or_else(|| panic!("offering {offer:?}, no page arrived"));
         assert_eq!(got.lines, page.lines, "offering {offer:?}");
         assert_eq!(faxed.rate, want, "offering {offer:?}");
     }
@@ -2232,11 +2018,9 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
     // takes both ends offering it, and the page arrives just the same. On
     // clause 5, that is: under V.34 error correction is not a choice (F.3),
     // so the V.34 box is unticked at the caller.
-    for (at_caller, at_answerer, want) in [
-        (true, true, true),
-        (false, true, false),
-        (true, false, false),
-    ] {
+    for (at_caller, at_answerer, want) in
+        [(true, true, true), (false, true, false), (true, false, false)]
+    {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
         caller.fax_pages = vec![page.clone()];
@@ -2251,9 +2035,7 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
 
         let faxed = fax_between(&mut caller, &mut answerer);
         let case = format!("caller {at_caller}, answerer {at_answerer}");
-        let got = faxed
-            .page
-            .unwrap_or_else(|| panic!("{case}: no page arrived"));
+        let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
         assert_eq!(got.lines, page.lines, "{case}");
         assert_eq!(faxed.error_correction, want, "{case}");
     }
@@ -2283,9 +2065,7 @@ fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
 
         let faxed = fax_between(&mut caller, &mut answerer);
         let case = format!("caller {at_caller}, answerer {at_answerer}");
-        let got = faxed
-            .page
-            .unwrap_or_else(|| panic!("{case}: no page arrived"));
+        let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
         assert_eq!(got.lines, page.lines, "{case}");
         assert!(faxed.error_correction, "{case}");
         assert_eq!(faxed.coding, want, "{case}");
@@ -2330,30 +2110,9 @@ fn v8_bis_chooses_the_mode_and_v8_follows_it() {
             .map(|n| n.split(" (").next().unwrap().to_owned())
             .collect()
     };
-    assert_eq!(
-        bis(&host),
-        [
-            "sent CRe",
-            "heard CRd",
-            "sent CL",
-            "heard MS",
-            "sent ACK(1)"
-        ]
-    );
-    assert_eq!(
-        bis(&caller),
-        [
-            "heard CRe",
-            "sent CRd",
-            "heard CL",
-            "sent MS",
-            "heard ACK(1)"
-        ]
-    );
-    assert_eq!(
-        (p.caller.state(), p.host.state()),
-        (State::Data, State::Data)
-    );
+    assert_eq!(bis(&host), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
+    assert_eq!(bis(&caller), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data));
     assert_eq!(p.caller.standard(), "V.34");
     assert!(p.caller.error_controlled() && p.host.error_controlled());
 }
@@ -2369,15 +2128,8 @@ fn a_caller_with_v8_bis_still_reaches_an_answerer_without_it() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(12.0);
     let (caller, _) = line_notes(&mut p);
-    assert_eq!(
-        (p.caller.state(), p.host.state()),
-        (State::Data, State::Data),
-        "{caller:?}"
-    );
-    assert!(
-        caller.iter().any(|n| n.contains("no V.8 bis")),
-        "{caller:?}"
-    );
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{caller:?}");
+    assert!(caller.iter().any(|n| n.contains("no V.8 bis")), "{caller:?}");
 }
 
 #[test]
@@ -2392,21 +2144,9 @@ fn an_answerer_with_v8_bis_still_takes_a_caller_without_it() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(26.0);
     let (_, host) = line_notes(&mut p);
-    assert_eq!(
-        (p.caller.state(), p.host.state()),
-        (State::Data, State::Data),
-        "{host:?}"
-    );
-    assert!(
-        host.iter()
-            .any(|n| n.contains("nothing at the far end answered")),
-        "{host:?}"
-    );
-    assert_eq!(
-        host.iter().filter(|n| n.ends_with("sent CRe")).count(),
-        3,
-        "{host:?}"
-    );
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{host:?}");
+    assert!(host.iter().any(|n| n.contains("nothing at the far end answered")), "{host:?}");
+    assert_eq!(host.iter().filter(|n| n.ends_with("sent CRe")).count(), 3, "{host:?}");
 }
 
 #[test]
@@ -2414,19 +2154,11 @@ fn the_v8_bis_switch_reads_back_and_refuses_what_it_cannot_do() {
     let mut p = Pair::new();
     Pair::type_at(&mut p.caller, "AT+A8E?");
     p.run(0.01);
-    assert!(
-        p.caller_saw().contains("+A8E: 1,1,0,0"),
-        "{:?}",
-        p.caller_saw()
-    );
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,0"), "{:?}", p.caller_saw());
     Pair::type_at(&mut p.caller, "AT+A8E=,,,1");
     Pair::type_at(&mut p.caller, "AT+A8E?");
     p.run(0.01);
-    assert!(
-        p.caller_saw().contains("+A8E: 1,1,0,1"),
-        "{:?}",
-        p.caller_saw()
-    );
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,1"), "{:?}", p.caller_saw());
     // V.8 originating under the DTE's control is not something this does.
     p.at_caller.clear();
     Pair::type_at(&mut p.caller, "AT+A8E=6,,,1");

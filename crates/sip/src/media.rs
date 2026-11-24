@@ -58,7 +58,7 @@
 
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -83,9 +83,7 @@ pub const LINEAR_RATE: f64 = 16_000.0;
 /// signal twice; see [`Media::connect_linear`].
 fn encode_linear(levels: &[f32], channels: usize, out: &mut Vec<u8>) {
     for &level in levels {
-        let sample = (f64::from(level) * 32768.0)
-            .round()
-            .clamp(-32768.0, 32767.0) as i16;
+        let sample = (f64::from(level) * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         for _ in 0..channels.max(1) {
             out.extend_from_slice(&sample.to_be_bytes());
         }
@@ -414,7 +412,10 @@ impl Media {
         socket
             .set_read_timeout(Some(Duration::from_millis(20)))
             .map_err(|e| format!("could not set a read timeout: {e}"))?;
-        let local_port = socket.local_addr().map_err(|e| e.to_string())?.port();
+        let local_port = socket
+            .local_addr()
+            .map_err(|e| e.to_string())?
+            .port();
 
         let shared = Arc::new(Shared {
             remote: Mutex::new(None),
@@ -515,26 +516,12 @@ impl Media {
     /// softphone that has these codings, so at 44.1 and 48 kHz it is more
     /// octets than an Ethernet frame holds and the network sends it in
     /// pieces.
-    pub fn connect_linear(
-        &self,
-        remote: SocketAddr,
-        payload_type: u8,
-        ptime_ms: u32,
-        rate: u32,
-        channels: u8,
-    ) {
+    pub fn connect_linear(&self, remote: SocketAddr, payload_type: u8, ptime_ms: u32, rate: u32, channels: u8) {
         let channels = channels.clamp(1, 2);
         let rate = rate.max(8000);
         let samples = ((f64::from(rate) * f64::from(ptime_ms) / 1000.0).round() as u64).max(80);
-        let was = (
-            self.shared
-                .linear_rate
-                .swap(u64::from(rate), Ordering::Relaxed),
-            self.linear(),
-        );
-        self.shared
-            .linear_channels
-            .store(channels, Ordering::Relaxed);
+        let was = (self.shared.linear_rate.swap(u64::from(rate), Ordering::Relaxed), self.linear());
+        self.shared.linear_channels.store(channels, Ordering::Relaxed);
         if was != (u64::from(rate), true)
             && let Ok(mut conversion) = self.conversion.lock()
         {
@@ -543,12 +530,7 @@ impl Media {
             conversion.linear_down = Resampler::new(modem_rate, f64::from(rate));
             conversion.same_rate = (modem_rate - f64::from(rate)).abs() < 0.5;
         }
-        self.connect_as(
-            remote,
-            payload_type,
-            samples * 2 * u64::from(channels),
-            true,
-        );
+        self.connect_as(remote, payload_type, samples * 2 * u64::from(channels), true);
     }
 
     /// Whether the call is linear rather than G.711.
@@ -567,6 +549,7 @@ impl Media {
     }
 
     fn connect_as(&self, remote: SocketAddr, payload_type: u8, octets: u64, linear: bool) {
+
         let same_place = self
             .shared
             .dialled
@@ -682,25 +665,10 @@ impl Media {
         let conversion = &mut *conversion;
         conversion.codewords.clear();
         let quiet = if linear { 0 } else { law.encode(0) };
-        let frame = if linear {
-            2 * self.linear_channels()
-        } else {
-            1
-        };
-        let octet_rate = if linear {
-            frame as f64 * self.linear_rate()
-        } else {
-            NETWORK_RATE
-        };
+        let frame = if linear { 2 * self.linear_channels() } else { 1 };
+        let octet_rate = if linear { frame as f64 * self.linear_rate() } else { NETWORK_RATE };
         if let Ok(mut jitter) = self.shared.incoming.lock() {
-            self.play(
-                &mut jitter,
-                &mut conversion.playout,
-                &mut conversion.codewords,
-                quiet,
-                frame,
-                octet_rate,
-            );
+            self.play(&mut jitter, &mut conversion.playout, &mut conversion.codewords, quiet, frame, octet_rate);
         }
         if conversion.codewords.is_empty() {
             return;
@@ -716,15 +684,11 @@ impl Media {
                 for four in conversion.codewords.as_chunks::<4>().0 {
                     let left = i32::from(i16::from_be_bytes([four[0], four[1]]));
                     let right = i32::from(i16::from_be_bytes([four[2], four[3]]));
-                    conversion
-                        .at_network_rate
-                        .push(((left + right) as f32 / 2.0) / 32768.0);
+                    conversion.at_network_rate.push(((left + right) as f32 / 2.0) / 32768.0);
                 }
             } else {
                 for pair in conversion.codewords.as_chunks::<2>().0 {
-                    conversion
-                        .at_network_rate
-                        .push(f32::from(i16::from_be_bytes(*pair)) / 32768.0);
+                    conversion.at_network_rate.push(f32::from(i16::from_be_bytes(*pair)) / 32768.0);
                 }
             }
         } else {
@@ -737,11 +701,7 @@ impl Media {
             into.extend_from_slice(&conversion.at_network_rate);
             return;
         }
-        let up = if linear {
-            &mut conversion.linear_up
-        } else {
-            &mut conversion.up
-        };
+        let up = if linear { &mut conversion.linear_up } else { &mut conversion.up };
         for &sample in conversion.at_network_rate.iter() {
             conversion.scratch.clear();
             up.process(f64::from(sample), &mut conversion.scratch);
@@ -750,15 +710,7 @@ impl Media {
     }
 
     /// Move the play-out clock on to now and hand over what it says is due.
-    fn play(
-        &self,
-        jitter: &mut Jitter,
-        playout: &mut Playout,
-        out: &mut Vec<u8>,
-        quiet: u8,
-        frame: usize,
-        octet_rate: f64,
-    ) {
+    fn play(&self, jitter: &mut Jitter, playout: &mut Playout, out: &mut Vec<u8>, quiet: u8, frame: usize, octet_rate: f64) {
         let now = Instant::now();
         let Some(last) = playout.last else {
             if jitter.ready() {
@@ -774,9 +726,7 @@ impl Media {
         let most_behind = MOST_BEHIND * octet_rate;
         if playout.due > most_behind {
             let skipped = playout.due - most_behind;
-            self.shared
-                .fell_behind
-                .fetch_add(skipped as u64, Ordering::Relaxed);
+            self.shared.fell_behind.fetch_add(skipped as u64, Ordering::Relaxed);
             playout.due = most_behind;
         }
 
@@ -791,16 +741,10 @@ impl Media {
         let k = (dt / DEPTH_SMOOTHING).min(1.0);
         playout.depth += (jitter.queued() as f64 - playout.depth) * k;
         let target = (self.shared.jitter_target as f64 + 0.5) * packet;
-        playout.ppm = ((playout.depth - target) / packet.max(1.0) * SLEW_PPM_PER_PACKET)
-            .clamp(-MAX_SLEW_PPM, MAX_SLEW_PPM);
-        self.shared
-            .clock_ppm
-            .store(playout.ppm.to_bits(), Ordering::Relaxed);
+        playout.ppm = ((playout.depth - target) / packet.max(1.0) * SLEW_PPM_PER_PACKET).clamp(-MAX_SLEW_PPM, MAX_SLEW_PPM);
+        self.shared.clock_ppm.store(playout.ppm.to_bits(), Ordering::Relaxed);
 
-        let least = ((LEAST_HANDED * octet_rate) as usize)
-            .max(1)
-            .div_ceil(frame)
-            * frame;
+        let least = ((LEAST_HANDED * octet_rate) as usize).max(1).div_ceil(frame) * frame;
         let most = ((MOST_HANDED * octet_rate) as usize / frame).max(1) * frame;
         let take = (playout.due as usize / frame * frame).min(most);
         if take < least {
@@ -825,11 +769,7 @@ impl Media {
         if linear && conversion.same_rate {
             conversion.at_network_rate.extend_from_slice(samples);
         } else {
-            let down = if linear {
-                &mut conversion.linear_down
-            } else {
-                &mut conversion.down
-            };
+            let down = if linear { &mut conversion.linear_down } else { &mut conversion.down };
             for &sample in samples {
                 conversion.scratch.clear();
                 down.process(f64::from(sample), &mut conversion.scratch);
@@ -840,11 +780,7 @@ impl Media {
         }
         conversion.codewords.clear();
         if linear {
-            encode_linear(
-                &conversion.at_network_rate,
-                self.linear_channels(),
-                &mut conversion.codewords,
-            );
+            encode_linear(&conversion.at_network_rate, self.linear_channels(), &mut conversion.codewords);
         } else {
             g711::encode_into(law, &conversion.at_network_rate, &mut conversion.codewords);
         }
@@ -897,9 +833,7 @@ impl Media {
                 // by a whole number of cycles (see the dry tick in `pace`).
                 let gone = packet.min(queue.len());
                 queue.drain(..gone);
-                self.shared
-                    .dropped_out
-                    .fetch_add(gone as u64, Ordering::Relaxed);
+                self.shared.dropped_out.fetch_add(gone as u64, Ordering::Relaxed);
             }
             queue.push_back(code);
         }
@@ -925,11 +859,7 @@ impl Media {
                 .lock()
                 .ok()
                 .and_then(|r| r.map(|a| a.to_string())),
-            law: Some(if self.linear() {
-                "L16"
-            } else {
-                self.law().encoding_name()
-            }),
+            law: Some(if self.linear() { "L16" } else { self.law().encoding_name() }),
             packets_sent: self.shared.packets_sent.load(Ordering::Relaxed),
             packets_received: self.shared.packets_received.load(Ordering::Relaxed),
             ignored: self.shared.ignored.load(Ordering::Relaxed),
@@ -1033,17 +963,11 @@ fn read(shared: Arc<Shared>, socket: UdpSocket) {
         let follow = match shared.source.lock() {
             Ok(mut slot) => match *slot {
                 None => {
-                    *slot = Some(Source {
-                        address: from,
-                        ssrc: packet.ssrc,
-                        sequence: packet.sequence,
-                    });
+                    *slot = Some(Source { address: from, ssrc: packet.ssrc, sequence: packet.sequence });
                     true
                 }
                 Some(ref mut source) if source.address == from => {
-                    if source.ssrc != packet.ssrc
-                        || packet.sequence.wrapping_sub(source.sequence) < 0x8000
-                    {
+                    if source.ssrc != packet.ssrc || packet.sequence.wrapping_sub(source.sequence) < 0x8000 {
                         source.sequence = packet.sequence;
                     }
                     source.ssrc = packet.ssrc;
@@ -1142,19 +1066,10 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
         let payload_type = shared.payload_type.load(Ordering::Relaxed);
         // Silence in the law in force, so the far end hears a quiet line
         // rather than a click.
-        let quiet = if linear {
-            0
-        } else {
-            Law::from_payload_type(payload_type)
-                .unwrap_or(Law::Mu)
-                .encode(0)
-        };
+        let quiet = if linear { 0 } else { Law::from_payload_type(payload_type).unwrap_or(Law::Mu).encode(0) };
         // A stream is one coding from its first packet to its last, so a
         // call that has changed coding starts another.
-        if stream
-            .as_ref()
-            .is_some_and(|s| s.payload_type() != payload_type & 0x7f)
-        {
+        if stream.as_ref().is_some_and(|s| s.payload_type() != payload_type & 0x7f) {
             stream = None;
             first = true;
         }
@@ -1187,9 +1102,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
                 // The modem has stopped. What part of a packet it left goes
                 // out padded, and silence after it every packet time.
                 payload.extend(queue.drain(..));
-                shared
-                    .inserted
-                    .fetch_add((octets - payload.len()) as u64, Ordering::Relaxed);
+                shared.inserted.fetch_add((octets - payload.len()) as u64, Ordering::Relaxed);
                 payload.resize(octets, quiet);
                 dry = true;
                 silence = Some(true);
@@ -1214,11 +1127,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
         }
 
         let sender = stream.get_or_insert_with(|| rtp::Stream::new(payload_type));
-        let samples = if linear {
-            payload.len() / frame
-        } else {
-            payload.len()
-        };
+        let samples = if linear { payload.len() / frame } else { payload.len() };
         sender.next_of(&payload, first, samples as u32, &mut datagram);
         first = false;
         last_sent = now;
@@ -1295,11 +1204,7 @@ mod tests {
         let mut ones = vec![0xFFu8; 12];
         rob(&mut ones, 0, parse_robbed("0,3:0").unwrap());
         assert_eq!(ones.iter().filter(|o| **o == 0xFE).count(), 4);
-        assert!(
-            parse_robbed("6").is_none()
-                && parse_robbed("").is_none()
-                && parse_robbed("1:2").is_none()
-        );
+        assert!(parse_robbed("6").is_none() && parse_robbed("").is_none() && parse_robbed("1:2").is_none());
     }
 
     /// Opening binds a port and hands it back, which is what the SDP offer
@@ -1327,10 +1232,7 @@ mod tests {
         let to = |m: &Media| SocketAddr::from(([127, 0, 0, 1], m.local_port()));
         near.connect_linear(to(&far), 96, 20, rate, channels);
         far.connect_linear(to(&near), 96, 20, rate, channels);
-        assert_eq!(
-            (far.linear_rate(), far.linear_channels()),
-            (f64::from(rate), usize::from(channels))
-        );
+        assert_eq!((far.linear_rate(), far.linear_channels()), (f64::from(rate), usize::from(channels)));
         let packet = rate as usize / 50;
         assert!(near.linear() && far.linear());
         assert_eq!(far.stats().law, Some("L16"));
@@ -1341,20 +1243,15 @@ mod tests {
         // been dry for `DRY_BEFORE_FLUSH` ticks, which is right for a modem
         // that has stalled and not what this is testing.
         let whole = 131_072u32.div_ceil(packet as u32) * packet as u32;
-        let sent: Vec<i16> = (0..whole)
-            .map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16)
-            .collect();
+        let sent: Vec<i16> = (0..whole).map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16).collect();
         let levels: Vec<f32> = sent.iter().map(|&v| f32::from(v) / 32768.0).collect();
         let mut got: Vec<i16> = Vec::new();
         let (mut modem, mut network) = (Vec::new(), Vec::new());
         let started = Instant::now();
         let mut offered = 0;
-        while got.len() < sent.len() + rate as usize && started.elapsed() < Duration::from_secs(30)
-        {
+        while got.len() < sent.len() + rate as usize && started.elapsed() < Duration::from_secs(30) {
             // A packet's worth at a time, at the pace a call would go.
-            if offered < levels.len()
-                && offered as f64 <= started.elapsed().as_secs_f64() * f64::from(rate)
-            {
+            if offered < levels.len() && offered as f64 <= started.elapsed().as_secs_f64() * f64::from(rate) {
                 let end = (offered + packet).min(levels.len());
                 near.transmit_exact(&levels[offered..end]);
                 offered = end;
@@ -1366,30 +1263,15 @@ mod tests {
             assert_eq!(modem, network);
             got.extend(network.iter().map(|l| (l * 32768.0) as i16));
             thread::sleep(Duration::from_millis(2));
-            if offered == levels.len()
-                && got.len() >= sent.len()
-                && got.ends_with(&vec![0; 2 * packet])
-            {
+            if offered == levels.len() && got.len() >= sent.len() && got.ends_with(&vec![0; 2 * packet]) {
                 break;
             }
         }
         // Silence before the first sample and after the last, and between
         // them exactly what was sent.
-        let first = got
-            .iter()
-            .position(|&v| v == sent[1])
-            .expect("the stream arrived")
-            - 1;
-        assert!(
-            got.len() >= first + sent.len(),
-            "{rate}/{channels}: {} of {} samples",
-            got.len() - first,
-            sent.len()
-        );
-        assert!(
-            got[first..first + sent.len()] == sent[..],
-            "{rate}/{channels}"
-        );
+        let first = got.iter().position(|&v| v == sent[1]).expect("the stream arrived") - 1;
+        assert!(got.len() >= first + sent.len(), "{rate}/{channels}: {} of {} samples", got.len() - first, sent.len());
+        assert!(got[first..first + sent.len()] == sent[..], "{rate}/{channels}");
         assert_eq!(far.stats().jitter.lost, 0);
     }
 
@@ -1496,12 +1378,7 @@ mod tests {
         let media = Media::open(0, NETWORK_RATE).unwrap();
         let ours = SocketAddr::from(([127, 0, 0, 1], media.local_port()));
         // Told an address nothing is listening on.
-        media.connect(
-            SocketAddr::from(([127, 0, 0, 1], 9)),
-            Law::Mu,
-            g711::PCMU,
-            20,
-        );
+        media.connect(SocketAddr::from(([127, 0, 0, 1], 9)), Law::Mu, g711::PCMU, 20);
 
         let packet = rtp::Packet {
             payload_type: g711::PCMU,
@@ -1537,13 +1414,7 @@ mod tests {
     }
 
     /// One packet from the far end, of whatever type it likes.
-    fn send_rtp(
-        far: &UdpSocket,
-        to: SocketAddr,
-        sequence: u16,
-        payload_type: u8,
-        payload: Vec<u8>,
-    ) {
+    fn send_rtp(far: &UdpSocket, to: SocketAddr, sequence: u16, payload_type: u8, payload: Vec<u8>) {
         let packet = rtp::Packet {
             payload_type,
             marker: sequence == 0,
@@ -1554,8 +1425,7 @@ mod tests {
         };
         let mut datagram = Vec::new();
         packet.write(&mut datagram);
-        far.send_to(&datagram, to)
-            .expect("the far end could not send");
+        far.send_to(&datagram, to).expect("the far end could not send");
     }
 
     /// A dialled digit arrives as RFC 4733 events, and not one octet of it
@@ -1593,14 +1463,8 @@ mod tests {
         assert!(!out.is_empty(), "no audio came through at all");
 
         let stats = media.stats();
-        assert_eq!(
-            stats.off_codec, 1,
-            "the event packet was decoded as audio: {stats:?}"
-        );
-        assert_eq!(
-            stats.packets_received, 8,
-            "the event was counted as audio: {stats:?}"
-        );
+        assert_eq!(stats.off_codec, 1, "the event packet was decoded as audio: {stats:?}");
+        assert_eq!(stats.packets_received, 8, "the event was counted as audio: {stats:?}");
         // The 20 ms it stood in for is a gap like any other, so the timeline
         // keeps its length -- and the silence is a whole packet long rather
         // than the four octets the event happened to carry.
@@ -1632,14 +1496,8 @@ mod tests {
         media.connect(far_address, Law::Mu, g711::PCMU, 20);
 
         let stats = media.stats();
-        assert_eq!(
-            stats.jitter.abandoned, 0,
-            "the buffer was thrown away: {stats:?}"
-        );
-        assert_eq!(
-            stats.flushed_out, 0,
-            "the outgoing queue was thrown away: {stats:?}"
-        );
+        assert_eq!(stats.jitter.abandoned, 0, "the buffer was thrown away: {stats:?}");
+        assert_eq!(stats.flushed_out, 0, "the outgoing queue was thrown away: {stats:?}");
         assert_eq!(media.shared.incoming.lock().unwrap().depth(), depth);
     }
 
@@ -1660,14 +1518,8 @@ mod tests {
         media.connect(far_address, Law::Mu, g711::PCMU, 40);
 
         let stats = media.stats();
-        assert!(
-            stats.jitter.abandoned >= 320,
-            "the buffer went quietly: {stats:?}"
-        );
-        assert!(
-            stats.flushed_out >= 1000,
-            "the queue went quietly: {stats:?}"
-        );
+        assert!(stats.jitter.abandoned >= 320, "the buffer went quietly: {stats:?}");
+        assert!(stats.flushed_out >= 1000, "the queue went quietly: {stats:?}");
     }
 
     /// Before the modem has said anything, silence goes out on the packet
@@ -1681,10 +1533,7 @@ mod tests {
         media.disconnect();
         thread::sleep(Duration::from_millis(30));
         let stats = media.stats();
-        assert!(
-            (8..=12).contains(&stats.packets_sent),
-            "not one packet every 20 ms: {stats:?}"
-        );
+        assert!((8..=12).contains(&stats.packets_sent), "not one packet every 20 ms: {stats:?}");
         assert_eq!(stats.underruns, stats.packets_sent, "{stats:?}");
         assert_eq!(stats.underruns_mid_call, 0, "{stats:?}");
         assert_eq!(stats.inserted, 0, "{stats:?}");
@@ -1697,8 +1546,7 @@ mod tests {
     #[test]
     fn a_part_packet_waits_for_the_rest_and_nothing_is_spliced_between() {
         let far = UdpSocket::bind("127.0.0.1:0").expect("a far end socket");
-        far.set_read_timeout(Some(Duration::from_millis(300)))
-            .unwrap();
+        far.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let media = Media::open(0, NETWORK_RATE).expect("a media path");
         media.connect(far.local_addr().unwrap(), Law::Mu, g711::PCMU, 20);
 
@@ -1724,25 +1572,12 @@ mod tests {
             out[0]
         };
         let (a, b) = (code(first), code(second));
-        let start = stream
-            .iter()
-            .position(|&o| o == a)
-            .expect("the first part never went out");
+        let start = stream.iter().position(|&o| o == a).expect("the first part never went out");
         assert_eq!(start % 160, 0, "the first part did not start a packet");
-        assert!(
-            stream[start..start + 100].iter().all(|&o| o == a),
-            "the first part was cut up"
-        );
-        assert!(
-            stream[start + 100..start + 160].iter().all(|&o| o == b),
-            "silence was spliced between the two parts"
-        );
+        assert!(stream[start..start + 100].iter().all(|&o| o == a), "the first part was cut up");
+        assert!(stream[start + 100..start + 160].iter().all(|&o| o == b), "silence was spliced between the two parts");
         let stats = media.stats();
-        assert_eq!(
-            (stats.inserted, stats.underruns_mid_call),
-            (0, 0),
-            "{stats:?}"
-        );
+        assert_eq!((stats.inserted, stats.underruns_mid_call), (0, 0), "{stats:?}");
     }
 
     /// A modem that really has stopped -- a hold, the end of a call -- gets
@@ -1809,8 +1644,7 @@ mod tests {
     #[test]
     fn inbound_jitter_loss_and_stalls_never_reach_what_the_modem_sends() {
         let far = UdpSocket::bind("127.0.0.1:0").expect("a far end socket");
-        far.set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
+        far.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
         let media = Media::open_with_jitter(0, NETWORK_RATE, TEST_JITTER).expect("a media path");
         let ours = SocketAddr::from(([127, 0, 0, 1], media.local_port()));
         media.connect(far.local_addr().unwrap(), Law::Mu, g711::PCMU, 20);
@@ -1863,51 +1697,26 @@ mod tests {
         let stats = media.stats();
 
         // The inbound side really was impaired, and the modem heard it.
-        assert!(
-            stats.jitter.starved > 0 && stats.jitter.late > 0,
-            "no stall reached the modem: {stats:?}"
-        );
-        assert!(
-            stats.jitter.lost >= 3,
-            "the loss bursts were not concealed: {stats:?}"
-        );
+        assert!(stats.jitter.starved > 0 && stats.jitter.late > 0, "no stall reached the modem: {stats:?}");
+        assert!(stats.jitter.lost >= 3, "the loss bursts were not concealed: {stats:?}");
         // The modem was stepped on our clock throughout, stalls and all.
         let elapsed = start.elapsed().as_secs_f64();
-        assert!(
-            said.len() as f64 > (elapsed - 0.5) * NETWORK_RATE,
-            "the modem was not stepped through the stalls: {} samples in {elapsed:.2} s",
-            said.len()
-        );
+        assert!(said.len() as f64 > (elapsed - 0.5) * NETWORK_RATE, "the modem was not stepped through the stalls: {} samples in {elapsed:.2} s", said.len());
 
         // Every packet arrived, in order, with continuous numbering and
         // timestamps.
         let base = sent.first().expect("nothing reached the far end").sequence;
         sent.sort_by_key(|p| p.sequence.wrapping_sub(base));
         for pair in sent.windows(2) {
-            assert_eq!(
-                pair[1].sequence,
-                pair[0].sequence.wrapping_add(1),
-                "a packet is missing"
-            );
+            assert_eq!(pair[1].sequence, pair[0].sequence.wrapping_add(1), "a packet is missing");
             assert_eq!(pair[1].timestamp.wrapping_sub(pair[0].timestamp), 160);
         }
-        let stream: Vec<u8> = sent
-            .iter()
-            .flat_map(|p| p.payload.iter().copied())
-            .collect();
+        let stream: Vec<u8> = sent.iter().flat_map(|p| p.payload.iter().copied()).collect();
         let quiet = Law::Mu.encode(0);
-        let first = stream
-            .iter()
-            .position(|&o| o != quiet)
-            .expect("the modem never reached the far end");
+        let first = stream.iter().position(|&o| o != quiet).expect("the modem never reached the far end");
         assert_eq!(first % 160, 0, "the modem's audio did not start a packet");
         let carried = &stream[first..];
-        assert!(
-            carried.len() + 2 * 160 >= said.len(),
-            "{} of {} octets the modem said went out",
-            carried.len(),
-            said.len()
-        );
+        assert!(carried.len() + 2 * 160 >= said.len(), "{} of {} octets the modem said went out", carried.len(), said.len());
         let n = carried.len().min(said.len());
         if let Some(at) = (0..n).find(|&i| carried[i] != said[i]) {
             panic!(
@@ -1916,11 +1725,7 @@ mod tests {
                 carried[at..].iter().take_while(|&&o| o == quiet).count()
             );
         }
-        assert_eq!(
-            (stats.underruns_mid_call, stats.inserted, stats.dropped_out),
-            (0, 0, 0),
-            "{stats:?}"
-        );
+        assert_eq!((stats.underruns_mid_call, stats.inserted, stats.dropped_out), (0, 0, 0), "{stats:?}");
     }
 
     /// The tail of a call is counted on the way out rather than going
@@ -1932,10 +1737,7 @@ mod tests {
         media.transmit(&[0.5; 1600]);
         media.disconnect();
         let stats = media.stats();
-        assert!(
-            stats.flushed_out >= 1000,
-            "the tail of the call went quietly: {stats:?}"
-        );
+        assert!(stats.flushed_out >= 1000, "the tail of the call went quietly: {stats:?}");
     }
 
     /// One packet with a chosen SSRC, from a chosen socket.
@@ -1955,9 +1757,7 @@ mod tests {
 
     /// Whether a packet of what the modem says reaches `socket`.
     fn hears(media: &Media, socket: &UdpSocket) -> bool {
-        socket
-            .set_read_timeout(Some(Duration::from_millis(300)))
-            .unwrap();
+        socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut heard = vec![0u8; 2048];
         // Drain what was already on its way before the question was asked.
         for _ in 0..3 {
@@ -1987,22 +1787,10 @@ mod tests {
 
         let stats = media.stats();
         assert_eq!(stats.strangers, 2, "{stats:?}");
-        assert_eq!(
-            stats.latched, 0,
-            "the call was followed to a stranger: {stats:?}"
-        );
-        assert_eq!(
-            stats.packets_received, 3,
-            "a stranger's audio went to the modem: {stats:?}"
-        );
-        assert!(
-            !hears(&media, &stranger),
-            "the modem's audio went to the stranger"
-        );
-        assert!(
-            hears(&media, &far),
-            "the modem's audio stopped going to the far end"
-        );
+        assert_eq!(stats.latched, 0, "the call was followed to a stranger: {stats:?}");
+        assert_eq!(stats.packets_received, 3, "a stranger's audio went to the modem: {stats:?}");
+        assert!(!hears(&media, &stranger), "the modem's audio went to the stranger");
+        assert!(hears(&media, &far), "the modem's audio stopped going to the far end");
     }
 
     /// And the call's own stream moving -- a router behind the far end
@@ -2026,10 +1814,7 @@ mod tests {
         assert_eq!(stats.latched, 1, "{stats:?}");
         assert_eq!(stats.strangers, 0, "{stats:?}");
         assert_eq!(stats.packets_received, 6, "{stats:?}");
-        assert!(
-            hears(&media, &moved),
-            "the modem's audio did not follow the stream"
-        );
+        assert!(hears(&media, &moved), "the modem's audio did not follow the stream");
     }
 
     /// A new call learns its stream afresh, whoever the last one's was.
@@ -2045,10 +1830,7 @@ mod tests {
         send_from(&next, ours, 2, 500);
         thread::sleep(Duration::from_millis(40));
         let stats = media.stats();
-        assert_eq!(
-            stats.strangers, 0,
-            "the new call's stream was taken for a stranger: {stats:?}"
-        );
+        assert_eq!(stats.strangers, 0, "the new call's stream was taken for a stranger: {stats:?}");
         assert!(hears(&media, &next));
     }
 }

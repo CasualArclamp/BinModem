@@ -184,13 +184,10 @@ impl Line {
             trained: false,
         };
         let up = &mut self.up;
-        let out = self
-            .tx
-            .next_sample_stepped(clock, || up.pop_front().unwrap_or((0.0, 0.0)));
+        let out = self.tx.next_sample_stepped(clock, || up.pop_front().unwrap_or((0.0, 0.0)));
         if self.tx.refused() > self.refused {
             self.refused = self.tx.refused();
-            self.notes
-                .push("V.92 upstream: a third step of the transmitter was refused".into());
+            self.notes.push("V.92 upstream: a third step of the transmitter was refused".into());
         }
         out
     }
@@ -232,10 +229,7 @@ impl Line {
         // earlier and is a transition the digital modem's refit is not
         // looking for.
         let delays = self.modem.delays();
-        let step: f64 = delays[self.applied.min(delays.len())..]
-            .iter()
-            .map(|d| epsilon::step_direction() * d)
-            .sum();
+        let step: f64 = delays[self.applied.min(delays.len())..].iter().map(|d| epsilon::step_direction() * d).sum();
         self.applied = delays.len();
         self.up.push_back((out, step));
     }
@@ -256,8 +250,7 @@ impl Line {
             before += b * b;
             both += a * b;
         }
-        let found =
-            now / window as f64 > AUDIBLE && both / (now * before).sqrt().max(1e-30) > ALIKE;
+        let found = now / window as f64 > AUDIBLE && both / (now * before).sqrt().max(1e-30) > ALIKE;
         self.alike = if found { self.alike + 1 } else { 0 };
         if self.alike >= SURE {
             let energies = self.phase_energies(per);
@@ -268,9 +261,7 @@ impl Line {
             }
             let phase = self.sd_phase(per);
             self.phase = Some(phase);
-            self.notes.push(format!(
-                "V.92: Sd found; the downstream is read on sample {phase} of every {per}"
-            ));
+            self.notes.push(format!("V.92: Sd found; the downstream is read on sample {phase} of every {per}"));
         }
     }
 
@@ -323,13 +314,7 @@ impl Line {
             }
             let norm = (total * SD.iter().map(|x| x * x).sum::<f64>()).sqrt();
             let score = (0..SD_PERIOD)
-                .map(|turn| {
-                    (0..SD_PERIOD)
-                        .map(|k| sums[k] * SD[(k + turn) % SD_PERIOD])
-                        .sum::<f64>()
-                        .abs()
-                        / norm
-                })
+                .map(|turn| (0..SD_PERIOD).map(|k| sums[k] * SD[(k + turn) % SD_PERIOD]).sum::<f64>().abs() / norm)
                 .fold(0.0, f64::max);
             if score > best.0 {
                 best = (score, phase);
@@ -397,11 +382,7 @@ mod tests {
     }
 
     fn settings() -> Settings {
-        Settings::new(
-            Descriptor::none(),
-            0x7ffff,
-            super::super::analogue::readable_cpt(),
-        )
+        Settings::new(Descriptor::none(), 0x7ffff, super::super::analogue::readable_cpt())
     }
 
     /// The two ends at `fs`, `down` and `up` line samples apart each way, run
@@ -434,21 +415,11 @@ mod tests {
                 done = true;
                 break;
             }
-            if matches!(
-                line.modem().status(),
-                AStatus::Failed(_) | AStatus::Retrain(_)
-            ) {
+            if matches!(line.modem().status(), AStatus::Failed(_) | AStatus::Retrain(_)) {
                 break;
             }
         }
-        said.push_str(&format!(
-            "analogue {:?}, digital {:?}, shifts {} refused {} delays {:?}",
-            line.modem().status(),
-            server.modem.status(),
-            line.tx.shifts(),
-            line.tx.refused(),
-            line.modem().delays()
-        ));
+        said.push_str(&format!("analogue {:?}, digital {:?}, shifts {} refused {} delays {:?}", line.modem().status(), server.modem.status(), line.tx.shifts(), line.tx.refused(), line.modem().delays()));
         (done, line, said)
     }
 
@@ -482,9 +453,7 @@ mod tests {
                     line.step(x);
                 }
             }
-            let phase = line
-                .phase()
-                .unwrap_or_else(|| panic!("lead {lead} shift {shift}: no Sd"));
+            let phase = line.phase().unwrap_or_else(|| panic!("lead {lead} shift {shift}: no Sd"));
             // The codewords' phase is the one whose samples, inside Sd, are
             // only ever W, nought or -W.
             let on_codewords = |p: usize| {
@@ -494,10 +463,7 @@ mod tests {
                     .filter(|(i, _)| (heard.len() - 200 + i) % 2 == p)
                     .all(|(_, &x)| [W, 0.0, -W].iter().any(|&v| (x - v).abs() < 1e-3))
             };
-            assert!(
-                on_codewords(phase),
-                "lead {lead} shift {shift}: phase {phase} is not where the codewords are"
-            );
+            assert!(on_codewords(phase), "lead {lead} shift {shift}: phase {phase} is not where the codewords are");
         }
     }
 
@@ -517,10 +483,7 @@ mod tests {
             }
         }
         if let Some((down, up, said)) = failed.first() {
-            panic!(
-                "{} of 36 failed; the first, {down}/{up}:\n{said}",
-                failed.len()
-            );
+            panic!("{} of 36 failed; the first, {down}/{up}:\n{said}", failed.len());
         }
     }
 }

@@ -65,11 +65,7 @@ impl Default for Framer {
 
 impl Framer {
     pub fn new() -> Self {
-        Self {
-            accm: DEFAULT_ACCM,
-            acfc: false,
-            pfc: false,
-        }
+        Self { accm: DEFAULT_ACCM, acfc: false, pfc: false }
     }
 
     /// The map the peer asked this end to send with.
@@ -89,7 +85,9 @@ impl Framer {
     /// two the minimum any sender must escape, and a frame that put a literal
     /// flag in its data would end where it did not mean to.
     fn must_escape(&self, byte: u8) -> bool {
-        byte == FLAG || byte == ESCAPE || (byte < 0x20 && self.accm & (1 << byte) != 0)
+        byte == FLAG
+            || byte == ESCAPE
+            || (byte < 0x20 && self.accm & (1 << byte) != 0)
     }
 
     fn put(&self, byte: u8, out: &mut Vec<u8>) {
@@ -276,10 +274,7 @@ impl Deframer {
             self.short += 1;
             return Err(Discarded::TooShort);
         };
-        Ok(Some(Packet {
-            protocol,
-            payload: rest.to_vec(),
-        }))
+        Ok(Some(Packet { protocol, payload: rest.to_vec() }))
     }
 }
 
@@ -302,10 +297,7 @@ mod tests {
 
     #[test]
     fn a_packet_survives_the_wire() {
-        let packet = Packet {
-            protocol: 0xc021,
-            payload: b"hello".to_vec(),
-        };
+        let packet = Packet { protocol: 0xc021, payload: b"hello".to_vec() };
         let got = round_trip(&packet, &Framer::new(), &mut Deframer::new());
         assert_eq!(got, packet);
     }
@@ -317,10 +309,7 @@ mod tests {
         let mut wire = Vec::new();
         // Wrapped in a packet, so the payload is what is being looked at.
         framer.frame(
-            &Packet {
-                protocol: 0x0021,
-                payload: vec![0x7e, 0x7d, 0x03, 0x11, 0x13],
-            },
+            &Packet { protocol: 0x0021, payload: vec![0x7e, 0x7d, 0x03, 0x11, 0x13] },
             &mut wire,
         );
         for pair in [
@@ -351,10 +340,7 @@ mod tests {
     #[test]
     fn all_two_hundred_and_fifty_six_survive() {
         let payload: Vec<u8> = (0..=255).collect();
-        let packet = Packet {
-            protocol: 0x0021,
-            payload,
-        };
+        let packet = Packet { protocol: 0x0021, payload };
         let got = round_trip(&packet, &Framer::new(), &mut Deframer::new());
         assert_eq!(got.payload.len(), 256);
         assert!(got.payload.iter().copied().eq(0..=255));
@@ -371,10 +357,7 @@ mod tests {
         let mut deframer = Deframer::new();
         deframer.set_accm(0);
         let payload: Vec<u8> = (0..=255).collect();
-        let packet = Packet {
-            protocol: 0x0021,
-            payload: payload.clone(),
-        };
+        let packet = Packet { protocol: 0x0021, payload: payload.clone() };
         let got = round_trip(&packet, &framer, &mut deframer);
         assert_eq!(got.payload, payload);
 
@@ -382,10 +365,7 @@ mod tests {
         framer.frame(&packet, &mut wire);
         // Only the two, so the frame is barely longer than the packet.
         let escapes = wire.iter().filter(|&&b| b == ESCAPE).count();
-        assert_eq!(
-            escapes, 2,
-            "an empty map escaped more than the flag and the escape"
-        );
+        assert_eq!(escapes, 2, "an empty map escaped more than the flag and the escape");
     }
 
     /// What a modem watching for XON would otherwise eat.
@@ -395,18 +375,9 @@ mod tests {
         // Only XON and XOFF, which is the map a terminal server asks for.
         framer.set_accm((1 << 0x11) | (1 << 0x13));
         let mut wire = Vec::new();
-        framer.frame(
-            &Packet {
-                protocol: 0x0021,
-                payload: vec![0x11, 0x05],
-            },
-            &mut wire,
-        );
+        framer.frame(&Packet { protocol: 0x0021, payload: vec![0x11, 0x05] }, &mut wire);
         assert!(wire.windows(2).any(|w| w == [ESCAPE, 0x11 ^ ESCAPE_XOR]));
-        assert!(
-            wire.contains(&0x05),
-            "0x05 was escaped and the map did not ask for it"
-        );
+        assert!(wire.contains(&0x05), "0x05 was escaped and the map did not ask for it");
     }
 
     /// And what such a thing inserting one looks like from this end.
@@ -414,10 +385,7 @@ mod tests {
     fn a_control_character_the_line_inserted_is_dropped() {
         let framer = Framer::new();
         let mut deframer = Deframer::new();
-        let packet = Packet {
-            protocol: 0xc021,
-            payload: b"abc".to_vec(),
-        };
+        let packet = Packet { protocol: 0xc021, payload: b"abc".to_vec() };
         let mut wire = Vec::new();
         framer.frame(&packet, &mut wire);
         // Something in the middle helpfully sends flow control.
@@ -434,11 +402,7 @@ mod tests {
                 got = Some(p);
             }
         }
-        assert_eq!(
-            got.as_ref(),
-            Some(&packet),
-            "the inserted octet was not removed"
-        );
+        assert_eq!(got.as_ref(), Some(&packet), "the inserted octet was not removed");
     }
 
     #[test]
@@ -446,13 +410,7 @@ mod tests {
         let framer = Framer::new();
         let mut deframer = Deframer::new();
         let mut wire = Vec::new();
-        framer.frame(
-            &Packet {
-                protocol: 0xc021,
-                payload: b"hello".to_vec(),
-            },
-            &mut wire,
-        );
+        framer.frame(&Packet { protocol: 0xc021, payload: b"hello".to_vec() }, &mut wire);
         let middle = wire.len() / 2;
         wire[middle] ^= 0x40;
         let mut outcome = Ok(None);
@@ -473,10 +431,7 @@ mod tests {
         for _ in 0..8 {
             assert_eq!(deframer.feed(FLAG), Ok(None));
         }
-        assert_eq!(
-            (deframer.short, deframer.bad_fcs, deframer.aborted),
-            (0, 0, 0)
-        );
+        assert_eq!((deframer.short, deframer.bad_fcs, deframer.aborted), (0, 0, 0));
     }
 
     /// 4.3: an escape with the closing flag behind it.
@@ -497,10 +452,7 @@ mod tests {
     fn a_frame_without_its_address_and_control_is_still_read() {
         let mut framer = Framer::new();
         framer.set_compression(true, true);
-        let packet = Packet {
-            protocol: 0x0021,
-            payload: b"ip".to_vec(),
-        };
+        let packet = Packet { protocol: 0x0021, payload: b"ip".to_vec() };
         let mut wire = Vec::new();
         framer.frame(&packet, &mut wire);
         // Flag, one protocol octet, two of payload, two of FCS, flag.
@@ -517,10 +469,7 @@ mod tests {
             assert_eq!(deframer.feed(*b), Ok(None));
         }
         let framer = Framer::new();
-        let packet = Packet {
-            protocol: 0xc021,
-            payload: b"x".to_vec(),
-        };
+        let packet = Packet { protocol: 0xc021, payload: b"x".to_vec() };
         let mut wire = Vec::new();
         framer.frame(&packet, &mut wire);
         let mut got = None;
@@ -530,9 +479,6 @@ mod tests {
             }
         }
         assert_eq!(got, Some(packet));
-        assert_eq!(
-            deframer.bad_fcs, 0,
-            "the noise was counted as a broken frame"
-        );
+        assert_eq!(deframer.bad_fcs, 0, "the noise was counted as a broken frame");
     }
 }

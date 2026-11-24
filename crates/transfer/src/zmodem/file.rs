@@ -76,17 +76,9 @@ impl FileInfo {
             .next()
             .and_then(|f| u64::from_str_radix(f, 8).ok())
             .filter(|t| *t != 0);
-        let mode = fields
-            .next()
-            .and_then(|f| u32::from_str_radix(f, 8).ok())
-            .unwrap_or(0);
+        let mode = fields.next().and_then(|f| u32::from_str_radix(f, 8).ok()).unwrap_or(0);
 
-        Some(Self {
-            name,
-            length,
-            modified,
-            mode,
-        })
+        Some(Self { name, length, modified, mode })
     }
 
     /// The name with anything that could escape a directory taken out.
@@ -119,19 +111,9 @@ impl FileInfo {
         }
         let name: String = last
             .chars()
-            .map(|c| {
-                if c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') {
-                    '_'
-                } else {
-                    c
-                }
-            })
+            .map(|c| if c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') { '_' } else { c })
             .collect();
-        if is_device(&name) {
-            format!("_{name}")
-        } else {
-            name
-        }
+        if is_device(&name) { format!("_{name}") } else { name }
     }
 }
 
@@ -141,24 +123,15 @@ impl FileInfo {
 /// `NUL.txt` is the null device as much as `NUL` is. Trailing spaces go too,
 /// so `CON .log` is still the console.
 fn is_device(name: &str) -> bool {
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim_end()
-        .to_ascii_uppercase();
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
     match stem.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
         _ => {
             let digit = |s: &str| {
                 let mut c = s.chars();
-                matches!(
-                    (c.next(), c.next()),
-                    (Some('0'..='9' | '¹' | '²' | '³'), None)
-                )
+                matches!((c.next(), c.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
             };
-            stem.strip_prefix("COM").is_some_and(digit)
-                || stem.strip_prefix("LPT").is_some_and(digit)
+            stem.strip_prefix("COM").is_some_and(digit) || stem.strip_prefix("LPT").is_some_and(digit)
         }
     }
 }
@@ -182,11 +155,7 @@ mod tests {
     fn the_name_is_terminated_and_the_rest_is_one_string() {
         // 8.2, and clause 13: name, NUL, then the fields separated by single
         // spaces, then another NUL.
-        let f = FileInfo {
-            name: "a.zip".into(),
-            length: Some(10),
-            ..FileInfo::default()
-        };
+        let f = FileInfo { name: "a.zip".into(), length: Some(10), ..FileInfo::default() };
         let body = f.encode();
         assert_eq!(&body[..5], b"a.zip");
         assert_eq!(body[5], 0);
@@ -213,10 +182,7 @@ mod tests {
         // Clause 13: "the file length and each of the succeeding fields are
         // optional". Real senders stop at different points.
         assert_eq!(FileInfo::parse(b"name\x00").unwrap().name, "name");
-        assert_eq!(
-            FileInfo::parse(b"name\x00512\x00").unwrap().length,
-            Some(512)
-        );
+        assert_eq!(FileInfo::parse(b"name\x00512\x00").unwrap().length, Some(512));
         let f = FileInfo::parse(b"name\x00512 1234\x00").unwrap();
         assert_eq!(f.modified, Some(0o1234));
         assert_eq!(f.mode, 0);
@@ -226,10 +192,7 @@ mod tests {
     fn a_date_of_zero_means_nobody_knows() {
         // Clause 13: "a date of 0 implies the modification date is unknown and
         // should be left as the date the file is received".
-        assert_eq!(
-            FileInfo::parse(b"name\x00512 0 0\x00").unwrap().modified,
-            None
-        );
+        assert_eq!(FileInfo::parse(b"name\x00512 0 0\x00").unwrap().modified, None);
     }
 
     #[test]
@@ -250,24 +213,14 @@ mod tests {
             "C:/Windows/System32/config/SAM",
             "....//....//boot.ini",
         ] {
-            let f = FileInfo {
-                name: hostile.into(),
-                ..FileInfo::default()
-            };
+            let f = FileInfo { name: hostile.into(), ..FileInfo::default() };
             let safe = f.safe_name();
-            assert!(
-                !safe.contains('/') && !safe.contains('\\'),
-                "{hostile} -> {safe}"
-            );
+            assert!(!safe.contains('/') && !safe.contains('\\'), "{hostile} -> {safe}");
             assert!(!safe.starts_with('.'), "{hostile} -> {safe}");
             assert!(!safe.is_empty());
         }
         assert_eq!(
-            FileInfo {
-                name: "sub/dir/FILE.ZIP".into(),
-                ..FileInfo::default()
-            }
-            .safe_name(),
+            FileInfo { name: "sub/dir/FILE.ZIP".into(), ..FileInfo::default() }.safe_name(),
             "FILE.ZIP"
         );
     }
@@ -295,18 +248,12 @@ mod tests {
             ("CON .log", "_CON .log"),
             ("COM¹", "_COM¹"),
         ] {
-            let f = FileInfo {
-                name: hostile.into(),
-                ..FileInfo::default()
-            };
+            let f = FileInfo { name: hostile.into(), ..FileInfo::default() };
             assert_eq!(f.safe_name(), safe, "{hostile}");
         }
         // Names that only look like devices are files.
         for fine in ["COM10", "CONSOLE.TXT", "NULL", "COMMAND.COM", "LPT", "ACON"] {
-            let f = FileInfo {
-                name: fine.into(),
-                ..FileInfo::default()
-            };
+            let f = FileInfo { name: fine.into(), ..FileInfo::default() };
             assert_eq!(f.safe_name(), fine);
         }
     }
@@ -314,10 +261,7 @@ mod tests {
     #[test]
     fn a_name_that_is_nothing_usable_still_gets_written_somewhere() {
         for empty in ["...", "/", "   ", "\u{7}"] {
-            let f = FileInfo {
-                name: empty.into(),
-                ..FileInfo::default()
-            };
+            let f = FileInfo { name: empty.into(), ..FileInfo::default() };
             assert_eq!(f.safe_name(), "received", "{empty:?}");
         }
     }
@@ -327,10 +271,7 @@ mod tests {
         // Clause 13: "subdir/foo is acceptable, subdir\foo is not". This
         // machine's own separator is the wrong one, and a name carrying it
         // would arrive as a file with a backslash in its name.
-        let f = FileInfo {
-            name: r"sub\dir\FILE.ZIP".into(),
-            ..FileInfo::default()
-        };
+        let f = FileInfo { name: r"sub\dir\FILE.ZIP".into(), ..FileInfo::default() };
         let body = f.encode();
         assert!(!body.contains(&b'\\'));
         assert_eq!(FileInfo::parse(&body).unwrap().name, "sub/dir/FILE.ZIP");

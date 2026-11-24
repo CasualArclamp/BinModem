@@ -56,18 +56,12 @@ pub enum HeaderError {
 impl Header {
     /// A header carrying flags, most significant first (Figure 1).
     pub fn flags(kind: Kind, f3: u8, f2: u8, f1: u8, f0: u8) -> Self {
-        Self {
-            kind,
-            data: [f3, f2, f1, f0],
-        }
+        Self { kind, data: [f3, f2, f1, f0] }
     }
 
     /// A header carrying a file position, least significant first (Figure 1).
     pub fn position(kind: Kind, at: u32) -> Self {
-        Self {
-            kind,
-            data: at.to_le_bytes(),
-        }
+        Self { kind, data: at.to_le_bytes() }
     }
 
     /// Read the four bytes as a file position.
@@ -87,13 +81,8 @@ impl Header {
 
     /// Put the header on the line.
     pub fn encode(self, style: Style) -> Vec<u8> {
-        let body = [
-            self.kind.to_byte(),
-            self.data[0],
-            self.data[1],
-            self.data[2],
-            self.data[3],
-        ];
+        let body =
+            [self.kind.to_byte(), self.data[0], self.data[1], self.data[2], self.data[3]];
         match style {
             Style::Hex => self.encode_hex(&body),
             Style::Binary16 => {
@@ -170,9 +159,7 @@ fn unescape_at(bytes: &[u8], at: usize) -> Result<(u8, usize), HeaderError> {
         return Ok((b, 1));
     }
     let next = *bytes.get(at + 1).ok_or(HeaderError::Incomplete)?;
-    escape::decode(next)
-        .map(|d| (d, 2))
-        .ok_or(HeaderError::Malformed)
+    escape::decode(next).map(|d| (d, 2)).ok_or(HeaderError::Malformed)
 }
 
 /// Read a header from the start of `bytes`.
@@ -243,14 +230,7 @@ fn decode_binary(
         return Err(HeaderError::BadCrc);
     }
     let kind = Kind::from_byte(body[0]).ok_or(HeaderError::UnknownKind(body[0]))?;
-    Ok((
-        Header {
-            kind,
-            data: [body[1], body[2], body[3], body[4]],
-        },
-        style,
-        at,
-    ))
+    Ok((Header { kind, data: [body[1], body[2], body[3], body[4]] }, style, at))
 }
 
 fn decode_hex(bytes: &[u8], mut at: usize) -> Result<(Header, Style, usize), HeaderError> {
@@ -284,14 +264,7 @@ fn decode_hex(bytes: &[u8], mut at: usize) -> Result<(Header, Style, usize), Hea
         }
     }
     let kind = Kind::from_byte(raw[0]).ok_or(HeaderError::UnknownKind(raw[0]))?;
-    Ok((
-        Header {
-            kind,
-            data: [raw[1], raw[2], raw[3], raw[4]],
-        },
-        Style::Hex,
-        at,
-    ))
+    Ok((Header { kind, data: [raw[1], raw[2], raw[3], raw[4]] }, Style::Hex, at))
 }
 
 /// Where a header starts in `bytes`, if one does.
@@ -338,9 +311,7 @@ mod tests {
         assert_eq!(&out[out.len() - 3..], b"\r\n\x11");
         let digits = &out[4..18];
         assert!(
-            digits
-                .iter()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)),
+            digits.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)),
             "upper case hex false triggers XMODEM programs"
         );
     }

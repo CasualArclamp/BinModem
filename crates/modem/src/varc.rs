@@ -21,13 +21,13 @@
 //! not exact after all it carries on as the multicarrier mode at the
 //! call's 16 kHz, which wants only that the path be clean.
 
-use datapump::v90::ucode::{self, Law};
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
-use varc::exact;
 use varc::hello::{Agreed, Caps, Faster, Half, Hello, Slower, Twice, Wanted, Watch};
-use varc::link::{Receiver, Report, Sender};
+use datapump::v90::ucode::{self, Law};
+use varc::exact;
 use varc::octets;
+use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
 use varc::station::Station;
 
@@ -120,13 +120,7 @@ enum Turn {
     /// end starting. `heard` is how loud the far end was when it started,
     /// once it has; `gone` how long the line has been quiet; `left` what
     /// remains of the far end's turn as this end counts it.
-    Theirs {
-        armed: bool,
-        waited: f64,
-        heard: Option<f64>,
-        gone: f64,
-        left: f64,
-    },
+    Theirs { armed: bool, waited: f64, heard: Option<f64>, gone: f64, left: f64 },
     /// Both ends sending: the call itself.
     Both,
 }
@@ -227,10 +221,7 @@ pub(crate) struct Call {
 
 impl std::fmt::Debug for Call {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Call")
-            .field("mode", &self.mode)
-            .field("fs", &self.fs)
-            .finish_non_exhaustive()
+        f.debug_struct("Call").field("mode", &self.mode).field("fs", &self.fs).finish_non_exhaustive()
     }
 }
 
@@ -319,22 +310,12 @@ impl Call {
     /// receiving, and the octets before and after each way.
     pub fn compression(&self) -> Option<((u8, u8), [u64; 4])> {
         let squeeze = &self.station.as_ref()?.arq.squeeze;
-        Some((
-            squeeze.methods(),
-            [
-                squeeze.plain_out,
-                squeeze.coded_out,
-                squeeze.plain_in,
-                squeeze.coded_in,
-            ],
-        ))
+        Some((squeeze.methods(), [squeeze.plain_out, squeeze.coded_out, squeeze.plain_in, squeeze.coded_in]))
     }
 
     /// Whether the far end's compressed stream stopped making sense.
     pub fn compression_broke(&self) -> bool {
-        self.station
-            .as_ref()
-            .is_some_and(|s| s.arq.squeeze.broken())
+        self.station.as_ref().is_some_and(|s| s.arq.squeeze.broken())
     }
 
     /// Whether the call has found it cannot be a V.ARC call at all.
@@ -370,24 +351,16 @@ impl Call {
     /// line that is a cable one way and a loudspeaker and a microphone the
     /// other runs at full speed one way and a quarter of it the other.
     fn slow_down(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<(), String> {
-        let Some(agreed) = self.agreed.clone() else {
-            return Ok(());
-        };
+        let Some(agreed) = self.agreed.clone() else { return Ok(()) };
         let calling = self.calling;
-        let watch = self
-            .watch
-            .get_or_insert_with(|| Watch::new(calling, fs, fs_out, input.len()));
+        let watch = self.watch.get_or_insert_with(|| Watch::new(calling, fs, fs_out, input.len()));
         if let Some(asked) = watch.hear(input) {
             let asked = asked.min(self.slowest());
             if asked != self.sends_slowed {
                 self.sends_slowed = asked;
                 for c in 0..input.len() as u8 {
                     let tx = self.sender(&agreed, c, asked)?;
-                    if let Some(channel) = self
-                        .station
-                        .as_mut()
-                        .and_then(|s| s.channels.get_mut(usize::from(c)))
-                    {
+                    if let Some(channel) = self.station.as_mut().and_then(|s| s.channels.get_mut(usize::from(c))) {
                         channel.send_with(tx);
                     }
                 }
@@ -397,19 +370,13 @@ impl Call {
                 ));
             }
         }
-        let Some(station) = self.station.as_ref() else {
-            return Ok(());
-        };
+        let Some(station) = self.station.as_ref() else { return Ok(()) };
         // Heard means read: codewords arriving that the code could mend.
         // Not found, since a receiver can find a signal through a room and
         // read none of it; and not a figure in decibels, since with a code
         // that is mostly checks 8 dB is a line and with the lightest it is
         // not. Four words since this receiver began is a line.
-        let read: u64 = station
-            .channels
-            .iter()
-            .map(|c| c.tally.words - c.tally.failed)
-            .sum();
+        let read: u64 = station.channels.iter().map(|c| c.tally.words - c.tally.failed).sum();
         if read >= self.read_before + 4 {
             self.heard_once = true;
             self.unheard = 0.0;
@@ -426,11 +393,7 @@ impl Call {
                 self.read_before = read;
                 for c in 0..input.len() as u8 {
                     let rx = self.receiver(&agreed, c, slowed)?;
-                    if let Some(channel) = self
-                        .station
-                        .as_mut()
-                        .and_then(|s| s.channels.get_mut(usize::from(c)))
-                    {
+                    if let Some(channel) = self.station.as_mut().and_then(|s| s.channels.get_mut(usize::from(c))) {
                         channel.listen_with(rx);
                     }
                 }
@@ -466,10 +429,7 @@ impl Call {
         let signal = (10.0 * self.floor).max(1e-8);
         let settle = |echo: &mut Vec<Canceller>| -> Option<f64> {
             // Only what was learned well is kept from being unlearned.
-            let down = echo
-                .iter()
-                .map(Canceller::down_db)
-                .fold(f64::INFINITY, f64::min);
+            let down = echo.iter().map(Canceller::down_db).fold(f64::INFINITY, f64::min);
             let found = echo.iter().all(|c| c.delay().is_some());
             (found && down >= 20.0).then(|| {
                 echo.iter_mut().for_each(Canceller::settle);
@@ -485,97 +445,46 @@ impl Call {
                         self.muted = false;
                         Turn::Mine { left: ALONE * fs }
                     } else {
-                        Turn::Theirs {
-                            armed: true,
-                            waited: 0.0,
-                            heard: None,
-                            gone: 0.0,
-                            left: 0.0,
-                        }
+                        Turn::Theirs { armed: true, waited: 0.0, heard: None, gone: 0.0, left: 0.0 }
                     }
                 } else {
-                    Turn::Quiet {
-                        waited: waited + 1.0,
-                        still,
-                    }
+                    Turn::Quiet { waited: waited + 1.0, still }
                 }
             }
             Turn::Mine { left } if left > 0.0 => Turn::Mine { left: left - 1.0 },
             Turn::Mine { .. } => {
                 if let Some(down) = settle(&mut self.echo) {
-                    self.notes.push(format!(
-                        "V.ARC: this end's echo learned with the line to itself: {down:.0} dB down"
-                    ));
+                    self.notes.push(format!("V.ARC: this end's echo learned with the line to itself: {down:.0} dB down"));
                 }
                 if self.calling {
                     // The answerer's turn now, once this end's own echo
                     // has died away.
                     self.muted = true;
-                    Turn::Theirs {
-                        armed: false,
-                        waited: 0.0,
-                        heard: None,
-                        gone: 0.0,
-                        left: 0.0,
-                    }
+                    Turn::Theirs { armed: false, waited: 0.0, heard: None, gone: 0.0, left: 0.0 }
                 } else {
                     // The answerer goes straight on; the caller joins it.
                     Turn::Both
                 }
             }
-            Turn::Theirs {
-                armed: false,
-                waited,
-                gone,
-                ..
-            } => {
+            Turn::Theirs { armed: false, waited, gone, .. } => {
                 // Ten milliseconds of quiet, or half a second in any case:
                 // no echo this canceller can deal with is longer.
                 let gone = if self.loud < signal { gone + 1.0 } else { 0.0 };
                 let armed = gone > 0.01 * fs || waited > 0.5 * fs;
-                Turn::Theirs {
-                    armed,
-                    waited: if armed { 0.0 } else { waited + 1.0 },
-                    heard: None,
-                    gone: if armed { 0.0 } else { gone },
-                    left: 0.0,
-                }
+                Turn::Theirs { armed, waited: if armed { 0.0 } else { waited + 1.0 }, heard: None, gone: if armed { 0.0 } else { gone }, left: 0.0 }
             }
-            Turn::Theirs {
-                armed: true,
-                waited,
-                heard: None,
-                ..
-            } => {
+            Turn::Theirs { armed: true, waited, heard: None, .. } => {
                 if self.loud > signal {
-                    Turn::Theirs {
-                        armed: true,
-                        waited: 0.0,
-                        heard: Some(self.loud),
-                        gone: 0.0,
-                        left: ALONE * fs,
-                    }
+                    Turn::Theirs { armed: true, waited: 0.0, heard: Some(self.loud), gone: 0.0, left: ALONE * fs }
                 } else if waited > 4.0 * fs {
                     // Nobody took a turn. On with it.
                     self.muted = false;
                     Turn::Both
                 } else {
-                    Turn::Theirs {
-                        armed: true,
-                        waited: waited + 1.0,
-                        heard: None,
-                        gone: 0.0,
-                        left: 0.0,
-                    }
+                    Turn::Theirs { armed: true, waited: waited + 1.0, heard: None, gone: 0.0, left: 0.0 }
                 }
             }
-            Turn::Theirs {
-                armed: true,
-                waited,
-                heard: Some(level),
-                gone,
-                left,
-            } => {
+            Turn::Theirs { armed: true, waited, heard: Some(level), gone, left } => {
                 if self.calling {
                     // The caller cannot hear the answerer stop, since it
                     // does not: it counts the answerer's turn from when it
@@ -584,35 +493,19 @@ impl Call {
                         self.muted = false;
                         Turn::Both
                     } else {
-                        Turn::Theirs {
-                            armed: true,
-                            waited,
-                            heard: Some(level),
-                            gone,
-                            left: left - 1.0,
-                        }
+                        Turn::Theirs { armed: true, waited, heard: Some(level), gone, left: left - 1.0 }
                     }
                 } else {
                     // The answerer waits for the caller to fall silent:
                     // a hundredth of the loudest it has been, or back to
                     // what the empty line sounded like.
                     let level = level.max(self.loud);
-                    let gone = if self.loud < (0.01 * level).max(signal) {
-                        gone + 1.0
-                    } else {
-                        0.0
-                    };
+                    let gone = if self.loud < (0.01 * level).max(signal) { gone + 1.0 } else { 0.0 };
                     if gone > 0.1 * fs || waited > (ALONE + 2.0) * fs {
                         self.muted = false;
                         Turn::Mine { left: ALONE * fs }
                     } else {
-                        Turn::Theirs {
-                            armed: true,
-                            waited: waited + 1.0,
-                            heard: Some(level),
-                            gone,
-                            left,
-                        }
+                        Turn::Theirs { armed: true, waited: waited + 1.0, heard: Some(level), gone, left }
                     }
                 }
             }
@@ -674,35 +567,20 @@ impl Call {
             VarcMode::Linear => Box::new(exact::Tx::new(fs)),
             VarcMode::G711 => Box::new(octets::Tx::new(fs, &self.codewords().0)),
             VarcMode::Dmt => {
-                let tx: Box<dyn Sender> =
-                    Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour)));
-                if agreed.send_times * slow > 1 {
-                    Box::new(Faster::slowed(tx, agreed.send_times * slow, slow))
-                } else {
-                    tx
-                }
+                let tx: Box<dyn Sender> = Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour)));
+                if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx }
             }
             VarcMode::Qam => {
                 let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
-                Box::new(Faster::paced(
-                    tx,
-                    agreed.send_times * slow,
-                    fs / BUILT_FOR / slow as f64,
-                ))
+                Box::new(Faster::paced(tx, agreed.send_times * slow, fs / BUILT_FOR / slow as f64))
             }
             VarcMode::Pcm if slowed == 0 => {
-                let tx = Box::new(Twice::new(Box::new(sc::Tx::new(
-                    self.shape().coloured(colour),
-                ))));
+                let tx = Box::new(Twice::new(Box::new(sc::Tx::new(self.shape().coloured(colour)))));
                 Box::new(Faster::paced(tx, agreed.send_times, fs / BUILT_FOR))
             }
             VarcMode::Pcm => {
                 let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
-                Box::new(Faster::paced(
-                    tx,
-                    agreed.send_times * slow / 2,
-                    2.0 * fs / BUILT_FOR / slow as f64,
-                ))
+                Box::new(Faster::paced(tx, agreed.send_times * slow / 2, 2.0 * fs / BUILT_FOR / slow as f64))
             }
         })
     }
@@ -718,35 +596,20 @@ impl Call {
                 Box::new(octets::Rx::new(fs, &levels, quiet))
             }
             VarcMode::Dmt => {
-                let rx: Box<dyn Receiver> =
-                    Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour)));
-                if agreed.hear_times * slow > 1 {
-                    Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow))
-                } else {
-                    rx
-                }
+                let rx: Box<dyn Receiver> = Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour)));
+                if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx }
             }
             VarcMode::Qam => {
                 let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
-                Box::new(Slower::paced(
-                    rx,
-                    agreed.hear_times * slow,
-                    fs / BUILT_FOR / slow as f64,
-                ))
+                Box::new(Slower::paced(rx, agreed.hear_times * slow, fs / BUILT_FOR / slow as f64))
             }
             VarcMode::Pcm if slowed == 0 => {
-                let rx = Box::new(Half::new(Box::new(sc::Rx::new(
-                    self.shape().coloured(colour),
-                ))));
+                let rx = Box::new(Half::new(Box::new(sc::Rx::new(self.shape().coloured(colour)))));
                 Box::new(Slower::paced(rx, agreed.hear_times, fs / BUILT_FOR))
             }
             VarcMode::Pcm => {
                 let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
-                Box::new(Slower::paced(
-                    rx,
-                    agreed.hear_times * slow / 2,
-                    2.0 * fs / BUILT_FOR / slow as f64,
-                ))
+                Box::new(Slower::paced(rx, agreed.hear_times * slow / 2, 2.0 * fs / BUILT_FOR / slow as f64))
             }
         };
         // What somebody chose, where they chose.
@@ -755,21 +618,13 @@ impl Call {
     }
 
     fn shape(&self) -> Shape {
-        let shape = if self.mode == VarcMode::Qam {
-            Shape::qam(BUILT_FOR)
-        } else {
-            Shape::pcm(BUILT_FOR)
-        };
+        let shape = if self.mode == VarcMode::Qam { Shape::qam(BUILT_FOR) } else { Shape::pcm(BUILT_FOR) };
         shape.expect("the rate the single-carrier modes are built for")
     }
 
     /// The most a direction of this call is slowed.
     fn slowest(&self) -> u8 {
-        if self.mode == VarcMode::Pcm {
-            SLOWEST + 1
-        } else {
-            SLOWEST
-        }
+        if self.mode == VarcMode::Pcm { SLOWEST + 1 } else { SLOWEST }
     }
 
     /// The baud a single-carrier direction runs at on a line of `hz`,
@@ -820,10 +675,7 @@ impl Call {
         }
         let mut pairs: Vec<(Box<dyn Sender>, Box<dyn Receiver>)> = Vec::new();
         for c in 0..channels as u8 {
-            pairs.push((
-                self.sender(agreed, c, self.sends_slowed)?,
-                self.receiver(agreed, c, self.hears_slowed)?,
-            ));
+            pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
         let mut station = Station::new(fs, pairs);
         station.level_is_fixed(matches!(self.mode, VarcMode::Linear | VarcMode::G711));
@@ -870,10 +722,7 @@ impl Call {
     /// call's first sample.
     pub fn ask_for(&mut self, baud: u32, code: u8, bits: u8) {
         self.asks_baud = baud;
-        self.asks = (
-            (bits > 0).then_some(bits),
-            (code > 0).then(|| f64::from(code) / 100.0),
-        );
+        self.asks = ((bits > 0).then_some(bits), (code > 0).then(|| f64::from(code) / 100.0));
     }
 
     /// The baud each direction of a single-carrier call is running at: what
@@ -934,8 +783,7 @@ impl Call {
         // First, each end says what it is, and the two work out what they
         // will do. Until that is done there is no modulation to run.
         if self.station.is_none() && self.agreed.is_none() && self.greets() {
-            let (calling, wanted, two_wire, asks_baud) =
-                (self.calling, self.wanted(), self.two_wire, self.asks_baud);
+            let (calling, wanted, two_wire, asks_baud) = (self.calling, self.wanted(), self.two_wire, self.asks_baud);
             let hello = self.hello.get_or_insert_with(|| {
                 Hello::new(
                     calling,
@@ -951,11 +799,7 @@ impl Call {
                 )
             });
             hello.hear(input);
-            if self
-                .samples
-                .is_multiple_of((fs / (8.0 * varc::hello::BAUD)).max(1.0) as u64)
-                && self.symbols.len() < 4096
-            {
+            if self.samples.is_multiple_of((fs / (8.0 * varc::hello::BAUD)).max(1.0) as u64) && self.symbols.len() < 4096 {
                 self.symbols.push(hello.eye());
             }
             // How loud the line is while the two ends are talking, to know
@@ -964,15 +808,11 @@ impl Call {
             self.spoke += (power - self.spoke) / (0.05 * fs);
             self.samples += 1;
             if !hello.done() {
-                return Ok(self
-                    .samples
-                    .is_multiple_of((fs / LOOKS_A_SECOND).max(1.0) as u64));
+                return Ok(self.samples.is_multiple_of((fs / LOOKS_A_SECOND).max(1.0) as u64));
             }
             let theirs = hello.theirs().copied();
             self.far = theirs;
-            let agreed = hello
-                .agreed()
-                .unwrap_or_else(|| Err("the far end said nothing".to_owned()))?;
+            let agreed = hello.agreed().unwrap_or_else(|| Err("the far end said nothing".to_owned()))?;
             self.hello = None;
             let mut said = Vec::new();
             if let Some(theirs) = theirs {
@@ -986,11 +826,7 @@ impl Call {
             }
             said.push(format!(
                 "V.ARC: agreed on {}, {:.0} Hz out and {:.0} Hz back",
-                if agreed.two_wire {
-                    "one pair of wires"
-                } else {
-                    "a wire each way"
-                },
+                if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
                 agreed.send_hz,
                 agreed.hear_hz
             ));
@@ -1029,23 +865,12 @@ impl Call {
             self.until_look = 0;
             // The canceller lays what was sent against what was heard,
             // sample for sample, at the card's own rate.
-            self.echo = if agreed.two_wire {
-                (0..input.len()).map(|_| Canceller::new(fs)).collect()
-            } else {
-                Vec::new()
-            };
+            self.echo = if agreed.two_wire { (0..input.len()).map(|_| Canceller::new(fs)).collect() } else { Vec::new() };
             // On one pair of wires each end first has the line to itself.
             // Only where there was a handshake: without one there is no far
             // end known to be keeping the same turns.
             let turns = agreed.two_wire && self.far.is_some();
-            self.turn = if turns {
-                Turn::Quiet {
-                    waited: 0.0,
-                    still: 0.0,
-                }
-            } else {
-                Turn::Both
-            };
+            self.turn = if turns { Turn::Quiet { waited: 0.0, still: 0.0 } } else { Turn::Both };
             self.muted = turns;
             self.loud = self.spoke;
             self.agreed = Some(agreed);
@@ -1060,12 +885,7 @@ impl Call {
             station.hear(input);
         } else {
             self.cleaned.clear();
-            for ((canceller, &x), channel) in self
-                .echo
-                .iter_mut()
-                .zip(input)
-                .zip(station.channels.iter_mut())
-            {
+            for ((canceller, &x), channel) in self.echo.iter_mut().zip(input).zip(station.channels.iter_mut()) {
                 self.cleaned.push(canceller.clean(x));
                 // The receiver's own stage is told what the echo is of,
                 // and to start again if the echo has moved.
@@ -1104,9 +924,7 @@ impl Call {
         for (canceller, channel) in self.echo.iter_mut().zip(&station.channels) {
             let health = channel.rx.health();
             let enough = if canceller.held() { 24.0 } else { 30.0 };
-            canceller.hold(
-                health.steady && health.snr_db >= enough && channel.rx.echo_left_db().is_some(),
-            );
+            canceller.hold(health.steady && health.snr_db >= enough && channel.rx.echo_left_db().is_some());
         }
         // The echo, as it goes down: said each time it is 10 dB further.
         if let Some(canceller) = self.echo.first() {
@@ -1124,32 +942,17 @@ impl Call {
         if trim != self.trim_said {
             let lower = trim > self.trim_said;
             self.trim_said = trim;
-            let levels: Vec<String> = station
-                .channels
-                .iter()
-                .map(|c| format!("{:.1} dB", -c.trim_db))
-                .collect();
+            let levels: Vec<String> = station.channels.iter().map(|c| format!("{:.1} dB", -c.trim_db)).collect();
             let why = station
                 .channels
                 .iter()
                 .find_map(|c| c.there)
-                .map(|r| {
-                    format!(
-                        "peaks at {:.1} dBFS, {} samples at full scale",
-                        r.peak_db, r.clipped
-                    )
-                })
+                .map(|r| format!("peaks at {:.1} dBFS, {} samples at full scale", r.peak_db, r.clipped))
                 .unwrap_or_default();
             self.notes.push(if lower {
-                format!(
-                    "V.ARC: the far end hears this end too loud ({why}); now sending at {}",
-                    levels.join(", ")
-                )
+                format!("V.ARC: the far end hears this end too loud ({why}); now sending at {}", levels.join(", "))
             } else {
-                format!(
-                    "V.ARC: the far end has room again ({why}); now sending at {}",
-                    levels.join(", ")
-                )
+                format!("V.ARC: the far end has room again ({why}); now sending at {}", levels.join(", "))
             });
         }
         if self.first_loaded.is_none() && station.channels.iter().any(|c| c.loaded()) {
@@ -1189,34 +992,22 @@ impl Call {
     }
 
     pub fn seconds(&self) -> f64 {
-        if self.fs > 0.0 {
-            self.samples as f64 / self.fs
-        } else {
-            0.0
-        }
+        if self.fs > 0.0 { self.samples as f64 / self.fs } else { 0.0 }
     }
 
     /// Seconds since any channel heard the far end.
     pub fn deaf_seconds(&self) -> f64 {
-        if self.fs > 0.0 {
-            self.deaf as f64 / self.fs
-        } else {
-            0.0
-        }
+        if self.fs > 0.0 { self.deaf as f64 / self.fs } else { 0.0 }
     }
 
     pub fn hearing(&self) -> bool {
-        self.station
-            .as_ref()
-            .is_some_and(|s| s.channels.iter().any(|c| c.rx.health().locked))
+        self.station.as_ref().is_some_and(|s| s.channels.iter().any(|c| c.rx.health().locked))
     }
 
     /// The rates arriving and going, in bits a second of data, over the
     /// channels that are loaded both ways.
     pub fn rates(&self) -> (u32, u32) {
-        let Some(station) = self.station.as_ref() else {
-            return (0, 0);
-        };
+        let Some(station) = self.station.as_ref() else { return (0, 0) };
         let (mut rx, mut tx) = (0.0, 0.0);
         // Each way for itself: a channel may be loaded one way only.
         for channel in &station.channels {
@@ -1234,22 +1025,15 @@ impl Call {
     /// loaded, or some loaded and the rest given long enough to show they
     /// are not coming. A lead with one channel wired is a line all the same.
     pub fn ready(&self) -> bool {
-        let Some(station) = self.station.as_ref() else {
-            return false;
-        };
+        let Some(station) = self.station.as_ref() else { return false };
         let loaded = station.channels.iter().filter(|c| c.loaded()).count();
-        let waited = self
-            .first_loaded
-            .is_some_and(|at| self.samples - at > (6.0 * self.fs) as u64);
+        let waited = self.first_loaded.is_some_and(|at| self.samples - at > (6.0 * self.fs) as u64);
         loaded > 0 && (loaded == station.channels.len() || waited)
     }
 
     pub fn channels(&self) -> (usize, usize) {
         match self.station.as_ref() {
-            Some(s) => (
-                s.channels.iter().filter(|c| c.loaded()).count(),
-                s.channels.len(),
-            ),
+            Some(s) => (s.channels.iter().filter(|c| c.loaded()).count(), s.channels.len()),
             None => (0, 0),
         }
     }
@@ -1271,11 +1055,7 @@ impl Call {
 
     pub fn phase(&self) -> &'static str {
         if let Some(hello) = self.hello.as_ref() {
-            return if hello.theirs().is_some() {
-                "V.ARC: agreeing with the far end"
-            } else {
-                "V.ARC: calling the far end"
-            };
+            return if hello.theirs().is_some() { "V.ARC: agreeing with the far end" } else { "V.ARC: calling the far end" };
         }
         match self.turn {
             Turn::Quiet { .. } => return "V.ARC: waiting for the line to go quiet",
@@ -1283,9 +1063,7 @@ impl Call {
             Turn::Theirs { .. } => return "V.ARC: silent while the far end learns its echo",
             Turn::Both => {}
         }
-        let Some(station) = self.station.as_ref() else {
-            return "V.ARC: waiting for the line";
-        };
+        let Some(station) = self.station.as_ref() else { return "V.ARC: waiting for the line" };
         if station.channels.iter().any(|c| c.loaded()) {
             "V.ARC: loaded"
         } else if station.channels.iter().any(|c| c.rx.health().steady) {
@@ -1303,9 +1081,7 @@ impl Call {
     /// what is drawn is one grid and not two laid over each other.
     pub fn take_points(&mut self) -> (Vec<(f64, f64)>, u8) {
         let mut taken = (Vec::new(), 0);
-        let Some(station) = self.station.as_mut() else {
-            return taken;
-        };
+        let Some(station) = self.station.as_mut() else { return taken };
         // The channel carrying most, so that a channel still on its
         // starting table is not what is shown for one that is loaded.
         let mut most = -1.0;
@@ -1325,42 +1101,27 @@ impl Call {
     pub fn code(&self) -> Option<(usize, usize)> {
         // Of the channel carrying most, as the symbol diagram is.
         let channels = &self.station.as_ref()?.channels;
-        let best = channels
-            .iter()
-            .max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
-        best.rx
-            .code()
-            .or_else(|| channels.iter().find_map(|c| c.rx.code()))
+        let best = channels.iter().max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
+        best.rx.code().or_else(|| channels.iter().find_map(|c| c.rx.code()))
     }
 
     /// What the far end says it hears of this end, on the first channel it
     /// has said anything about, and how far this end has turned itself
     /// down on that channel because of it.
     pub fn far_end(&self) -> Option<(Report, f64)> {
-        self.station
-            .as_ref()?
-            .channels
-            .iter()
-            .find_map(|c| c.there.map(|report| (report, c.trim_db)))
+        self.station.as_ref()?.channels.iter().find_map(|c| c.there.map(|report| (report, c.trim_db)))
     }
 
     /// The band as the first channel that hears anything has it: each
     /// carrier's frequency, its signal to noise in decibels, and the bits
     /// the far end is putting on it.
     pub fn carriers(&self) -> Vec<(f64, f64, u8)> {
-        let Some(station) = self.station.as_ref() else {
-            return Vec::new();
-        };
+        let Some(station) = self.station.as_ref() else { return Vec::new() };
         station
             .channels
             .iter()
             .find(|c| c.rx.health().locked)
-            .map(|c| {
-                c.rx.spectrum()
-                    .iter()
-                    .map(|bin| (bin.hz, bin.snr_db, bin.bits))
-                    .collect()
-            })
+            .map(|c| c.rx.spectrum().iter().map(|bin| (bin.hz, bin.snr_db, bin.bits)).collect())
             .unwrap_or_default()
     }
 
@@ -1368,10 +1129,7 @@ impl Call {
     /// line's answer to one sample sent. Empty on a line with a wire each
     /// way, and until the echo has been found.
     pub fn echo_response(&self) -> Vec<f64> {
-        self.echo
-            .first()
-            .map(Canceller::response)
-            .unwrap_or_default()
+        self.echo.first().map(Canceller::response).unwrap_or_default()
     }
 
     /// What the far end said it was in the handshake, and what was agreed,
@@ -1393,47 +1151,21 @@ impl Call {
                 Wanted::Qam => "QAM at 16 000 baud",
                 Wanted::Pcm => "levels at 16 000 baud",
             };
-            format!(
-                "{mode}, {}",
-                if caps.two_wire {
-                    "one pair of wires"
-                } else {
-                    "a wire each way"
-                }
-            )
+            format!("{mode}, {}", if caps.two_wire { "one pair of wires" } else { "a wire each way" })
         };
         // While it is still going on, what has arrived so far.
-        let far = self
-            .hello
-            .as_ref()
-            .and_then(|hello| hello.theirs().copied())
-            .or(self.far);
+        let far = self.hello.as_ref().and_then(|hello| hello.theirs().copied()).or(self.far);
         match far {
             Some(caps) => {
                 rows.push(("V.ARC hello", said(&caps)));
                 rows.push(("asked for", asked(&caps)));
                 if self.hello.is_some() {
-                    rows.push((
-                        "far end",
-                        if caps.heard {
-                            "has heard this end"
-                        } else {
-                            "has not heard this end yet"
-                        }
-                        .to_owned(),
-                    ));
+                    rows.push(("far end", if caps.heard { "has heard this end" } else { "has not heard this end yet" }.to_owned()));
                 }
             }
             None if self.hello.is_some() => {
-                let (ours, theirs) = if self.calling {
-                    ("1000 and 1400", "2000 and 2400")
-                } else {
-                    ("2000 and 2400", "1000 and 1400")
-                };
-                rows.push((
-                    "V.ARC hello",
-                    format!("calling on {ours} Hz, listening on {theirs} Hz: nothing heard yet"),
-                ));
+                let (ours, theirs) = if self.calling { ("1000 and 1400", "2000 and 2400") } else { ("2000 and 2400", "1000 and 1400") };
+                rows.push(("V.ARC hello", format!("calling on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
             }
             None => {}
         }
@@ -1442,11 +1174,7 @@ impl Call {
                 "agreed",
                 format!(
                     "{}, {:.0} Hz out and {:.0} Hz back",
-                    if agreed.two_wire {
-                        "one pair of wires"
-                    } else {
-                        "a wire each way"
-                    },
+                    if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
                     agreed.send_hz,
                     agreed.hear_hz
                 ),
@@ -1455,20 +1183,10 @@ impl Call {
                 rows.push(("note", note.clone()));
             }
             if self.hears_slowed > 0 || self.sends_slowed > 0 {
-                let times = |by: u8| {
-                    if by == 0 {
-                        "at full speed".to_owned()
-                    } else {
-                        format!("{} times slower", 1u32 << by)
-                    }
-                };
+                let times = |by: u8| if by == 0 { "at full speed".to_owned() } else { format!("{} times slower", 1u32 << by) };
                 rows.push((
                     "slowed",
-                    format!(
-                        "hearing {}, sending {}",
-                        times(self.hears_slowed),
-                        times(self.sends_slowed)
-                    ),
+                    format!("hearing {}, sending {}", times(self.hears_slowed), times(self.sends_slowed)),
                 ));
             }
             let (hears, sends) = self.bauds();
@@ -1494,17 +1212,13 @@ impl Call {
     /// decibels, once the line has been measured.
     pub fn best_snr_db(&self) -> Option<f64> {
         let channels = &self.station.as_ref()?.channels;
-        let best = channels
-            .iter()
-            .max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
+        let best = channels.iter().max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
         let health = best.rx.health();
         health.steady.then_some(health.snr_db)
     }
 
     /// The signal to noise ratio on each channel, in decibels.
     pub fn snr_db(&self) -> Vec<f64> {
-        self.station.as_ref().map_or_else(Vec::new, |s| {
-            s.channels.iter().map(|c| c.rx.health().snr_db).collect()
-        })
+        self.station.as_ref().map_or_else(Vec::new, |s| s.channels.iter().map(|c| c.rx.health().snr_db).collect())
     }
 }

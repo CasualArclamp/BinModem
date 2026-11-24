@@ -66,17 +66,11 @@ pub fn name(method: u8) -> &'static str {
 
 /// The best method in `can`.
 fn best(can: u8) -> u8 {
-    [LZ, V44, V42BIS]
-        .into_iter()
-        .find(|m| can & m != 0)
-        .unwrap_or(0)
+    [LZ, V44, V42BIS].into_iter().find(|m| can & m != 0).unwrap_or(0)
 }
 
 fn v42bis_params() -> ec::v42bis::Params {
-    ec::v42bis::Params {
-        n2: 2048,
-        n7: ec::v42bis::OFFERED_N7,
-    }
+    ec::v42bis::Params { n2: 2048, n7: ec::v42bis::OFFERED_N7 }
 }
 
 fn v44_params() -> ec::v44::Params {
@@ -92,9 +86,7 @@ enum Coder {
 impl Coder {
     fn new(method: u8) -> Option<Self> {
         match method {
-            V42BIS => Some(Self::V42bis(Box::new(ec::v42bis::Encoder::new(
-                v42bis_params(),
-            )))),
+            V42BIS => Some(Self::V42bis(Box::new(ec::v42bis::Encoder::new(v42bis_params())))),
             V44 => Some(Self::V44(Box::new(ec::v44::Encoder::new(v44_params())))),
             LZ => Some(Self::Lz(Box::default())),
             _ => None,
@@ -127,9 +119,7 @@ enum Uncoder {
 impl Uncoder {
     fn new(method: u8) -> Option<Self> {
         match method {
-            V42BIS => Some(Self::V42bis(Box::new(ec::v42bis::Decoder::new(
-                v42bis_params(),
-            )))),
+            V42BIS => Some(Self::V42bis(Box::new(ec::v42bis::Decoder::new(v42bis_params())))),
             V44 => Some(Self::V44(Box::new(ec::v44::Decoder::new(v44_params())))),
             LZ => Some(Self::Lz(Box::default())),
             _ => None,
@@ -229,14 +219,7 @@ impl Squeeze {
     /// The method this end's stream is compressed with, and the far end's,
     /// once each is in use.
     pub fn methods(&self) -> (u8, u8) {
-        (
-            if self.agreed {
-                self.switch.map_or(0, |s| s.0)
-            } else {
-                0
-            },
-            self.theirs.map_or(0, |t| t.0),
-        )
+        (if self.agreed { self.switch.map_or(0, |s| s.0) } else { 0 }, self.theirs.map_or(0, |t| t.0))
     }
 
     /// Whether the far end's stream could not be read.
@@ -284,19 +267,14 @@ impl Squeeze {
         }
         let from = self.got;
         self.got += octets.len() as u64;
-        let Some((_, at)) = self.theirs else {
-            return octets;
-        };
+        let Some((_, at)) = self.theirs else { return octets };
         // Up to `at` the stream is as it was written.
         let plain = at.saturating_sub(from).min(octets.len() as u64) as usize;
         let mut out = octets[..plain].to_vec();
         let coded = &octets[plain..];
         if !coded.is_empty() {
             let before = out.len();
-            let read = self
-                .uncoder
-                .as_mut()
-                .is_some_and(|uncoder| uncoder.uncode(coded, &mut out));
+            let read = self.uncoder.as_mut().is_some_and(|uncoder| uncoder.uncode(coded, &mut out));
             if !read {
                 self.broken = true;
                 out.truncate(before);
@@ -351,11 +329,7 @@ impl Squeeze {
                 self.coder = Coder::new(method);
             }
         }
-        if at != NOWHERE
-            && self.theirs.is_none()
-            && method & self.can != 0
-            && method.is_power_of_two()
-        {
+        if at != NOWHERE && self.theirs.is_none() && method & self.can != 0 && method.is_power_of_two() {
             // Nothing from there on has arrived, or the far end did not
             // hold it back as it has to.
             if at >= self.got {
@@ -405,17 +379,7 @@ mod tests {
 
     impl Pair {
         fn new(a: u8, b: u8) -> Self {
-            Self {
-                a: Squeeze::new(a),
-                b: Squeeze::new(b),
-                now: 0,
-                to_b: vec![],
-                to_a: vec![],
-                at_b: vec![],
-                at_a: vec![],
-                deaf: false,
-                frames: 0,
-            }
+            Self { a: Squeeze::new(a), b: Squeeze::new(b), now: 0, to_b: vec![], to_a: vec![], at_b: vec![], at_a: vec![], deaf: false, frames: 0 }
         }
 
         /// A tenth of a second: frames each way, then the lines.
@@ -433,10 +397,7 @@ mod tests {
                     self.to_b.extend(ready);
                 }
             }
-            let (to_b, to_a) = (
-                std::mem::take(&mut self.to_b),
-                std::mem::take(&mut self.to_a),
-            );
+            let (to_b, to_a) = (std::mem::take(&mut self.to_b), std::mem::take(&mut self.to_a));
             self.at_b.extend(self.b.read(to_b));
             self.at_a.extend(self.a.read(to_a));
         }
@@ -453,21 +414,12 @@ mod tests {
     }
 
     fn text(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| {
-                b"the line carries what the terminal wrote, and most of that is text. "[i % 68]
-            })
-            .collect()
+        (0..len).map(|i| b"the line carries what the terminal wrote, and most of that is text. "[i % 68]).collect()
     }
 
     #[test]
     fn two_ends_agree_while_the_stream_runs_and_nothing_is_lost_or_out_of_place() {
-        for (a, b, each) in [
-            (ALL, ALL, LZ),
-            (ALL, V44 | V42BIS, V44),
-            (V42BIS, ALL, V42BIS),
-            (LZ, LZ, LZ),
-        ] {
+        for (a, b, each) in [(ALL, ALL, LZ), (ALL, V44 | V42BIS, V44), (V42BIS, ALL, V42BIS), (LZ, LZ, LZ)] {
             let mut pair = Pair::new(a, b);
             let (mut sent_b, mut sent_a) = (Vec::new(), Vec::new());
             for i in 0..80 {
@@ -482,26 +434,11 @@ mod tests {
             for _ in 0..5 {
                 pair.tick();
             }
-            assert!(
-                pair.at_b == sent_b,
-                "{a}/{b}: {} of {}",
-                pair.at_b.len(),
-                sent_b.len()
-            );
-            assert!(
-                pair.at_a == sent_a,
-                "{a}/{b}: {} of {}",
-                pair.at_a.len(),
-                sent_a.len()
-            );
+            assert!(pair.at_b == sent_b, "{a}/{b}: {} of {}", pair.at_b.len(), sent_b.len());
+            assert!(pair.at_a == sent_a, "{a}/{b}: {} of {}", pair.at_a.len(), sent_a.len());
             assert_eq!(pair.a.methods(), (each, each), "{a}/{b}");
             assert_eq!(pair.b.methods(), (each, each), "{a}/{b}");
-            assert!(
-                pair.a.coded_out * 2 < pair.a.plain_out,
-                "{a}/{b}: {} for {}",
-                pair.a.coded_out,
-                pair.a.plain_out
-            );
+            assert!(pair.a.coded_out * 2 < pair.a.plain_out, "{a}/{b}: {} for {}", pair.a.coded_out, pair.a.plain_out);
             assert!(!pair.a.broken() && !pair.b.broken());
         }
     }

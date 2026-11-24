@@ -388,11 +388,7 @@ fn reread(template: &[f64; RU_PERIOD], by: f64) -> [f64; RU_PERIOD] {
         // Getting that wrong leaves a whole turn per symbol in the answer, which
         // is invisible (and harmless) at whole symbols and wrong everywhere
         // else.
-        let signed = if 2 * k > RU_PERIOD {
-            k as f64 - RU_PERIOD as f64
-        } else {
-            k as f64
-        };
+        let signed = if 2 * k > RU_PERIOD { k as f64 - RU_PERIOD as f64 } else { k as f64 };
         let theta = -std::f64::consts::TAU * signed * by / RU_PERIOD as f64;
         let (sin, cos) = theta.sin_cos();
         let (r, i) = (*re, *im);
@@ -600,10 +596,7 @@ impl Slicer {
     /// The nearest level to `value`, and how far from it that was.
     fn decide(&self, value: f64) -> Option<(f64, f64)> {
         match self {
-            Self::TwoPoint => Some((
-                if value >= 0.0 { 1.0 } else { -1.0 },
-                (value.abs() - 1.0).abs(),
-            )),
+            Self::TwoPoint => Some((if value >= 0.0 { 1.0 } else { -1.0 }, (value.abs() - 1.0).abs())),
             Self::FourPoint => {
                 let levels = four_point_levels();
                 nearest(&levels, value)
@@ -636,11 +629,7 @@ impl Slicer {
                 for pair in levels.windows(2) {
                     closest = closest.min(pair[1] - pair[0]);
                 }
-                if closest.is_finite() {
-                    closest / 2.0
-                } else {
-                    0.5
-                }
+                if closest.is_finite() { closest / 2.0 } else { 0.5 }
             }
             // No decisions, so no span to hold their errors against.
             Self::Unsliced => 1.0,
@@ -719,10 +708,7 @@ pub const FFE_RIDGE: f64 = 1e-4;
 /// take, and larger only if the solve refuses.
 fn ridges_in_use() -> Vec<f64> {
     match std::env::var("V92_RIDGE") {
-        Ok(text) => text
-            .split(',')
-            .filter_map(|item| item.trim().parse().ok())
-            .collect(),
+        Ok(text) => text.split(',').filter_map(|item| item.trim().parse().ok()).collect(),
         Err(_) => vec![1e-9, 1e-7, 1e-5],
     }
 }
@@ -744,11 +730,7 @@ fn trn2u_levels(
     let mut magnitude = seed as i64;
     let mut j = 0usize;
     while levels.len() < length {
-        let (m, d) = if phase == 0 {
-            (2 * j, 2 * j + 1)
-        } else {
-            (2 * j + 1, 2 * j)
-        };
+        let (m, d) = if phase == 0 { (2 * j, 2 * j + 1) } else { (2 * j + 1, 2 * j) };
         let m = *bits.get(m)?;
         let d = *bits.get(d)?;
         if d < 0.0 {
@@ -762,11 +744,7 @@ fn trn2u_levels(
         // something the Recommendation's Figure 2 settles for a reader, and a
         // far end that encodes both bits is a far end whose sequence this has to
         // be able to build.
-        let inner = if differential_magnitude {
-            magnitude == 1
-        } else {
-            m < 0.0
-        };
+        let inner = if differential_magnitude { magnitude == 1 } else { m < 0.0 };
         let tier = if inner { 3.0 } else { 1.0 };
         levels.push(if sign == 1 { -tier } else { tier } / 5f64.sqrt());
         j += 1;
@@ -777,12 +755,7 @@ fn trn2u_levels(
 /// The four TRN2u levels, in the units the equaliser's output carries.
 fn four_point_levels() -> [f64; 4] {
     let size = up_signals::Trn2uSize::Four;
-    [
-        -size.magnitude(1),
-        -size.magnitude(0),
-        size.magnitude(0),
-        size.magnitude(1),
-    ]
+    [-size.magnitude(1), -size.magnitude(0), size.magnitude(0), size.magnitude(1)]
 }
 
 /// The nearest of `levels` to `value`, with the distance.
@@ -1197,10 +1170,7 @@ impl Receiver {
         self.level_by_line = 0.0;
         self.line_by_line = 0.0;
         self.level_seen = 0;
-        self.tracking = match std::env::var("V92_TRACK")
-            .ok()
-            .and_then(|t| t.parse::<f64>().ok())
-        {
+        self.tracking = match std::env::var("V92_TRACK").ok().and_then(|t| t.parse::<f64>().ok()) {
             Some(step) => step,
             None => DATA_TRACKING,
         };
@@ -1275,9 +1245,7 @@ impl Receiver {
     /// The symbol's own index with the origin taken off.
     #[must_use]
     pub fn interval(&self) -> usize {
-        let index = self
-            .origin
-            .map_or(self.count, |origin| self.count.saturating_sub(origin));
+        let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
         (index % UP_INTERVALS as u64) as usize
     }
 
@@ -1336,12 +1304,7 @@ impl Receiver {
         if hi <= lo {
             return Vec::new();
         }
-        self.history
-            .iter()
-            .skip((lo - base) as usize)
-            .take((hi - lo) as usize)
-            .copied()
-            .collect()
+        self.history.iter().skip((lo - base) as usize).take((hi - lo) as usize).copied().collect()
     }
 
     /// Where TRN1u begins, within `search` symbols of the history index `from`,
@@ -1412,11 +1375,7 @@ impl Receiver {
             feedback: self.feedback.clone(),
             // A score from before the far end stepped is no score at all
             // (see [`Self::far_end_stepped`]): anything fitted since beats it.
-            snr_db: if self.stale {
-                f64::NEG_INFINITY
-            } else {
-                self.snr_db
-            },
+            snr_db: if self.stale { f64::NEG_INFINITY } else { self.snr_db },
             trained: self.trained,
             at: self.trained_at,
         }
@@ -1627,29 +1586,15 @@ impl Receiver {
         // 3 E1u's silence -- which is what tells the digital modem the exchange
         // is over (9.6.1.1.4) -- into ones, and the call never left Phase 3.
         let width = self.forward.len();
-        let power: f64 = self
-            .history
-            .iter()
-            .rev()
-            .take(width)
-            .map(|&x| x * x)
-            .sum::<f64>()
-            / width as f64;
+        let power: f64 = self.history.iter().rev().take(width).map(|&x| x * x).sum::<f64>() / width as f64;
         // That is a guard on the feedback loop, so it is not applied when
         // nothing is decided ([`Slicer::Unsliced`]): there is no loop, and a
         // PCM constellation's quietest points are real symbols that sit below
         // the level a silent line is told from.
         if !(power > AUDIBLE) && self.slicer != Slicer::Unsliced {
             self.decided.clear();
-            let index = self
-                .origin
-                .map_or(self.count, |origin| self.count.saturating_sub(origin));
-            self.events.push_back(Heard::Symbol(Symbol {
-                index,
-                raw: self.count,
-                value: 0.0,
-                decided: None,
-            }));
+            let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
+            self.events.push_back(Heard::Symbol(Symbol { index, raw: self.count, value: 0.0, decided: None }));
             return;
         }
         let mut value = 0.0;
@@ -1722,9 +1667,7 @@ impl Receiver {
                 );
             }
         }
-        let index = self
-            .origin
-            .map_or(self.count, |origin| self.count.saturating_sub(origin));
+        let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
         let chosen = self.slicer.decide(shown);
         let span = self.slicer.half_span();
         if let Some((_, error)) = chosen.filter(|_| !settling) {
@@ -1821,11 +1764,7 @@ impl Receiver {
         if at <= 0.0 {
             return;
         }
-        let (sum, nominal) = if at < (inner + outer) / 2.0 {
-            (&mut self.inner, inner)
-        } else {
-            (&mut self.outer, outer)
-        };
+        let (sum, nominal) = if at < (inner + outer) / 2.0 { (&mut self.inner, inner) } else { (&mut self.outer, outer) };
         // A slow average, so that one badly-decided symbol moves nothing, and
         // a gate wide enough to catch a line that is a third off but narrow
         // enough that the other tier never gets in.
@@ -1885,9 +1824,7 @@ impl Receiver {
     /// range is the point: an anchor free to go anywhere will eventually
     /// follow the decisions it is supposed to be checking.
     fn anchor_data_levels(&mut self, value: f64) {
-        let Some((level, error)) = self.slicer.decide(value * self.gain) else {
-            return;
-        };
+        let Some((level, error)) = self.slicer.decide(value * self.gain) else { return };
         if level == 0.0 || value == 0.0 {
             return;
         }
@@ -1938,9 +1875,7 @@ impl Receiver {
             if self.snr_db >= TRAINED_SNR_DB {
                 self.trained = true;
                 self.trained_at = start;
-                self.events.push_back(Heard::Trained {
-                    snr_db: self.snr_db,
-                });
+                self.events.push_back(Heard::Trained { snr_db: self.snr_db });
                 return true;
             }
         }
@@ -1974,9 +1909,7 @@ impl Receiver {
         if std::env::var_os("V92_TRACE").is_some() {
             eprintln!("V92TRACE: train_near(from {from} search {search}) best {best:?}");
         }
-        let Some((snr, start)) = best else {
-            return false;
-        };
+        let Some((snr, start)) = best else { return false };
         // The winner's taps are what the whole of Phase 4 will be sliced with,
         // so they are the fit worth keeping a record of.
         if let Some(path) = std::env::var_os("V92_EQ_TRACE") {
@@ -2008,10 +1941,7 @@ impl Receiver {
             && self.snr_db > snr
         {
             if std::env::var_os("V92_TRACE").is_some() {
-                eprintln!(
-                    "V92TRACE: refit at {start} over {TRAIN_WINDOW_LONG}: {:.1} dB",
-                    self.snr_db
-                );
+                eprintln!("V92TRACE: refit at {start} over {TRAIN_WINDOW_LONG}: {:.1} dB", self.snr_db);
             }
             self.trained = true;
             self.trained_at = start;
@@ -2034,12 +1964,8 @@ impl Receiver {
     pub fn dump_fit(&self, path: &std::path::Path, from: usize, window: usize) {
         use std::io::Write;
         let end = (from + window).min(self.history.len());
-        let Some(reference) = reference(from, end, self.reference_mode) else {
-            return;
-        };
-        let Ok(mut file) = std::fs::File::create(path) else {
-            return;
-        };
+        let Some(reference) = reference(from, end, self.reference_mode) else { return };
+        let Ok(mut file) = std::fs::File::create(path) else { return };
         let (inner, outer, gain, seen) = self.measured_levels();
         let _ = writeln!(
             file,
@@ -2071,12 +1997,7 @@ impl Receiver {
                     model += tap * reference[n - 1 - j];
                 }
             }
-            let _ = writeln!(
-                file,
-                "{n} {:.9} {model:.9} {:.9}",
-                reference[n],
-                reference[n] - model
-            );
+            let _ = writeln!(file, "{n} {:.9} {model:.9} {:.9}", reference[n], reference[n] - model);
         }
     }
 
@@ -2113,19 +2034,12 @@ impl Receiver {
         // probe tries a few distances back until it lands on one that
         // correlates.
         for back in [PROBE, 1024] {
-            let Some(probe_end) = length.checked_sub(back) else {
-                continue;
-            };
+            let Some(probe_end) = length.checked_sub(back) else { continue };
             if probe_end < PROBE + TRAIN_TAPS {
                 continue;
             }
             let p = probe_end - PROBE;
-            let energy = line[p..probe_end]
-                .iter()
-                .map(|x| x * x)
-                .sum::<f64>()
-                .sqrt()
-                .max(1e-12);
+            let energy = line[p..probe_end].iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-12);
             let mut share = (0.0f64, 0usize);
             for offset in 0..SEARCH_SEQUENCE {
                 let mut together = 0.0;
@@ -2161,10 +2075,8 @@ impl Receiver {
             // channel that stops at 3.8 kHz measures 23.8 dB at the right lag
             // and 0.1 dB at the wrong one, on the same window.
             for shift in -(TRAIN_TAPS as i64)..=TRAIN_TAPS as i64 {
-                let Some(start) = (anchor as i64 + shift)
-                    .try_into()
-                    .ok()
-                    .filter(|&start: &usize| start + 600 <= length)
+                let Some(start) =
+                    (anchor as i64 + shift).try_into().ok().filter(|&start: &usize| start + 600 <= length)
                 else {
                     continue;
                 };
@@ -2182,10 +2094,7 @@ impl Receiver {
                     }
                 }
             }
-            if best
-                .as_ref()
-                .is_some_and(|seen| seen.snr() > before.snr() + 3.0)
-            {
+            if best.as_ref().is_some_and(|seen| seen.snr() > before.snr() + 3.0) {
                 break;
             }
         }
@@ -2314,9 +2223,7 @@ impl Receiver {
             return false;
         }
         // Two bits a symbol: the magnitude and the sign difference.
-        let Some(bits) = reference_from(0, 2 * length + 4, self.reference_mode) else {
-            return false;
-        };
+        let Some(bits) = reference_from(0, 2 * length + 4, self.reference_mode) else { return false };
         let before = self.fitted();
         let p = length.saturating_sub(window).max(PROBE);
         // No probe and no search. 8.7.6 resets TRN2u's scrambler at E1u, so its
@@ -2347,9 +2254,7 @@ impl Receiver {
         let mut best: Option<Fitted> = None;
         let mut sign_first = false;
         for order in [0usize, 1] {
-            let Some(levels) =
-                trn2u_levels(&bits, length, order, usize::from(self.trn2u_seed), false)
-            else {
+            let Some(levels) = trn2u_levels(&bits, length, order, usize::from(self.trn2u_seed), false) else {
                 continue;
             };
             if skip < 0 || skip as usize + span > levels.len() {
@@ -2359,10 +2264,7 @@ impl Receiver {
             self.pending_levels = Some(levels);
             if self.fit_at(start, span, skip as u64, sections.0, sections.1) {
                 let found = self.fitted();
-                if best
-                    .as_ref()
-                    .is_none_or(|kept| found.snr() > kept.snr() + 3.0)
-                {
+                if best.as_ref().is_none_or(|kept| found.snr() > kept.snr() + 3.0) {
                     best = Some(found);
                     sign_first = order == 1;
                 }
@@ -2404,9 +2306,7 @@ impl Receiver {
                 self.snr_db
             );
         }
-        let Some(four) = self.phase_four.take() else {
-            return false;
-        };
+        let Some(four) = self.phase_four.take() else { return false };
         // Only if it is a fit worth switching to. A Phase 4 receiver put on a
         // worse equaliser than the one in place reads four points worse than
         // the linear one did, and the fit it replaced is the one that was
@@ -2437,9 +2337,7 @@ impl Receiver {
     /// actually read with, on the sequence immediately before the exchange, and
     /// `train_on_trn2u` has already refused it if it was not worth having.
     pub fn install_phase_four(&mut self) -> bool {
-        let Some(four) = self.phase_four.take() else {
-            return false;
-        };
+        let Some(four) = self.phase_four.take() else { return false };
         self.restore(&four);
         self.trained = true;
         self.decided.clear();
@@ -2501,13 +2399,7 @@ impl Receiver {
         // TRN2u's own symbols, exactly as `train_on_trn2u` builds them: 8.7.6
         // resets the scrambler at E1u, so the first is at `trn2u_from`.
         let bits = reference_from(0, 2 * length + 4, self.reference_mode)?;
-        let levels = trn2u_levels(
-            &bits,
-            length,
-            usize::from(self.trn2u_sign_first),
-            usize::from(self.trn2u_seed),
-            false,
-        )?;
+        let levels = trn2u_levels(&bits, length, usize::from(self.trn2u_sign_first), usize::from(self.trn2u_seed), false)?;
         let origin = trn2u_from.saturating_sub(self.history_base()) as usize;
         let start = length.saturating_sub(window).max(PROBE);
         let span = window.min(length - start);
@@ -2518,20 +2410,14 @@ impl Receiver {
         // The window has to be TRN2u, and so has everything the prefilter's
         // memory holds when it reaches the window's first sample.
         let skip = start as i64 - lag - origin as i64;
-        if skip < (filters.z2.len() + filters.p2.len()) as i64
-            || skip as usize + span > levels.len()
-        {
+        if skip < (filters.z2.len() + filters.p2.len()) as i64 || skip as usize + span > levels.len() {
             return None;
         }
         // 6.4.2's prefilter over the line, and its precoder read backwards
         // over the symbols: the same two objects the analogue modem transmits
         // with, so that there is one account of the equations and not two.
         let mut prefilter = Prefilter::new(filters);
-        let line: Vec<f64> = self
-            .history
-            .iter()
-            .map(|&sample| prefilter.step(sample))
-            .collect();
+        let line: Vec<f64> = self.history.iter().map(|&sample| prefilter.step(sample)).collect();
         let mut precoder = Precoder::new(filters);
         let wanted: Vec<f64> = levels
             .iter()
@@ -2582,24 +2468,14 @@ impl Receiver {
             return None;
         }
         let out: Vec<f64> = (from..from + STRETCH)
-            .map(|i| {
-                self.forward
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &tap)| tap * self.history[i - k])
-                    .sum()
-            })
+            .map(|i| self.forward.iter().enumerate().map(|(k, &tap)| tap * self.history[i - k]).sum())
             .collect();
         let power: f64 = out.iter().map(|value| value * value).sum();
         let mut best: Option<(f64, i64)> = None;
         let reach = 2 * TRAIN_TAPS as i64;
         for lag in -reach..=reach {
-            let Ok(first) = usize::try_from(from as i64 - origin as i64 - lag) else {
-                continue;
-            };
-            let Some(wanted) = levels.get(first..first + STRETCH) else {
-                continue;
-            };
+            let Ok(first) = usize::try_from(from as i64 - origin as i64 - lag) else { continue };
+            let Some(wanted) = levels.get(first..first + STRETCH) else { continue };
             let together: f64 = out.iter().zip(wanted).map(|(a, b)| a * b).sum();
             let norm: f64 = wanted.iter().map(|value| value * value).sum();
             let share = together.abs() / (power * norm).sqrt().max(1e-12);
@@ -2674,9 +2550,7 @@ impl Receiver {
         let _ = self.design_phase_four_at(from as usize, 2 * TRAIN_WINDOW);
         self.trained = true;
         self.trained_at = from as usize;
-        self.events.push_back(Heard::Trained {
-            snr_db: self.snr_db,
-        });
+        self.events.push_back(Heard::Trained { snr_db: self.snr_db });
         true
     }
 
@@ -2702,14 +2576,7 @@ impl Receiver {
     /// sequence starting at its symbol `skip`. The two differ only when the
     /// window is not at the sequence's own beginning, which is how the second
     /// TRN1u is fitted long after its first symbol has left the history.
-    fn fit_at(
-        &mut self,
-        at: usize,
-        length: usize,
-        skip: u64,
-        forward: usize,
-        feedback: usize,
-    ) -> bool {
+    fn fit_at(&mut self, at: usize, length: usize, skip: u64, forward: usize, feedback: usize) -> bool {
         let from = at;
         // A fixed length, not everything the history holds: by the time the
         // fit is taken the history reaches past the end of TRN1u into Ja and
@@ -2727,14 +2594,10 @@ impl Receiver {
         // number `reference_from` would be given.
         let at_skip = skip as usize;
         let reference = match self.pending_levels.take() {
-            Some(levels) if levels.len() >= at_skip + span => {
-                Some(levels[at_skip..at_skip + span].to_vec())
-            }
+            Some(levels) if levels.len() >= at_skip + span => Some(levels[at_skip..at_skip + span].to_vec()),
             _ => reference_from(at_skip, span, self.reference_mode),
         };
-        let Some(reference) = reference else {
-            return false;
-        };
+        let Some(reference) = reference else { return false };
         // The line is the history's own unless the caller handed over another
         // of the same length, sample for sample (`train_for_data_mode`).
         let received: Vec<f64> = match self.pending_line.take() {
@@ -2751,27 +2614,15 @@ impl Receiver {
         // loop rather than a rebuild -- and only the winner written once.
         if let Ok(path) = std::env::var("V92_WINDOW_TRACE") {
             use std::io::Write;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                 let join = |values: &[f64]| {
-                    values
-                        .iter()
-                        .map(|v| format!("{v:.9}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    values.iter().map(|v| format!("{v:.9}")).collect::<Vec<_>>().join(" ")
                 };
                 let _ = writeln!(
                     file,
                     "V92WINDOW from {from} skip {at_skip} window {span} forward {forward} feedback {feedback}"
                 );
-                let _ = writeln!(
-                    file,
-                    "V92RECEIVED {}",
-                    join(&received[from..from + reference.len()])
-                );
+                let _ = writeln!(file, "V92RECEIVED {}", join(&received[from..from + reference.len()]));
                 let _ = writeln!(file, "V92REFERENCE {}", join(&reference));
                 file.flush().ok();
             }
@@ -2913,11 +2764,7 @@ impl Receiver {
         let count = length.saturating_sub(rows).max(1) as f64;
         let signal = signal / count;
         let noise = noise / count;
-        self.snr_db = if noise > 0.0 {
-            10.0 * (signal / noise).log10()
-        } else {
-            f64::INFINITY
-        };
+        self.snr_db = if noise > 0.0 { 10.0 * (signal / noise).log10() } else { f64::INFINITY };
         self.stale = false;
         self.snr_db.is_finite() && self.snr_db > 0.0
     }
@@ -2987,18 +2834,10 @@ mod tests {
                     }
                 }
             }
-            assert!(
-                found.iter().any(|(e, _)| matches!(e, Heard::Ru { .. })),
-                "no Ru, inverted {inverted}"
-            );
-            let reversal = found
-                .iter()
-                .find(|(e, _)| matches!(e, Heard::RuReversal { .. }));
+            assert!(found.iter().any(|(e, _)| matches!(e, Heard::Ru { .. })), "no Ru, inverted {inverted}");
+            let reversal = found.iter().find(|(e, _)| matches!(e, Heard::RuReversal { .. }));
             let (_, at) = reversal.unwrap_or_else(|| panic!("no reversal, inverted {inverted}"));
-            assert!(
-                *at >= RU_SYMBOLS_LOCAL && *at <= RU_SYMBOLS_LOCAL + RU_PERIOD,
-                "reversal at {at}"
-            );
+            assert!(*at >= RU_SYMBOLS_LOCAL && *at <= RU_SYMBOLS_LOCAL + RU_PERIOD, "reversal at {at}");
         }
     }
 
@@ -3038,14 +2877,8 @@ mod tests {
                     }
                 }
             }
-            let at = found
-                .last()
-                .copied()
-                .unwrap_or_else(|| panic!("lead {lead}: no reversal"));
-            assert!(
-                at >= turn && at <= turn + 2 * RU_PERIOD,
-                "lead {lead}: reversal at {at}, R-bar-u at {turn}"
-            );
+            let at = found.last().copied().unwrap_or_else(|| panic!("lead {lead}: no reversal"));
+            assert!(at >= turn && at <= turn + 2 * RU_PERIOD, "lead {lead}: reversal at {at}, R-bar-u at {turn}");
         }
     }
 
@@ -3173,15 +3006,10 @@ mod tests {
                 }
             }
         }
-        assert!(
-            found.iter().any(|(e, _)| matches!(e, Heard::Su { .. })),
-            "no Su: {found:?}"
-        );
+        assert!(found.iter().any(|(e, _)| matches!(e, Heard::Su { .. })), "no Su: {found:?}");
         // And a reversal, within a period of where Su turned over.
         assert!(
-            found
-                .iter()
-                .any(|(e, _)| matches!(e, Heard::SuReversal { .. })),
+            found.iter().any(|(e, _)| matches!(e, Heard::SuReversal { .. })),
             "no Su reversal: {found:?}"
         );
     }
@@ -3212,17 +3040,9 @@ mod tests {
             found.iter().any(|(e, _)| matches!(e, Heard::Su { .. })),
             "a filtered Su read as something else: {found:?}"
         );
-        assert!(
-            !found.iter().any(|(e, _)| matches!(e, Heard::Ru { .. })),
-            "filtered Su read as Ru: {found:?}"
-        );
+        assert!(!found.iter().any(|(e, _)| matches!(e, Heard::Ru { .. })), "filtered Su read as Ru: {found:?}");
         // And its turn is still a reversal, which is what Jp is measured from.
-        assert!(
-            found
-                .iter()
-                .any(|(e, _)| matches!(e, Heard::SuReversal { .. })),
-            "{found:?}"
-        );
+        assert!(found.iter().any(|(e, _)| matches!(e, Heard::SuReversal { .. })), "{found:?}");
     }
 
     /// The timetable is worth more than the shape when a transmitter has
@@ -3269,11 +3089,7 @@ mod tests {
         use crate::v90::sequences::{Cp, CpFinder, Layout};
         use crate::v92::up_signals::{TwoPointReader, TwoPointSender};
 
-        let cp = Cp {
-            drn: 80,
-            constellations: vec![(1u128 << 40) - 1],
-            ..Cp::default()
-        };
+        let cp = Cp { drn: 80, constellations: vec![(1u128 << 40) - 1], ..Cp::default() };
         let bits = cp.to_bits_in(Layout::V92, UP_INTERVALS);
 
         // The far end: TRN1u, then the CPt with its preamble, as the line would
@@ -3303,11 +3119,7 @@ mod tests {
             rx.feed(level);
         }
         // Train where TRN1u began, as `heard_ru` does from the reversal.
-        assert!(
-            rx.train_near(0, 64),
-            "the fit should take: {:.1} dB",
-            rx.snr_db()
-        );
+        assert!(rx.train_near(0, 64), "the fit should take: {:.1} dB", rx.snr_db());
         let mut rx = Receiver::new();
         let mut reader = TwoPointReader::differential_with(Mode::Answer);
         let mut finder = CpFinder::v92(UP_INTERVALS);
@@ -3326,11 +3138,7 @@ mod tests {
                 rx.train_near(0, 64);
             }
         }
-        assert!(
-            found > 0,
-            "no CPt came back out of the chain, {:.1} dB",
-            rx.snr_db()
-        );
+        assert!(found > 0, "no CPt came back out of the chain, {:.1} dB", rx.snr_db());
     }
 
     /// The training fit, over a channel with noise: TRN1u is known, so this is
@@ -3424,10 +3232,7 @@ mod tests {
             let sinc = if t == 0.0 {
                 2.0 * 0.95
             } else {
-                (std::f64::consts::PI * 2.0 * 0.95 * t).sin()
-                    / (std::f64::consts::PI * 2.0 * 0.95 * t)
-                    * 2.0
-                    * 0.95
+                (std::f64::consts::PI * 2.0 * 0.95 * t).sin() / (std::f64::consts::PI * 2.0 * 0.95 * t) * 2.0 * 0.95
             };
             let window = 0.54 - 0.46 * (std::f64::consts::PI * t / 13.0).cos();
             channel.push(sinc * window);
@@ -3472,10 +3277,7 @@ mod tests {
             "V92BENCH: linear {linear:.1} dB, designed {designed} at {fitted:.1} dB, taken {taken} -> {:.1} dB",
             rx.snr_db()
         );
-        assert!(
-            designed && taken,
-            "the Phase 4 fit was not designed or not taken up"
-        );
+        assert!(designed && taken, "the Phase 4 fit was not designed or not taken up");
         assert!(
             rx.snr_db() > linear + 6.0,
             "feedback {:.1} dB against linear {linear:.1}: the decision feedback \
@@ -3503,10 +3305,7 @@ mod tests {
             let sinc = if t == 0.0 {
                 2.0 * 0.95
             } else {
-                (std::f64::consts::PI * 2.0 * 0.95 * t).sin()
-                    / (std::f64::consts::PI * 2.0 * 0.95 * t)
-                    * 2.0
-                    * 0.95
+                (std::f64::consts::PI * 2.0 * 0.95 * t).sin() / (std::f64::consts::PI * 2.0 * 0.95 * t) * 2.0 * 0.95
             };
             let window = 0.54 - 0.46 * (std::f64::consts::PI * t / 13.0).cos();
             channel.push(sinc * window);
@@ -3519,11 +3318,7 @@ mod tests {
             if bits.get(2 * j + 1).is_some_and(|&b| b < 0.0) {
                 sigma ^= 1;
             }
-            let tier = if bits.get(2 * j).is_some_and(|&b| b < 0.0) {
-                3.0
-            } else {
-                1.0
-            };
+            let tier = if bits.get(2 * j).is_some_and(|&b| b < 0.0) { 3.0 } else { 1.0 };
             symbols.push(if sigma == 1 { -tier } else { tier } / 5f64.sqrt());
         }
         let mut rx = Receiver::new();
@@ -3552,11 +3347,7 @@ mod tests {
         // tap decision feedback fit; the number that matters is on the line, and
         // there it is thirty. What the test guards is that the sequence is found
         // and the fit lands on it rather than on TRN1u's two levels (0.07 dB).
-        assert!(
-            rx.snr_db() > 12.0,
-            "fitted at {:.1} dB on a known sequence",
-            rx.snr_db()
-        );
+        assert!(rx.snr_db() > 12.0, "fitted at {:.1} dB on a known sequence", rx.snr_db());
     }
 
     /// Replay a captured line through the receiver, which is the only oracle
@@ -3575,11 +3366,8 @@ mod tests {
     #[test]
     #[ignore = "needs V92_REPLAY to name a captured line"]
     fn replay_a_captured_line() {
-        let Ok(path) = std::env::var("V92_REPLAY") else {
-            return;
-        };
-        let Ok(anchor) = std::env::var("V92_ANCHOR").map(|text| text.parse::<usize>().unwrap_or(0))
-        else {
+        let Ok(path) = std::env::var("V92_REPLAY") else { return };
+        let Ok(anchor) = std::env::var("V92_ANCHOR").map(|text| text.parse::<usize>().unwrap_or(0)) else {
             return;
         };
         let text = std::fs::read_to_string(&path).unwrap();
@@ -3609,24 +3397,15 @@ mod tests {
         // every gate in the receiver reads that as "the fit in hand". Put the
         // linear fit back first, so what follows measures the same thing a call
         // in the field would.
-        assert!(
-            rx.train_near(anchor as u64, 64),
-            "the linear fit failed again"
-        );
+        assert!(rx.train_near(anchor as u64, 64), "the linear fit failed again");
         let designed = rx.design_phase_four_at(anchor, 1200);
         let fitted = rx.snr_db();
         let taken = rx.begin_phase_four();
-        eprintln!(
-            "V92BENCH: single TRN1u: designed {designed} at {fitted:.2} dB, taken {taken} -> {:.2} dB",
-            rx.snr_db()
-        );
+        eprintln!("V92BENCH: single TRN1u: designed {designed} at {fitted:.2} dB, taken {taken} -> {:.2} dB", rx.snr_db());
         let best = if taken { rx.snr_db() } else { fitted };
         let _ = best;
 
-        assert!(
-            designed && taken,
-            "the Phase 4 fit needs the second TRN1u, and it must not"
-        );
+        assert!(designed && taken, "the Phase 4 fit needs the second TRN1u, and it must not");
         assert!(best.is_finite());
     }
 
@@ -3652,9 +3431,7 @@ mod tests {
             events.push(event);
         }
         assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Heard::Ru { .. } | Heard::Su { .. })),
+            !events.iter().any(|event| matches!(event, Heard::Ru { .. } | Heard::Su { .. })),
             "noise was read as a sequence: {events:?}"
         );
         assert!(!rx.train_on_trn1u(0), "noise trained");
@@ -3668,12 +3445,9 @@ mod tests {
         while let Some(event) = rx.heard() {
             events.push(event);
         }
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Heard::Ru { .. } | Heard::Su { .. }))
-        );
+        assert!(!events.iter().any(|event| matches!(event, Heard::Ru { .. } | Heard::Su { .. })));
     }
+
 
     /// 9.5.1.1.10: the twelve-symbol count starts where it is told, and runs
     /// modulo twelve from there.
@@ -3683,11 +3457,7 @@ mod tests {
         for _ in 0..100 {
             rx.feed(0.5);
         }
-        assert_eq!(
-            rx.interval(),
-            100 % UP_INTERVALS,
-            "with no origin the count is the index"
-        );
+        assert_eq!(rx.interval(), 100 % UP_INTERVALS, "with no origin the count is the index");
         rx.set_frame_origin(40);
         assert_eq!(rx.interval(), 0, "the origin is interval 0");
         for _ in 0..5 {
@@ -3703,3 +3473,5 @@ mod tests {
         let _ = rx.history_since(90);
     }
 }
+
+

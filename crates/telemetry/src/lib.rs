@@ -316,8 +316,8 @@ impl Frame {
         if self.symbols.is_empty() {
             return None;
         }
-        let mean =
-            self.symbols.iter().map(|v| v.abs().min(1.0)).sum::<f32>() / self.symbols.len() as f32;
+        let mean = self.symbols.iter().map(|v| v.abs().min(1.0)).sum::<f32>()
+            / self.symbols.len() as f32;
         Some((mean * 100.0).round() as u32)
     }
 }
@@ -384,11 +384,7 @@ pub struct Subscriber {
 }
 
 /// Create a connected publisher and subscriber.
-pub fn channel(
-    scope_len: usize,
-    spectrum_bins: usize,
-    sample_rate: f64,
-) -> (Publisher, Subscriber) {
+pub fn channel(scope_len: usize, spectrum_bins: usize, sample_rate: f64) -> (Publisher, Subscriber) {
     let shared = Arc::new(Shared {
         frame: Mutex::new(Frame::new(scope_len, spectrum_bins, sample_rate)),
         log: Mutex::new(VecDeque::new()),
@@ -402,12 +398,7 @@ pub fn channel(
         dropped: AtomicU64::new(0),
         started: Instant::now(),
     });
-    (
-        Publisher {
-            shared: shared.clone(),
-        },
-        Subscriber { shared },
-    )
+    (Publisher { shared: shared.clone() }, Subscriber { shared })
 }
 
 impl Publisher {
@@ -622,10 +613,7 @@ mod tests {
         let (tx, rx) = channel(8, 4, 8000.0);
         // Simulate the reader being mid-copy by taking the lock ourselves.
         let held = rx.shared.frame.lock().unwrap();
-        assert!(
-            !tx.publish(|f| f.carrier = true),
-            "publish should have skipped"
-        );
+        assert!(!tx.publish(|f| f.carrier = true), "publish should have skipped");
         assert_eq!(rx.dropped_frames(), 1);
         drop(held);
         assert!(tx.publish(|f| f.carrier = true), "publish should resume");
@@ -812,9 +800,6 @@ mod constellation_tests {
         assert!(rx.read(&mut frame));
         assert_eq!(frame.tones, 16);
         assert_eq!(frame.symbol_label, "16QAM");
-        assert_eq!(
-            frame.constellation, sent,
-            "points did not cross the channel"
-        );
+        assert_eq!(frame.constellation, sent, "points did not cross the channel");
     }
 }

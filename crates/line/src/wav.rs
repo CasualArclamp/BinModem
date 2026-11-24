@@ -39,12 +39,7 @@ impl Wav {
         if index >= ch {
             return Vec::new();
         }
-        self.samples
-            .iter()
-            .skip(index)
-            .step_by(ch)
-            .copied()
-            .collect()
+        self.samples.iter().skip(index).step_by(ch).copied().collect()
     }
 
     pub fn duration_secs(&self) -> f64 {
@@ -104,24 +99,14 @@ pub fn from_bytes(blob: &[u8]) -> io::Result<Wav> {
                 return Err(bad("only 16-bit PCM is supported"));
             }
             let avail = blob.len() - body;
-            let n = if declared == 0 || declared > avail {
-                avail
-            } else {
-                declared
-            };
+            let n = if declared == 0 || declared > avail { avail } else { declared };
             let frame = 2 * channels.max(1) as usize;
             let n = n - (n % frame);
             let samples = blob[body..body + n]
-                .as_chunks::<2>()
-                .0
-                .iter()
+                .as_chunks::<2>().0.iter()
                 .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
                 .collect();
-            return Ok(Wav {
-                sample_rate: rate,
-                channels,
-                samples,
-            });
+            return Ok(Wav { sample_rate: rate, channels, samples });
         }
 
         // Chunks are word-aligned; a bogus size would otherwise walk off the end.
@@ -161,11 +146,7 @@ pub fn write_channels<P: AsRef<Path>>(
     let mut out = Vec::with_capacity(44 + data_bytes);
 
     out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(
-        &u32::try_from(36 + data_bytes)
-            .unwrap_or(u32::MAX)
-            .to_le_bytes(),
-    );
+    out.extend_from_slice(&u32::try_from(36 + data_bytes).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(b"WAVE");
 
     out.extend_from_slice(b"fmt ");
@@ -199,7 +180,9 @@ mod write_tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roundtrip.wav");
 
-        let samples: Vec<f32> = (0..8000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let samples: Vec<f32> = (0..8000)
+            .map(|i| (i as f32 * 0.01).sin() * 0.5)
+            .collect();
         write(&path, &samples, 16_000).unwrap();
 
         let back = read(&path).unwrap();
@@ -260,10 +243,7 @@ mod stereo_tests {
             assert!((got - want).abs() < 1.0e-3, "left channel: {got} vs {want}");
         }
         for (got, want) in back.channel(1).iter().zip(sent.iter()) {
-            assert!(
-                (got - want).abs() < 1.0e-3,
-                "right channel: {got} vs {want}"
-            );
+            assert!((got - want).abs() < 1.0e-3, "right channel: {got} vs {want}");
         }
         assert!(back.channel(2).is_empty(), "invented a third channel");
         let _ = std::fs::remove_file(&path);

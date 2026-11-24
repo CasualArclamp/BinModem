@@ -158,8 +158,7 @@ fn read_notice(frame: &[u8]) -> Option<u8> {
     if frame.len() != NOTICE || frame[..2] != NOTICE_HEAD || frame[2] != 1 {
         return None;
     }
-    (crc16(&frame[..NOTICE - 2]) == u16::from_le_bytes([frame[NOTICE - 2], frame[NOTICE - 1]]))
-        .then_some(frame[3])
+    (crc16(&frame[..NOTICE - 2]) == u16::from_le_bytes([frame[NOTICE - 2], frame[NOTICE - 1]])).then_some(frame[3])
 }
 
 /// What an ear made of the characters it has read.
@@ -176,11 +175,7 @@ fn crc16(octets: &[u8]) -> u16 {
     for &octet in octets {
         crc ^= u16::from(octet);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0x8408
-            } else {
-                crc >> 1
-            };
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
         }
     }
     !crc
@@ -225,11 +220,7 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     };
     let (send_hz, send_times) = pair(mine.sends_hz, theirs.hears_hz, "on the way out")?;
     let (hear_hz, hear_times) = pair(mine.hears_hz, theirs.sends_hz, "on the way back")?;
-    if send_times > 1
-        || hear_times > 1
-        || mine.sends_hz != theirs.hears_hz
-        || mine.hears_hz != theirs.sends_hz
-    {
+    if send_times > 1 || hear_times > 1 || mine.sends_hz != theirs.hears_hz || mine.hears_hz != theirs.sends_hz {
         notes.push(format!(
             "the ends' sound cards differ: {send_hz:.0} Hz on the way out and {hear_hz:.0} Hz on the way back"
         ));
@@ -247,9 +238,7 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     }
 
     let wanted = if mine.wanted != theirs.wanted {
-        notes.push(
-            "the ends asked for different modulations: running the multicarrier one".to_owned(),
-        );
+        notes.push("the ends asked for different modulations: running the multicarrier one".to_owned());
         Wanted::Dmt
     } else {
         mine.wanted
@@ -342,12 +331,8 @@ impl Ear {
         let (below, here, above) = (at(middle - 1), at(middle), at(middle + 1));
         // The one below turned back by where the window began, the one
         // above turned on by it.
-        let re = 0.5 * here.0
-            - 0.25 * (below.0 * cos + below.1 * sin)
-            - 0.25 * (above.0 * cos - above.1 * sin);
-        let im = 0.5 * here.1
-            - 0.25 * (below.1 * cos - below.0 * sin)
-            - 0.25 * (above.1 * cos + above.0 * sin);
+        let re = 0.5 * here.0 - 0.25 * (below.0 * cos + below.1 * sin) - 0.25 * (above.0 * cos - above.1 * sin);
+        let im = 0.5 * here.1 - 0.25 * (below.1 * cos - below.0 * sin) - 0.25 * (above.1 * cos + above.0 * sin);
         re * re + im * im
     }
 
@@ -414,12 +399,7 @@ impl Ear {
             self.read.remove(0);
         }
         self.read.push(self.octet);
-        let last = |len: usize| {
-            self.read
-                .len()
-                .checked_sub(len)
-                .map(|from| &self.read[from..])
-        };
+        let last = |len: usize| self.read.len().checked_sub(len).map(|from| &self.read[from..]);
         last(FRAME)
             .and_then(Caps::decode)
             .map(Heard::Caps)
@@ -450,26 +430,17 @@ pub struct Hello {
 
 impl std::fmt::Debug for Hello {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hello")
-            .field("mine", &self.mine)
-            .field("theirs", &self.theirs)
-            .finish_non_exhaustive()
+        f.debug_struct("Hello").field("mine", &self.mine).field("theirs", &self.theirs).finish_non_exhaustive()
     }
 }
 
 impl Hello {
     /// The end that called, or the end that answered, with what it is.
     pub fn new(calling: bool, mine: Caps) -> Self {
-        let (tones, listens) = if calling {
-            (CALLER, ANSWERER)
-        } else {
-            (ANSWERER, CALLER)
-        };
+        let (tones, listens) = if calling { (CALLER, ANSWERER) } else { (ANSWERER, CALLER) };
         let fs_in = f64::from(mine.hears_hz);
         let mut hello = Self {
-            ears: (0..mine.channels.max(1))
-                .map(|_| Ear::new(fs_in, listens))
-                .collect(),
+            ears: (0..mine.channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(),
             mine,
             theirs: None,
             fs_out: f64::from(mine.sends_hz),
@@ -512,10 +483,7 @@ impl Hello {
     /// The next message's bits: each character with its start and stop, and
     /// a little idle after.
     fn message(&mut self) {
-        let caps = Caps {
-            heard: self.theirs.is_some(),
-            ..self.mine
-        };
+        let caps = Caps { heard: self.theirs.is_some(), ..self.mine };
         self.bits.clear();
         for octet in caps.encode() {
             self.bits.push(false);
@@ -565,11 +533,7 @@ impl Hello {
             }
         }
         self.left_in_bit -= 1.0;
-        let hz = if self.bits[self.at] {
-            self.tones.0
-        } else {
-            self.tones.1
-        };
+        let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
         self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
         LEVEL * self.turn.sin()
     }
@@ -590,9 +554,7 @@ pub struct Watch {
 
 impl std::fmt::Debug for Watch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Watch")
-            .field("saying", &self.saying())
-            .finish_non_exhaustive()
+        f.debug_struct("Watch").field("saying", &self.saying()).finish_non_exhaustive()
     }
 }
 
@@ -600,15 +562,9 @@ impl Watch {
     /// For the end that called or the end that answered, hearing on
     /// `channels` channels at `fs_in` and sending at `fs_out`.
     pub fn new(calling: bool, fs_in: f64, fs_out: f64, channels: usize) -> Self {
-        let (tones, listens) = if calling {
-            (CALLER, ANSWERER)
-        } else {
-            (ANSWERER, CALLER)
-        };
+        let (tones, listens) = if calling { (CALLER, ANSWERER) } else { (ANSWERER, CALLER) };
         Self {
-            ears: (0..channels.max(1))
-                .map(|_| Ear::new(fs_in, listens))
-                .collect(),
+            ears: (0..channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(),
             tones,
             fs_out,
             turn: 0.0,
@@ -659,11 +615,7 @@ impl Watch {
         if !self.saying() {
             return 0.0;
         }
-        let hz = if self.bits[self.at] {
-            self.tones.0
-        } else {
-            self.tones.1
-        };
+        let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
         self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
         self.left_in_bit -= 1.0;
         if self.left_in_bit <= 0.0 {
@@ -733,11 +685,7 @@ pub struct Half {
 impl Twice {
     pub fn new(inner: Box<dyn Sender>) -> Self {
         let taps = between(2);
-        Self {
-            past: std::collections::VecDeque::from(vec![0.0; taps.len()]),
-            inner,
-            taps,
-        }
+        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len()]), inner, taps }
     }
 }
 
@@ -780,11 +728,7 @@ impl Sender for Twice {
 impl Half {
     pub fn new(inner: Box<dyn Receiver>) -> Self {
         let taps = between(2);
-        Self {
-            past: std::collections::VecDeque::from(vec![0.0; taps.len() / 2 + 1]),
-            inner,
-            taps,
-        }
+        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len() / 2 + 1]), inner, taps }
     }
 }
 
@@ -793,14 +737,7 @@ impl Receiver for Half {
         self.past.pop_back();
         self.past.push_front(sample);
         for phase in 0..2 {
-            let filled: f64 = self
-                .taps
-                .iter()
-                .skip(phase)
-                .step_by(2)
-                .zip(&self.past)
-                .map(|(t, x)| t * x)
-                .sum();
+            let filled: f64 = self.taps.iter().skip(phase).step_by(2).zip(&self.past).map(|(t, x)| t * x).sum();
             self.inner.feed(2.0 * filled);
         }
     }
@@ -862,11 +799,7 @@ fn between(times: usize) -> Vec<f64> {
     let mut taps: Vec<f64> = (0..len)
         .map(|i| {
             let x = i as f64 - mid;
-            let sinc = if x == 0.0 {
-                2.0 * cutoff
-            } else {
-                (std::f64::consts::TAU * cutoff * x).sin() / (std::f64::consts::PI * x)
-            };
+            let sinc = if x == 0.0 { 2.0 * cutoff } else { (std::f64::consts::TAU * cutoff * x).sin() / (std::f64::consts::PI * x) };
             let r = x / mid;
             sinc * crate::interp::bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / norm
         })
@@ -935,14 +868,7 @@ impl Sender for Faster {
         // Every `times`th tap, starting at this phase, against the
         // modulation's samples; and `times` over, since all but one in
         // `times` of the faster rate's samples are the filter's doing.
-        let sum: f64 = self
-            .taps
-            .iter()
-            .skip(self.phase)
-            .step_by(self.times)
-            .zip(&self.past)
-            .map(|(t, x)| t * x)
-            .sum();
+        let sum: f64 = self.taps.iter().skip(self.phase).step_by(self.times).zip(&self.past).map(|(t, x)| t * x).sum();
         self.phase = (self.phase + 1) % self.times;
         sum * self.times as f64
     }
@@ -1078,26 +1004,12 @@ mod tests {
     use super::*;
 
     fn caps(hears: u32, sends: u32) -> Caps {
-        Caps {
-            hears_hz: hears,
-            sends_hz: sends,
-            channels: 2,
-            wanted: Wanted::Dmt,
-            two_wire: false,
-            heard: false,
-            asks_baud: 0,
-        }
+        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0 }
     }
 
     #[test]
     fn a_message_survives_being_written_down() {
-        let said = Caps {
-            two_wire: true,
-            heard: true,
-            wanted: Wanted::Pcm,
-            asks_baud: 8000,
-            ..caps(192_000, 48_000)
-        };
+        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, ..caps(192_000, 48_000) };
         assert_eq!(Caps::decode(&said.encode()), Some(said));
         let mut spoiled = said.encode();
         spoiled[7] ^= 1;
@@ -1114,19 +1026,12 @@ mod tests {
         let (mut caller, mut host) = (Hello::new(true, a), Hello::new(false, b));
         let mut seed = 9u64;
         let mut hiss = || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             noise * (((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5) * 3.46
         };
         let (mut from_caller, mut from_host) = (0.0, 0.0);
         let mut owed = [0.0f64; 4];
-        let rates = [
-            f64::from(a.sends_hz),
-            f64::from(a.hears_hz),
-            f64::from(b.sends_hz),
-            f64::from(b.hears_hz),
-        ];
+        let rates = [f64::from(a.sends_hz), f64::from(a.hears_hz), f64::from(b.sends_hz), f64::from(b.hears_hz)];
         let mut tick = 0u64;
         while !(caller.done() && host.done()) && tick < (20.0 * line) as u64 {
             tick += 1;
@@ -1159,47 +1064,26 @@ mod tests {
     fn two_ends_learn_what_each_other_are_and_agree() {
         // The rig that started this: each end hears on one device and sends
         // on another, at different rates, and both were told two-wire.
-        let a = Caps {
-            two_wire: true,
-            ..caps(48_000, 192_000)
-        };
-        let b = Caps {
-            two_wire: true,
-            ..caps(192_000, 48_000)
-        };
+        let a = Caps { two_wire: true, ..caps(48_000, 192_000) };
+        let b = Caps { two_wire: true, ..caps(192_000, 48_000) };
         let (caller, host, took) = meet(a, b, 0.0, 0.0);
         assert!(caller.done() && host.done(), "after {took:.1} s");
         assert!(took < 6.0, "took {took:.1} s");
-        assert_eq!(
-            caller.theirs().map(|c| (c.hears_hz, c.sends_hz)),
-            Some((192_000, 48_000))
-        );
-        let (ours, theirs) = (
-            caller.agreed().unwrap().unwrap(),
-            host.agreed().unwrap().unwrap(),
-        );
+        assert_eq!(caller.theirs().map(|c| (c.hears_hz, c.sends_hz)), Some((192_000, 48_000)));
+        let (ours, theirs) = (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap());
         // A wire each way after all, each direction at its own rate.
         assert!(!ours.two_wire && !theirs.two_wire);
         assert_eq!((ours.send_hz, ours.hear_hz), (192_000.0, 48_000.0));
         assert_eq!((theirs.send_hz, theirs.hear_hz), (48_000.0, 192_000.0));
         assert_eq!((ours.send_times, ours.hear_times), (1, 1));
-        assert!(
-            ours.notes
-                .iter()
-                .any(|n| n.contains("two-wire was asked for")),
-            "{:?}",
-            ours.notes
-        );
+        assert!(ours.notes.iter().any(|n| n.contains("two-wire was asked for")), "{:?}", ours.notes);
     }
 
     #[test]
     fn it_gets_through_on_one_pair_of_wires_and_through_noise() {
         // Each end's own tones four times as loud as the far end's, and
         // noise as loud as the far end's tones.
-        let a = Caps {
-            two_wire: true,
-            ..caps(48_000, 48_000)
-        };
+        let a = Caps { two_wire: true, ..caps(48_000, 48_000) };
         let (caller, host, took) = meet(a, caps(48_000, 48_000), 2.0, 0.09);
         assert!(caller.done() && host.done(), "after {took:.1} s");
         let ours = caller.agreed().unwrap().unwrap();
@@ -1210,18 +1094,9 @@ mod tests {
     #[test]
     fn a_fast_card_and_a_slow_one_meet_at_the_slow_ones_rate() {
         let (caller, host, _) = meet(caps(192_000, 192_000), caps(48_000, 48_000), 0.0, 0.0);
-        let (fast, slow) = (
-            caller.agreed().unwrap().unwrap(),
-            host.agreed().unwrap().unwrap(),
-        );
-        assert_eq!(
-            (fast.send_hz, fast.hear_hz, fast.send_times, fast.hear_times),
-            (48_000.0, 48_000.0, 4, 4)
-        );
-        assert_eq!(
-            (slow.send_hz, slow.hear_hz, slow.send_times, slow.hear_times),
-            (48_000.0, 48_000.0, 1, 1)
-        );
+        let (fast, slow) = (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap());
+        assert_eq!((fast.send_hz, fast.hear_hz, fast.send_times, fast.hear_times), (48_000.0, 48_000.0, 4, 4));
+        assert_eq!((slow.send_hz, slow.hear_hz, slow.send_times, slow.hear_times), (48_000.0, 48_000.0, 1, 1));
         // And cards that no whole number relates are told so.
         let odd = agree(&caps(44_100, 44_100), &caps(48_000, 48_000));
         assert!(odd.is_err_and(|why| why.contains("44100") && why.contains("48000")));
@@ -1231,17 +1106,12 @@ mod tests {
     fn an_end_that_cannot_hear_says_so_through_the_other_ends_signal() {
         // The far end is sending its modulation, which to these tones is
         // noise right across the band and as loud as they are.
-        let (mut deaf, mut far) = (
-            Watch::new(true, 48_000.0, 48_000.0, 1),
-            Watch::new(false, 48_000.0, 48_000.0, 1),
-        );
+        let (mut deaf, mut far) = (Watch::new(true, 48_000.0, 48_000.0, 1), Watch::new(false, 48_000.0, 48_000.0, 1));
         deaf.tell(2);
         let mut seed = 5u64;
         let mut heard = Vec::new();
         for _ in 0..(3.0 * 48_000.0) as usize {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let hiss = 0.18 * (((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5) * 3.46;
             let said = deaf.say();
             heard.extend(far.hear(&[0.3 * said + hiss]));
@@ -1249,10 +1119,7 @@ mod tests {
             assert_eq!(deaf.hear(&[hiss + said]), None);
         }
         assert!(!deaf.saying());
-        assert!(
-            !heard.is_empty() && heard.iter().all(|&by| by == 2),
-            "{heard:?}"
-        );
+        assert!(!heard.is_empty() && heard.iter().all(|&by| by == 2), "{heard:?}");
     }
 
     #[test]

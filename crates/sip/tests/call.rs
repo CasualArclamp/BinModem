@@ -94,28 +94,16 @@ fn a_whole_call_registers_dials_and_carries_audio() {
     wait(&line, &far, &mut said, "the call to come up", || line.up());
 
     let progress = line.progress();
-    assert!(
-        progress.registered,
-        "the registration went away: {progress:?}"
-    );
+    assert!(progress.registered, "the registration went away: {progress:?}");
     assert_eq!(progress.call, "up", "{progress:?}");
     let peer = progress.peer.clone().unwrap_or_default();
-    assert!(
-        peer.contains(DIALLED),
-        "the peer is {peer:?}, not who we dialled"
-    );
+    assert!(peer.contains(DIALLED), "the peer is {peer:?}, not who we dialled");
     assert_eq!(progress.law.as_deref(), Some("PCMU"), "{progress:?}");
 
     // The offer and the answer agreed on the trunk's own RTP port, which is
     // the thing that decides whether any of the rest of this can work.
-    let agreed = line
-        .negotiated()
-        .expect("nothing was recorded as negotiated");
-    assert_eq!(
-        agreed.port,
-        far.rtp_port(),
-        "the SDP answer's port was not taken up"
-    );
+    let agreed = line.negotiated().expect("nothing was recorded as negotiated");
+    assert_eq!(agreed.port, far.rtp_port(), "the SDP answer's port was not taken up");
     assert_eq!(agreed.address, "127.0.0.1");
 
     // 13.2.2.4: the 2xx is acknowledged, or the trunk resends it for half a
@@ -134,31 +122,15 @@ fn a_whole_call_registers_dials_and_carries_audio() {
     // the rate the pacer drains it at, so the queue neither starves nor grows.
     let chunk = vec![TONE; 40];
     let mut heard: Vec<f32> = Vec::new();
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the tone to come back off the trunk",
-        || {
-            line.transmit(&chunk);
-            line.receive(&mut heard);
-            heard
-                .iter()
-                .filter(|s| (**s - TONE).abs() < TOLERANCE)
-                .count()
-                >= 320
-        },
-    );
+    wait(&line, &far, &mut said, "the tone to come back off the trunk", || {
+        line.transmit(&chunk);
+        line.receive(&mut heard);
+        heard.iter().filter(|s| (**s - TONE).abs() < TOLERANCE).count() >= 320
+    });
 
     let stats = line.progress();
-    assert!(
-        stats.packets_sent > 0 && stats.packets_received > 0,
-        "{stats:?}"
-    );
-    assert_eq!(
-        stats.lost, 0,
-        "packets went missing over the loopback: {stats:?}"
-    );
+    assert!(stats.packets_sent > 0 && stats.packets_received > 0, "{stats:?}");
+    assert_eq!(stats.lost, 0, "packets went missing over the loopback: {stats:?}");
 }
 
 /// The digest the agent computes is the one RFC 2617's formula gives, on the
@@ -180,44 +152,26 @@ fn the_digest_answer_is_what_the_formula_gives() {
         let one = checked
             .iter()
             .find(|c| c.method == method)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no {method} ever arrived with credentials on it\n{}",
-                    far.transcript()
-                )
-            });
+            .unwrap_or_else(|| panic!("no {method} ever arrived with credentials on it\n{}", far.transcript()));
         assert_eq!(
             one.offered, one.expected,
             "the {method} digest was wrong: it answered {} where the formula gives {} \
              (username {:?}, realm {:?}, nonce {:?}, uri {:?})",
             one.offered, one.expected, one.username, one.realm, one.nonce, one.uri
         );
-        assert!(
-            one.known_nonce,
-            "the {method} answered a nonce this trunk never issued"
-        );
+        assert!(one.known_nonce, "the {method} answered a nonce this trunk never issued");
         assert_eq!(one.realm, REALM, "the {method} answered the wrong realm");
-        assert_eq!(
-            one.username, USERNAME,
-            "the {method} authenticated as somebody else"
-        );
+        assert_eq!(one.username, USERNAME, "the {method} authenticated as somebody else");
         // 22.4: the uri in the credentials is the request URI, and a
         // registrar that hashes the one it was sent gets a different answer
         // from a client that hashed a different one.
-        assert_eq!(
-            one.uri, one.request_uri,
-            "the {method}'s stated uri is not its request URI"
-        );
+        assert_eq!(one.uri, one.request_uri, "the {method}'s stated uri is not its request URI");
     }
 
     // The first of each was sent bare, which is what makes the second one an
     // answer to a challenge rather than a guess.
     let registers = far.requests(Method::Register);
-    assert!(
-        registers.len() >= 2,
-        "only {} REGISTER(s) arrived",
-        registers.len()
-    );
+    assert!(registers.len() >= 2, "only {} REGISTER(s) arrived", registers.len());
     assert!(registers[0].headers.get("Authorization").is_none());
     assert!(registers[1].headers.get("Authorization").is_some());
 }
@@ -239,12 +193,7 @@ fn a_challenged_invite_is_acknowledged_before_it_is_sent_again() {
     let bare = position(&seen, |r| {
         r.method == Method::Invite && r.headers.get("Proxy-Authorization").is_none()
     })
-    .unwrap_or_else(|| {
-        panic!(
-            "no INVITE arrived without credentials\n{}",
-            far.transcript()
-        )
-    });
+    .unwrap_or_else(|| panic!("no INVITE arrived without credentials\n{}", far.transcript()));
     let branch = seen[bare]
         .request()
         .and_then(|r| r.headers.branch())
@@ -255,10 +204,7 @@ fn a_challenged_invite_is_acknowledged_before_it_is_sent_again() {
         r.method == Method::Ack && r.headers.branch() == Some(branch.as_str())
     })
     .unwrap_or_else(|| {
-        panic!(
-            "the 407 was never acknowledged on branch {branch}\n{}",
-            far.transcript()
-        )
+        panic!("the 407 was never acknowledged on branch {branch}\n{}", far.transcript())
     });
     let retried = position(&seen, |r| {
         r.method == Method::Invite && r.headers.get("Proxy-Authorization").is_some()
@@ -273,11 +219,7 @@ fn a_challenged_invite_is_acknowledged_before_it_is_sent_again() {
     // The retry is a new transaction, not a retransmission (8.1.3.5).
     let first = seen[bare].request().unwrap();
     let again = seen[retried].request().unwrap();
-    assert_ne!(
-        again.headers.branch(),
-        first.headers.branch(),
-        "the retry reused the branch"
-    );
+    assert_ne!(again.headers.branch(), first.headers.branch(), "the retry reused the branch");
     assert!(
         again.headers.cseq().map(|(n, _)| n) > first.headers.cseq().map(|(n, _)| n),
         "the retry reused the sequence number"
@@ -296,26 +238,15 @@ fn hanging_up_sends_a_bye_and_the_two_hundred_ends_the_call() {
     wait(&line, &far, &mut said, "a BYE to reach the trunk", || {
         !far.requests(Method::Bye).is_empty()
     });
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle"
+    });
 
     assert!(!line.up(), "the audio path is still up after the BYE");
     let progress = line.progress();
-    assert!(
-        progress.peer.is_none(),
-        "still on a call with {:?}",
-        progress.peer
-    );
+    assert!(progress.peer.is_none(), "still on a call with {:?}", progress.peer);
     // The line is a line, not a call: the registration outlives the call.
-    assert!(
-        progress.registered,
-        "hanging up took the registration down too"
-    );
+    assert!(progress.registered, "hanging up took the registration down too");
     assert!(
         said.iter().any(|s| s.contains("the call ended")),
         "nothing in the transcript says the call ended:\n{}",
@@ -348,13 +279,9 @@ fn hanging_up_ten_times_over_sends_one_bye() {
     for _ in 0..10 {
         line.hang_up();
     }
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle"
+    });
 
     let byes = far.requests(Method::Bye);
     assert_eq!(
@@ -368,10 +295,7 @@ fn hanging_up_ten_times_over_sends_one_bye() {
     // that made the first ask do nothing either would pass the count above.
     assert!(!line.up(), "the audio path is still up after the BYE");
     assert!(line.progress().peer.is_none(), "still on a call");
-    assert!(
-        line.progress().registered,
-        "hanging up took the registration down"
-    );
+    assert!(line.progress().registered, "hanging up took the registration down");
 }
 
 /// A dial the agent will not place is refused in words the line passes on.
@@ -403,28 +327,17 @@ fn a_dial_while_a_call_is_up_is_refused_in_words_the_line_passes_on() {
     let invites = far.requests(Method::Invite).len();
 
     line.dial(DIALLED);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the refusal to reach the line",
-        || {
-            line.progress()
-                .last_error
-                .as_deref()
-                .is_some_and(|e| e.contains("never left this machine"))
-        },
-    );
+    wait(&line, &far, &mut said, "the refusal to reach the line", || {
+        line.progress()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("never left this machine"))
+    });
 
     let refusal = said
         .iter()
         .find(|s| s.contains("never left this machine"))
-        .unwrap_or_else(|| {
-            panic!(
-                "the refusal never reached the transcript:\n{}",
-                lines(&said)
-            )
-        });
+        .unwrap_or_else(|| panic!("the refusal never reached the transcript:\n{}", lines(&said)));
     assert!(
         refusal.contains(DIALLED),
         "the refusal does not say what was not dialled: {refusal}"
@@ -438,8 +351,7 @@ fn a_dial_while_a_call_is_up_is_refused_in_words_the_line_passes_on() {
     // And the dialog that was already up is still the agent's call: refusing
     // a second number must not end the first one.
     assert_eq!(
-        line.progress().call,
-        "up",
+        line.progress().call, "up",
         "the refused dial ended the call that was already up\n{}",
         far.transcript()
     );
@@ -462,23 +374,16 @@ fn the_far_end_hanging_up_is_answered_and_ends_the_call_here() {
     wait(&line, &far, &mut said, "the BYE to be answered 200", || {
         far.answers_to(Method::Bye).iter().any(|r| r.code == 200)
     });
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle" && !line.up(),
-    );
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle" && !line.up()
+    });
 
     assert!(
         said.iter().any(|s| s.contains("the far end hung up")),
         "the transcript does not say who hung up:\n{}",
         lines(&said)
     );
-    assert!(
-        line.progress().registered,
-        "the registration went with the call"
-    );
+    assert!(line.progress().registered, "the registration went with the call");
 }
 
 /// A call the trunk refuses is acknowledged, is explained in words a person
@@ -497,22 +402,14 @@ fn a_refused_call_is_acknowledged_and_the_line_takes_another() {
     // Idle alone would be true before the INVITE had even gone out, so the
     // ACK for the refusal is waited for as well: the two together are the end
     // of the attempt and not the start of it.
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the refused call to be given up on",
-        || line.progress().call == "idle" && !far.requests(Method::Ack).is_empty(),
-    );
+    wait(&line, &far, &mut said, "the refused call to be given up on", || {
+        line.progress().call == "idle" && !far.requests(Method::Ack).is_empty()
+    });
 
     // 17.1.1.3 again: a failure response is acknowledged in its own
     // transaction, on the INVITE's branch.
     let refused = answered_invite(&far);
-    let branch = refused
-        .headers
-        .branch()
-        .expect("no branch on the INVITE")
-        .to_owned();
+    let branch = refused.headers.branch().expect("no branch on the INVITE").to_owned();
     assert!(
         far.requests(Method::Ack)
             .iter()
@@ -525,25 +422,14 @@ fn a_refused_call_is_acknowledged_and_the_line_takes_another() {
         .iter()
         .find(|s| s.contains("failed"))
         .unwrap_or_else(|| panic!("nothing said the call failed:\n{}", lines(&said)));
-    assert!(
-        failure.contains("486"),
-        "the failure does not give the code: {failure}"
-    );
-    assert!(
-        failure.contains("busy"),
-        "the failure does not say what 486 means: {failure}"
-    );
+    assert!(failure.contains("486"), "the failure does not give the code: {failure}");
+    assert!(failure.contains("busy"), "the failure does not say what 486 means: {failure}");
     assert!(!line.up(), "a refused call left the audio path connected");
-    assert!(
-        line.progress().peer.is_none(),
-        "a refused call left a peer behind"
-    );
+    assert!(line.progress().peer.is_none(), "a refused call left a peer behind");
 
     // And now the same line places a call that works.
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the second call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the second call to come up", || line.up());
     assert_eq!(line.progress().call, "up");
     assert_eq!(
         far.requests(Method::Invite)
@@ -567,20 +453,12 @@ fn an_answer_of_a_codec_we_never_offered_is_hung_up_on() {
     far.answer_with(Answer::G729Only);
 
     line.dial(DIALLED);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the agent to put down a call it cannot carry",
-        || !far.requests(Method::Bye).is_empty(),
-    );
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the agent to put down a call it cannot carry", || {
+        !far.requests(Method::Bye).is_empty()
+    });
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle"
+    });
 
     assert!(!line.up(), "a call we cannot carry came up anyway");
     assert!(
@@ -638,20 +516,13 @@ fn an_options_from_the_trunk_is_answered() {
     });
 
     let answer = far.answers_to(Method::Options).remove(0);
-    assert_eq!(
-        answer.code, 200,
-        "the trunk's keep-alive got {} {}",
-        answer.code, answer.reason
-    );
+    assert_eq!(answer.code, 200, "the trunk's keep-alive got {} {}", answer.code, answer.reason);
     // 11.2: an answer worth having says what the agent will accept.
     assert!(
         answer.headers.all("Allow").any(|a| a.contains("INVITE")),
         "the 200 to OPTIONS does not say what this agent allows"
     );
-    assert!(
-        line.progress().registered,
-        "the registration did not survive an OPTIONS"
-    );
+    assert!(line.progress().registered, "the registration did not survive an OPTIONS");
 }
 
 /// A re-INVITE asking to switch the call to T.38 is declined with 488, and the
@@ -670,24 +541,16 @@ fn a_re_invite_asking_for_t38_is_declined_and_the_call_stays_up() {
 
     let before = line.progress().packets_received;
     far.order(Order::T38ReInvite);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the re-INVITE to be declined",
-        || far.answers_to(Method::Invite).iter().any(|r| r.code >= 300),
-    );
+    wait(&line, &far, &mut said, "the re-INVITE to be declined", || {
+        far.answers_to(Method::Invite).iter().any(|r| r.code >= 300)
+    });
 
     let declined = far
         .answers_to(Method::Invite)
         .into_iter()
         .find(|r| r.code >= 300)
         .expect("checked in the wait above");
-    assert_eq!(
-        declined.code, 488,
-        "T.38 was answered {} {}",
-        declined.code, declined.reason
-    );
+    assert_eq!(declined.code, 488, "T.38 was answered {} {}", declined.code, declined.reason);
     assert!(
         declined.reason.to_ascii_lowercase().contains("t.38"),
         "the refusal does not say what was refused: {}",
@@ -703,13 +566,9 @@ fn a_re_invite_asking_for_t38_is_declined_and_the_call_stays_up() {
     );
     // Still carrying audio, which is the whole point of declining rather than
     // hanging up.
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "audio to keep flowing after the 488",
-        || line.progress().packets_received > before,
-    );
+    wait(&line, &far, &mut said, "audio to keep flowing after the 488", || {
+        line.progress().packets_received > before
+    });
 }
 
 /// 17.2.1: a request that arrives twice is answered twice with the same
@@ -732,21 +591,12 @@ fn a_retransmitted_bye_gets_the_same_answer_twice() {
     });
 
     far.order(Order::ByeAgain);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the retransmitted BYE to be answered again",
-        || far.answers_to(Method::Bye).len() >= 2,
-    );
+    wait(&line, &far, &mut said, "the retransmitted BYE to be answered again", || {
+        far.answers_to(Method::Bye).len() >= 2
+    });
 
     let answers = far.answer_octets(Method::Bye);
-    assert_eq!(
-        answers.len(),
-        2,
-        "expected exactly two answers, got {}",
-        answers.len()
-    );
+    assert_eq!(answers.len(), 2, "expected exactly two answers, got {}", answers.len());
     assert_eq!(
         String::from_utf8_lossy(&answers[0]),
         String::from_utf8_lossy(&answers[1]),
@@ -767,18 +617,12 @@ fn the_far_end_hanging_up_leaves_the_line_ready_for_the_next_number() {
     wait(&line, &far, &mut said, "the call to come up", || line.up());
 
     far.order(Order::Bye);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle" && !line.up(),
-    );
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle" && !line.up()
+    });
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the second call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the second call to come up", || line.up());
     assert_eq!(line.progress().call, "up", "{:?}", line.progress());
     assert_eq!(
         answered_invites(&far),
@@ -808,21 +652,15 @@ fn a_number_dialled_the_moment_the_call_was_put_down_still_becomes_a_call() {
     line.hang_up();
     line.dial(DIALLED);
 
-    wait(&line, &far, &mut said, "the second call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the second call to come up", || line.up());
     assert_eq!(line.progress().call, "up", "{:?}", line.progress());
     // Waited for rather than counted where it stands. The BYE and the INVITE
     // leave in the same pass and the trunk is a thread of its own, so which of
     // them it has finished writing down at any instant is not something this
     // test is about -- that there is one BYE, and one only, is.
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the BYE for the call that was put down",
-        || !far.requests(Method::Bye).is_empty(),
-    );
+    wait(&line, &far, &mut said, "the BYE for the call that was put down", || {
+        !far.requests(Method::Bye).is_empty()
+    });
     assert_eq!(
         far.requests(Method::Bye).len(),
         1,
@@ -856,18 +694,12 @@ fn a_bye_the_far_end_never_answers_still_frees_the_line_at_once() {
     wait(&line, &far, &mut said, "the BYE to reach the trunk", || {
         !far.requests(Method::Bye).is_empty()
     });
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the line to come back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the line to come back to idle", || {
+        line.progress().call == "idle"
+    });
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the next call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the next call to come up", || line.up());
     assert_eq!(line.progress().call, "up", "{:?}", line.progress());
 }
 
@@ -892,19 +724,13 @@ fn a_late_answer_to_the_last_calls_bye_does_not_end_the_next_call() {
     });
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the next call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the next call to come up", || line.up());
 
     // The trunk gets round to the BYE it never answered.
     far.order(Order::AnswerTheOldBye);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the trunk's late 200 to arrive",
-        || far.answered_the_old_bye(),
-    );
+    wait(&line, &far, &mut said, "the trunk's late 200 to arrive", || {
+        far.answered_the_old_bye()
+    });
     // A moment for the agent to act on it, if it is going to.
     let settle = Instant::now() + Duration::from_millis(300);
     while Instant::now() < settle {
@@ -918,11 +744,7 @@ fn a_late_answer_to_the_last_calls_bye_does_not_end_the_next_call() {
         "a late answer to the last call's BYE ended the call placed since\n{}",
         far.transcript()
     );
-    assert!(
-        line.up(),
-        "the audio path went with it\n{}",
-        far.transcript()
-    );
+    assert!(line.up(), "the audio path went with it\n{}", far.transcript());
 }
 
 /// Hang up, redial, and put that second call down while the first call's BYE
@@ -941,25 +763,19 @@ fn a_second_call_can_be_put_down_while_the_first_ones_bye_is_still_running() {
     far.treat_byes(ByeManner::Ignore);
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the first call to come up", || {
-        line.up()
-    });
-    let first = line.progress().call;
+    wait(&line, &far, &mut said, "the first call to come up", || line.up());
+    let first = line
+        .progress()
+        .call;
     assert_eq!(first, "up");
 
     line.hang_up();
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the first BYE to reach the trunk",
-        || !far.requests(Method::Bye).is_empty(),
-    );
+    wait(&line, &far, &mut said, "the first BYE to reach the trunk", || {
+        !far.requests(Method::Bye).is_empty()
+    });
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the second call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the second call to come up", || line.up());
 
     line.hang_up();
     wait(
@@ -969,20 +785,14 @@ fn a_second_call_can_be_put_down_while_the_first_ones_bye_is_still_running() {
         "a BYE for the second call, which is a different call",
         || byes_for_distinct_calls(&far) >= 2,
     );
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the line to come back to idle",
-        || line.progress().call == "idle" && !line.up(),
-    );
+    wait(&line, &far, &mut said, "the line to come back to idle", || {
+        line.progress().call == "idle" && !line.up()
+    });
 
     // And a third, because a line that works twice and not three times is
     // still a line with something left over in it.
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the third call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the third call to come up", || line.up());
 }
 
 /// The far end refuses our BYE with 481: it had destroyed the dialog already.
@@ -1002,18 +812,12 @@ fn a_bye_refused_with_481_still_ends_the_call_here() {
     wait(&line, &far, &mut said, "the BYE to reach the trunk", || {
         !far.requests(Method::Bye).is_empty()
     });
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the line to come back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the line to come back to idle", || {
+        line.progress().call == "idle"
+    });
 
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the next call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the next call to come up", || line.up());
     assert_eq!(
         far.requests(Method::Bye).len(),
         1,
@@ -1040,22 +844,16 @@ fn hanging_up_a_call_that_has_already_gone_leaves_nothing_behind() {
     wait(&line, &far, &mut said, "the call to come up", || line.up());
 
     far.order(Order::Bye);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the call to go back to idle",
-        || line.progress().call == "idle",
-    );
+    wait(&line, &far, &mut said, "the call to go back to idle", || {
+        line.progress().call == "idle"
+    });
 
     // Ten, because the window's own loop asks again while it can see a call.
     for _ in 0..10 {
         line.hang_up();
     }
     line.dial(DIALLED);
-    wait(&line, &far, &mut said, "the next call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the next call to come up", || line.up());
 
     assert!(
         far.requests(Method::Bye).is_empty(),
@@ -1085,9 +883,7 @@ fn a_number_dialled_while_a_cancel_is_in_flight_still_becomes_a_call() {
     line.hang_up();
     line.dial(DIALLED);
 
-    wait(&line, &far, &mut said, "the second call to come up", || {
-        line.up()
-    });
+    wait(&line, &far, &mut said, "the second call to come up", || line.up());
     assert_eq!(line.progress().call, "up", "{:?}", line.progress());
     assert_eq!(
         far.requests(Method::Cancel).len(),
@@ -1159,21 +955,13 @@ fn a_retransmitted_re_invite_gets_the_same_answer_twice() {
     };
 
     far.order(Order::ReInvite);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the re-INVITE to be answered",
-        || !answered(&far).is_empty(),
-    );
+    wait(&line, &far, &mut said, "the re-INVITE to be answered", || {
+        !answered(&far).is_empty()
+    });
     far.order(Order::ReInviteAgain);
-    wait(
-        &line,
-        &far,
-        &mut said,
-        "the retransmitted re-INVITE to be answered",
-        || answered(&far).len() >= 2,
-    );
+    wait(&line, &far, &mut said, "the retransmitted re-INVITE to be answered", || {
+        answered(&far).len() >= 2
+    });
 
     let answers = answered(&far);
     assert_eq!(
@@ -1280,10 +1068,7 @@ fn answered_invite(far: &FarEnd) -> Request {
         .into_iter()
         .find(|r| r.headers.get("Proxy-Authorization").is_some())
         .unwrap_or_else(|| {
-            panic!(
-                "no INVITE ever arrived with credentials on it\n{}",
-                far.transcript()
-            )
+            panic!("no INVITE ever arrived with credentials on it\n{}", far.transcript())
         })
 }
 
@@ -1314,7 +1099,8 @@ fn byes_for_distinct_calls(far: &FarEnd) -> usize {
 
 /// Where in what the trunk saw the first request matching this sits.
 fn position(seen: &[Seen], matches: impl Fn(&Request) -> bool) -> Option<usize> {
-    seen.iter().position(|s| s.request().is_some_and(&matches))
+    seen.iter()
+        .position(|s| s.request().is_some_and(&matches))
 }
 
 fn lines(said: &[String]) -> String {
@@ -1611,10 +1397,7 @@ impl FarEnd {
     }
 
     fn checked(&self) -> Vec<Checked> {
-        self.book
-            .lock()
-            .map(|b| b.checked.clone())
-            .unwrap_or_default()
+        self.book.lock().map(|b| b.checked.clone()).unwrap_or_default()
     }
 
     /// Both directions, in order: what a capture of this call would show.
@@ -1709,18 +1492,12 @@ impl Trunk {
             Method::Register => self.register(&request, from),
             Method::Invite => self.invite(&request, from),
             Method::Bye => {
-                let manner = self
-                    .manner
-                    .lock()
-                    .map(|m| m.bye)
-                    .unwrap_or(ByeManner::Answer);
+                let manner = self.manner.lock().map(|m| m.bye).unwrap_or(ByeManner::Answer);
                 match manner {
                     ByeManner::Ignore => {
                         // Kept, so that a test can have it answered late, which
                         // is what 17.1.2.2's 32 s of transaction is for.
-                        self.note(
-                            "out: nothing at all -- this trunk is sitting on the BYE".to_owned(),
-                        );
+                        self.note("out: nothing at all -- this trunk is sitting on the BYE".to_owned());
                         if let Ok(mut book) = self.book.lock() {
                             book.unanswered_bye = Some(request.clone());
                         }
@@ -1867,7 +1644,11 @@ impl Trunk {
             return;
         }
 
-        let answer = self.manner.lock().map(|m| m.answer).unwrap_or(Answer::G711);
+        let answer = self
+            .manner
+            .lock()
+            .map(|m| m.answer)
+            .unwrap_or(Answer::G711);
         let mut ok = self.reply(request, from, 200, "OK");
         self.tagged(&mut ok);
         ok.headers.push("Contact", self.contact());
@@ -2053,7 +1834,11 @@ impl Trunk {
                 let _ = self.socket.send_to(&octets, agent);
             }
             Order::AnswerTheOldBye => {
-                let waiting = self.book.lock().ok().and_then(|b| b.unanswered_bye.clone());
+                let waiting = self
+                    .book
+                    .lock()
+                    .ok()
+                    .and_then(|b| b.unanswered_bye.clone());
                 let Some(request) = waiting else { return };
                 let response = self.reply(&request, agent, 200, "OK");
                 self.send(&Message::Response(response), agent);

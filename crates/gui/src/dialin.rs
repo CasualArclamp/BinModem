@@ -116,10 +116,7 @@ pub enum Next {
     /// Start PPP. `user` is who logged in at the text prompt, if anyone did;
     /// when a caller did not, PPP has to ask. `early` is the far end's frame
     /// already arriving.
-    Ppp {
-        user: Option<String>,
-        early: Vec<u8>,
-    },
+    Ppp { user: Option<String>, early: Vec<u8> },
     /// Put the call down.
     HangUp(String),
     /// Stop, and give the terminal back.
@@ -167,26 +164,17 @@ impl Login {
         for note in server.take_notes() {
             tx.log(Direction::Note, format!("dial-in: {note}"));
         }
-        Self {
-            kind: Kind::Serving(Box::new(server)),
-            pending: None,
-        }
+        Self { kind: Kind::Serving(Box::new(server)), pending: None }
     }
 
     /// A script to log in to the far end.
     pub fn call(settings: &Settings, tx: &Publisher) -> Self {
         tx.log(
             Direction::Note,
-            format!(
-                "login: logging in as {} and waiting for PPP",
-                settings.account.name
-            ),
+            format!("login: logging in as {} and waiting for PPP", settings.account.name),
         );
         let script = login::Script::new(settings.account.clone(), &settings.command);
-        Self {
-            kind: Kind::Calling(Box::new(script)),
-            pending: None,
-        }
+        Self { kind: Kind::Calling(Box::new(script)), pending: None }
     }
 
     /// Whether this is the answering end's terminal server.
@@ -222,9 +210,7 @@ impl Login {
                 // The far end's text goes on the screen, up to where its PPP
                 // begins; a frame is not something anyone wants to look at.
                 let text = match &ended {
-                    Some(login::script::Outcome::Ppp { early }) => {
-                        &bytes[..bytes.len().saturating_sub(early.len())]
-                    }
+                    Some(login::script::Outcome::Ppp { early }) => &bytes[..bytes.len().saturating_sub(early.len())],
                     _ => bytes,
                 };
                 if !text.is_empty() {
@@ -289,11 +275,7 @@ mod tests {
     #[test]
     fn a_caller_logs_in_to_an_answering_end_and_both_reach_ppp() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let settings = Settings {
-            serve: true,
-            account: Account::new("guest", "letmein"),
-            ..Settings::default()
-        };
+        let settings = Settings { serve: true, account: Account::new("guest", "letmein"), ..Settings::default() };
         let mut server = Login::serve(&settings, &tx);
         let mut caller = Login::call(&settings, &tx);
         let (mut served, mut called) = (None, None);
@@ -314,13 +296,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(
-            served,
-            Some(Next::Ppp {
-                user: Some("guest".into()),
-                early: vec![]
-            })
-        );
+        assert_eq!(served, Some(Next::Ppp { user: Some("guest".into()), early: vec![] }));
         assert!(matches!(called, Some(Next::Ppp { .. })), "{called:?}");
     }
 
@@ -335,27 +311,16 @@ mod tests {
         let (_, next) = caller.step(1, &tx);
         assert_eq!(
             next,
-            Some(Next::Ppp {
-                user: None,
-                early: vec![0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21, 0x7e]
-            })
+            Some(Next::Ppp { user: None, early: vec![0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21, 0x7e] })
         );
     }
 
     #[test]
     fn settings_come_back_as_they_were_left() {
-        let settings = Settings {
-            serve: true,
-            account: Account::new("rory", "hunter 2"),
-            command: "start ppp".into(),
-            ..Settings::default()
-        };
+        let settings = Settings { serve: true, account: Account::new("rory", "hunter 2"), command: "start ppp".into(), ..Settings::default() };
         let mut r = crate::remembered::Remembered::default();
         settings.remember(&mut r);
         assert_eq!(Settings::recall(&r), settings);
-        assert_eq!(
-            Settings::recall(&crate::remembered::Remembered::default()),
-            Settings::default()
-        );
+        assert_eq!(Settings::recall(&crate::remembered::Remembered::default()), Settings::default());
     }
 }

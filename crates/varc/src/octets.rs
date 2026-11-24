@@ -87,10 +87,7 @@ fn table() -> Table {
 }
 
 fn table_of(parity: u8) -> Table {
-    Table {
-        parity,
-        bits: vec![8],
-    }
+    Table { parity, bits: vec![8] }
 }
 
 fn layout_of(parity: u8) -> Layout {
@@ -104,15 +101,13 @@ fn layout_of(parity: u8) -> Layout {
 fn sync(mark: u8) -> Vec<u8> {
     let mut state: u32 = 0x3c5a_a5c3 ^ u32::from(mark).wrapping_mul(0x9e37_79b9);
     (0..SYNC)
-        .map(|_| {
-            loop {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                let octet = (state >> 8) as u8;
-                if !matches!(octet, 0xFF | 0x7F | 0xD5 | 0x55) {
-                    break octet;
-                }
+        .map(|_| loop {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let octet = (state >> 8) as u8;
+            if !matches!(octet, 0xFF | 0x7F | 0xD5 | 0x55) {
+                break octet;
             }
         })
         .collect()
@@ -122,10 +117,7 @@ fn sync(mark: u8) -> Vec<u8> {
 /// next up, each as a number from nought to 255 laid over -1 to 1. A grid
 /// of 65 536 points, which scrambled data fills evenly.
 fn point(across: u8, up: u8) -> (f64, f64) {
-    (
-        (f64::from(across) - 127.5) / 127.5,
-        (f64::from(up) - 127.5) / 127.5,
-    )
+    ((f64::from(across) - 127.5) / 127.5, (f64::from(up) - 127.5) / 127.5)
 }
 
 /// Bits a second on the line, and of frames.
@@ -136,10 +128,7 @@ fn rates(fs: f64) -> (f64, f64) {
 
 fn rates_of(fs: f64, parity: u8) -> (f64, f64) {
     let superframe = (SYNC + BLOCK) as f64 / fs;
-    (
-        (8 * BLOCK) as f64 / superframe,
-        (8 * layout_of(parity).payload()) as f64 / superframe,
-    )
+    ((8 * BLOCK) as f64 / superframe, (8 * layout_of(parity).payload()) as f64 / superframe)
 }
 
 /// The transmitter.
@@ -163,24 +152,13 @@ impl Tx {
     /// A transmitter for a line of `fs` codewords a second, in the law
     /// whose levels these are.
     pub fn new(fs: f64, levels: &Levels) -> Self {
-        Self {
-            fs,
-            sync: (0..4).map(sync).collect(),
-            levels: *levels,
-            id: 0,
-            next: None,
-            at: 0,
-            block: Vec::new(),
-            wanting: true,
-            parity: [PARITY; 4],
-        }
+        Self { fs, sync: (0..4).map(sync).collect(), levels: *levels, id: 0, next: None, at: 0, block: Vec::new(), wanting: true, parity: [PARITY; 4] }
     }
 }
 
 impl Sender for Tx {
     fn wants(&self) -> Option<Layout> {
-        self.wanting
-            .then(|| layout_of(self.parity[usize::from(self.id & 3)]))
+        self.wanting.then(|| layout_of(self.parity[usize::from(self.id & 3)]))
     }
 
     fn give(&mut self, line: Vec<u8>) {
@@ -282,23 +260,13 @@ impl Rx {
     /// A-law. A law with two codewords for the level silence is, which is
     /// mu-law, cannot tell them apart on arrival, and is treated so.
     pub fn new(fs: f64, levels: &Levels, quiet: u8) -> Self {
-        let mut ladder: Vec<(f64, u8)> = (0..=255u8)
-            .map(|octet| (levels[usize::from(octet)], octet))
-            .collect();
+        let mut ladder: Vec<(f64, u8)> = (0..=255u8).map(|octet| (levels[usize::from(octet)], octet)).collect();
         // Silence first among equals, so that it is what a shared level
         // reads as.
-        ladder.sort_by(|a, b| {
-            a.0.total_cmp(&b.0)
-                .then((a.1 != quiet).cmp(&(b.1 != quiet)))
-        });
+        ladder.sort_by(|a, b| a.0.total_cmp(&b.0).then((a.1 != quiet).cmp(&(b.1 != quiet))));
         let before = ladder.len();
         ladder.dedup_by(|later, kept| later.0 == kept.0);
-        let blind = ladder.len() < before
-            && levels
-                .iter()
-                .filter(|l| **l == levels[usize::from(quiet)])
-                .count()
-                > 1;
+        let blind = ladder.len() < before && levels.iter().filter(|l| **l == levels[usize::from(quiet)]).count() > 1;
         Self {
             fs,
             sync: (0..4).map(sync).collect(),
@@ -389,11 +357,7 @@ impl Rx {
         self.erased += erased.iter().filter(|e| **e).count() as u64;
         self.judge(hole, if self.blind { LIGHT_BLIND } else { LIGHT });
         let layout = layout_of(self.parity[usize::from(self.id.unwrap_or(0) & 3)]);
-        self.arrived.push_back(Arrived::Octets {
-            line: octets.to_vec(),
-            layout,
-            erased: Some(erased),
-        });
+        self.arrived.push_back(Arrived::Octets { line: octets.to_vec(), layout, erased: Some(erased) });
     }
 }
 
@@ -402,17 +366,8 @@ impl Receiver for Rx {
         // The codeword whose level is nearest. On a line that carries
         // codewords it is that level exactly.
         let at = self.ladder.partition_point(|(level, _)| *level < sample);
-        let word = match (
-            at.checked_sub(1).and_then(|i| self.ladder.get(i)),
-            self.ladder.get(at),
-        ) {
-            (Some(below), Some(above)) => {
-                if sample - below.0 < above.0 - sample {
-                    below.1
-                } else {
-                    above.1
-                }
-            }
+        let word = match (at.checked_sub(1).and_then(|i| self.ladder.get(i)), self.ladder.get(at)) {
+            (Some(below), Some(above)) => if sample - below.0 < above.0 - sample { below.1 } else { above.1 },
             (Some(only), None) | (None, Some(only)) => only.1,
             (None, None) => self.quiet,
         };
@@ -494,12 +449,7 @@ impl Receiver for Rx {
         // Eight bits that arrive as sent or not at all: what G.711 would
         // give a waveform is beside the point, and this is what the word
         // length is worth.
-        Health {
-            locked,
-            steady: locked,
-            snr_db: if locked { 50.0 } else { 0.0 },
-            clock_ppm: 0.0,
-        }
+        Health { locked, steady: locked, snr_db: if locked { 50.0 } else { 0.0 }, clock_ppm: 0.0 }
     }
 
     fn rates(&self) -> (f64, f64) {
@@ -510,16 +460,11 @@ impl Receiver for Rx {
     }
 
     fn code(&self) -> Option<(usize, usize)> {
-        self.id
-            .map(|id| layout_of(self.parity[usize::from(id & 3)]).code())
+        self.id.map(|id| layout_of(self.parity[usize::from(id & 3)]).code())
     }
 
     fn spectrum(&self) -> Vec<Bin> {
-        vec![Bin {
-            hz: 0.0,
-            snr_db: self.health().snr_db,
-            bits: 8,
-        }]
+        vec![Bin { hz: 0.0, snr_db: self.health().snr_db, bits: 8 }]
     }
 
     fn points(&mut self) -> Vec<(f64, f64)> {
@@ -537,9 +482,7 @@ mod tests {
     use crate::station::Station;
 
     fn stream(seed: usize, len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8)
-            .collect()
+        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
     }
 
     type End = Station<Tx, Rx>;
@@ -579,35 +522,16 @@ mod tests {
         fn new(mu: bool) -> Self {
             let levels = levels(mu);
             let quiet = if mu { 0xFF } else { 0xD5 };
-            let end = || {
-                Station::new(
-                    8000.0,
-                    vec![(Tx::new(8000.0, &levels), Rx::new(8000.0, &levels, quiet))],
-                )
-            };
+            let end = || Station::new(8000.0, vec![(Tx::new(8000.0, &levels), Rx::new(8000.0, &levels, quiet))]);
             let idle = levels[usize::from(FILL)];
-            Self {
-                a: end(),
-                b: end(),
-                from_a: idle,
-                from_b: idle,
-                at_a: vec![],
-                at_b: vec![],
-                sample: 0,
-                mu,
-                lose: vec![],
-                recoded: false,
-            }
+            Self { a: end(), b: end(), from_a: idle, from_b: idle, at_a: vec![], at_b: vec![], sample: 0, mu, lose: vec![], recoded: false }
         }
 
         fn run(&mut self, seconds: f64) {
             let levels = levels(self.mu);
             let quiet = levels[if self.mu { 0xFF } else { 0xD5 }];
             for _ in 0..(seconds * 8000.0) as usize {
-                let lost = self
-                    .lose
-                    .iter()
-                    .any(|&at| (at..at + 160).contains(&self.sample));
+                let lost = self.lose.iter().any(|&at| (at..at + 160).contains(&self.sample));
                 // A level is what the line carries, and mu-law's two
                 // noughts are one level: nothing has to be done to lose
                 // the difference.
@@ -641,18 +565,8 @@ mod tests {
             pair.a.write(&to_b);
             pair.b.write(&to_a);
             pair.run(14.0);
-            assert!(
-                pair.at_b == to_b,
-                "mu {mu}: {} of {} octets",
-                pair.at_b.len(),
-                to_b.len()
-            );
-            assert!(
-                pair.at_a == to_a,
-                "mu {mu}: {} of {} octets",
-                pair.at_a.len(),
-                to_a.len()
-            );
+            assert!(pair.at_b == to_b, "mu {mu}: {} of {} octets", pair.at_b.len(), to_b.len());
+            assert!(pair.at_a == to_a, "mu {mu}: {} of {} octets", pair.at_a.len(), to_a.len());
             assert!(pair.a.channels[0].loaded() && pair.b.channels[0].loaded());
             assert_eq!(pair.b.channels[0].tally.failed, 0, "mu {mu}");
             assert_eq!(pair.a.arq.resent, 0, "mu {mu}");
@@ -681,18 +595,9 @@ mod tests {
             let to_b = stream(3, 40_000);
             pair.a.write(&to_b);
             pair.run(12.0);
-            assert!(
-                pair.at_b == to_b,
-                "mu {mu}: {} of {} octets",
-                pair.at_b.len(),
-                to_b.len()
-            );
+            assert!(pair.at_b == to_b, "mu {mu}: {} of {} octets", pair.at_b.len(), to_b.len());
             let b = &pair.b.channels[0];
-            assert!(
-                b.rx.erased >= 24 * 120,
-                "{} octets marked as holes",
-                b.rx.erased
-            );
+            assert!(b.rx.erased >= 24 * 120, "{} octets marked as holes", b.rx.erased);
             assert_eq!(b.tally.failed, 0, "mu {mu}: {:?}", b.tally);
             assert_eq!(pair.a.arq.resent, 0, "mu {mu}");
             assert_eq!(b.rx.losses, 0, "mu {mu}");

@@ -190,11 +190,7 @@ mod tests {
         for _ in 0..eq.delay() - 1 {
             eq.equalize((0.0, 0.0));
         }
-        assert_eq!(
-            eq.equalize((0.0, 0.0)),
-            (0.4, -0.7),
-            "the sample should emerge"
-        );
+        assert_eq!(eq.equalize((0.0, 0.0)), (0.4, -0.7), "the sample should emerge");
     }
 
     #[test]
@@ -208,11 +204,7 @@ mod tests {
             .sum::<f64>()
             / 16.0;
         assert!((second - 1.0).abs() < 1e-12, "not unit power: {second}");
-        assert!(
-            (fourth / second - 1.32).abs() < 0.01,
-            "modulus {}",
-            fourth / second
-        );
+        assert!((fourth / second - 1.32).abs() < 0.01, "modulus {}", fourth / second);
     }
 
     /// The point of the whole thing: a channel that smears the constellation
@@ -259,14 +251,8 @@ mod tests {
             after < before / 3.0,
             "equaliser did not converge: {before:.4} at the start, {after:.4} at the end"
         );
-        assert!(
-            after < 0.12,
-            "residual error {after:.4} is too large to slice"
-        );
-        assert!(
-            !eq.is_blind(),
-            "should have handed over to decision direction"
-        );
+        assert!(after < 0.12, "residual error {after:.4} is too large to slice");
+        assert!(!eq.is_blind(), "should have handed over to decision direction");
     }
 
     #[test]
@@ -294,10 +280,7 @@ mod tests {
                 worst = worst.max((out.0 - expected.0).abs().max((out.1 - expected.1).abs()));
             }
         }
-        assert!(
-            worst < 0.2,
-            "an undistorted signal was disturbed by {worst}"
-        );
+        assert!(worst < 0.2, "an undistorted signal was disturbed by {worst}");
     }
 
     #[test]

@@ -89,11 +89,7 @@ impl Default for Params {
 impl Params {
     /// The pair that is negotiated, with the history Table 10 pairs with them.
     pub fn of(n2: u16, n7: u8) -> Self {
-        Self {
-            n2,
-            n7,
-            n8: n2.saturating_mul(3),
-        }
+        Self { n2, n7, n8: n2.saturating_mul(3) }
     }
 
     /// N1 (Table 11): "Maximum codeword size (in bits)", derived from N2.
@@ -174,25 +170,10 @@ mod table_tests {
     /// 7.4: "the lesser value of two proposals is used".
     #[test]
     fn negotiation_takes_the_lower_of_each() {
-        let mine = Params {
-            n2: 2048,
-            n7: 255,
-            n8: 6144,
-        };
-        let theirs = Params {
-            n2: 1024,
-            n7: 64,
-            n8: 8192,
-        };
+        let mine = Params { n2: 2048, n7: 255, n8: 6144 };
+        let theirs = Params { n2: 1024, n7: 64, n8: 8192 };
         let agreed = mine.resolve(theirs);
-        assert_eq!(
-            agreed,
-            Params {
-                n2: 1024,
-                n7: 64,
-                n8: 6144
-            }
-        );
+        assert_eq!(agreed, Params { n2: 1024, n7: 64, n8: 6144 });
         assert!(agreed.valid());
     }
 
@@ -201,30 +182,9 @@ mod table_tests {
     #[test]
     fn a_proposal_below_the_minimum_is_not_valid() {
         assert!(Params::of(256, 32).valid());
-        assert!(
-            !Params {
-                n2: 255,
-                n7: 32,
-                n8: 765
-            }
-            .valid()
-        );
-        assert!(
-            !Params {
-                n2: 1024,
-                n7: 31,
-                n8: 3072
-            }
-            .valid()
-        );
-        assert!(
-            !Params {
-                n2: 1024,
-                n7: 32,
-                n8: 511
-            }
-            .valid()
-        );
+        assert!(!Params { n2: 255, n7: 32, n8: 765 }.valid());
+        assert!(!Params { n2: 1024, n7: 31, n8: 3072 }.valid());
+        assert!(!Params { n2: 1024, n7: 32, n8: 511 }.valid());
     }
 
     /// Table 10: the default history is three times the codewords.

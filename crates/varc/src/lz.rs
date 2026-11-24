@@ -110,13 +110,7 @@ struct RangeEncoder {
 
 impl RangeEncoder {
     fn new() -> Self {
-        Self {
-            low: 0,
-            range: u32::MAX,
-            cache: 0,
-            pending: 1,
-            out: Vec::new(),
-        }
+        Self { low: 0, range: u32::MAX, cache: 0, pending: 1, out: Vec::new() }
     }
 
     fn shift(&mut self) {
@@ -197,12 +191,7 @@ struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     fn new(input: &'a [u8]) -> Self {
-        let mut decoder = Self {
-            range: u32::MAX,
-            code: 0,
-            input,
-            at: 1,
-        };
+        let mut decoder = Self { range: u32::MAX, code: 0, input, at: 1 };
         for _ in 0..4 {
             decoder.code = decoder.code << 8 | u32::from(decoder.next());
         }
@@ -329,11 +318,7 @@ impl Encoder {
     /// Note that the three octets at `pos` are there, once they are all in
     /// the ring.
     fn remember(&mut self, pos: u64) {
-        let h = Self::hash(
-            self.ring[(pos & MASK) as usize],
-            self.ring[((pos + 1) & MASK) as usize],
-            self.ring[((pos + 2) & MASK) as usize],
-        );
+        let h = Self::hash(self.ring[(pos & MASK) as usize], self.ring[((pos + 1) & MASK) as usize], self.ring[((pos + 2) & MASK) as usize]);
         self.prev[(pos & MASK) as usize] = self.head[h];
         self.head[h] = pos;
     }
@@ -357,11 +342,7 @@ impl Encoder {
             // still only in `input`, and a match may run into that.
             while n < most {
                 let p = from + n as u64;
-                let octet = if p < here {
-                    self.ring[(p & MASK) as usize]
-                } else {
-                    input[i + (p - here) as usize]
-                };
+                let octet = if p < here { self.ring[(p & MASK) as usize] } else { input[i + (p - here) as usize] };
                 if octet != input[i + n] {
                     break;
                 }
@@ -455,10 +436,7 @@ impl Encoder {
                         if bits >= 2 {
                             let below = bits - 1;
                             let rest = d & ((1 << below) - 1);
-                            coder.bit(
-                                &mut self.model.dist_next[bits as usize],
-                                (rest >> (below - 1)) & 1,
-                            );
+                            coder.bit(&mut self.model.dist_next[bits as usize], (rest >> (below - 1)) & 1);
                             let left = below - 1;
                             if left > 4 {
                                 coder.direct((rest & ((1 << left) - 1)) >> 4, left - 4);
@@ -514,12 +492,7 @@ impl Default for Decoder {
 
 impl Decoder {
     pub fn new() -> Self {
-        Self {
-            model: Model::new(),
-            ring: vec![0; WINDOW],
-            at: 0,
-            waiting: VecDeque::new(),
-        }
+        Self { model: Model::new(), ring: vec![0; WINDOW], at: 0, waiting: VecDeque::new() }
     }
 
     fn keep(&mut self, octet: u8, out: &mut Vec<u8>) {
@@ -533,9 +506,7 @@ impl Decoder {
     pub fn decode(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), Corrupt> {
         self.waiting.extend(input);
         loop {
-            let Some((head, used)) = varint(&self.waiting, 0) else {
-                return Ok(());
-            };
+            let Some((head, used)) = varint(&self.waiting, 0) else { return Ok(()) };
             let (len, coded) = (head >> 1, head & 1 == 1);
             if head == usize::MAX || len == 0 || len > WINDOW / 4 {
                 return Err(Corrupt);
@@ -553,9 +524,7 @@ impl Decoder {
                 self.model.after_match = 0;
                 continue;
             }
-            let Some((size, more)) = varint(&self.waiting, used) else {
-                return Ok(());
-            };
+            let Some((size, more)) = varint(&self.waiting, used) else { return Ok(()) };
             if size == usize::MAX || size > 2 * len + 64 {
                 return Err(Corrupt);
             }
@@ -598,8 +567,7 @@ impl Decoder {
                     d = 1;
                     if bits >= 2 {
                         let below = bits - 1;
-                        let mut rest =
-                            coder.bit(&mut self.model.dist_next[bits as usize]) << (below - 1);
+                        let mut rest = coder.bit(&mut self.model.dist_next[bits as usize]) << (below - 1);
                         let left = below - 1;
                         if left > 4 {
                             rest |= coder.direct(left - 4) << 4;
@@ -613,12 +581,7 @@ impl Decoder {
                 self.model.rep = u64::from(d);
             }
             let distance = self.model.rep;
-            if distance == 0
-                || distance > self.at
-                || distance >= WINDOW as u64
-                || done + count > len
-                || coder.overran()
-            {
+            if distance == 0 || distance > self.at || distance >= WINDOW as u64 || done + count > len || coder.overran() {
                 return Err(Corrupt);
             }
             for _ in 0..count {
@@ -629,11 +592,7 @@ impl Decoder {
             self.model.after_match = 1;
             done += count;
         }
-        if coder.overran() {
-            Err(Corrupt)
-        } else {
-            Ok(())
-        }
+        if coder.overran() { Err(Corrupt) } else { Ok(()) }
     }
 }
 
@@ -644,10 +603,7 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 33) as u32
         }
     }
@@ -656,9 +612,8 @@ mod tests {
     /// then a number.
     fn prose(seed: u64, len: usize) -> Vec<u8> {
         const WORDS: [&str; 24] = [
-            "the", "line", "carries", "samples", "exactly", "and", "modem", "codeword", "a", "of",
-            "is", "sent", "again", "when", "frame", "arrives", "wrong", "carrier", "level",
-            "table", "receiver", "asks", "for", "more",
+            "the", "line", "carries", "samples", "exactly", "and", "modem", "codeword", "a", "of", "is", "sent", "again",
+            "when", "frame", "arrives", "wrong", "carrier", "level", "table", "receiver", "asks", "for", "more",
         ];
         let mut rng = Lcg(seed);
         let mut out = Vec::with_capacity(len + 16);
@@ -685,9 +640,7 @@ mod tests {
         let mut out = Vec::new();
         let mut n = 0u32;
         while out.len() < len {
-            out.extend_from_slice(
-                format!("{n:08},OK,{:05},binmodem\r\n", n * 7 % 100_000).as_bytes(),
-            );
+            out.extend_from_slice(format!("{n:08},OK,{:05},binmodem\r\n", n * 7 % 100_000).as_bytes());
             n += 1;
         }
         out.truncate(len);
@@ -708,19 +661,12 @@ mod tests {
             carried += line.len();
             let before = back.len();
             for arriving in line.chunks(cut.max(1)) {
-                decoder
-                    .decode(arriving, &mut back)
-                    .expect("a block of the encoder's own");
+                decoder.decode(arriving, &mut back).expect("a block of the encoder's own");
             }
             // Everything written is readable as soon as it has arrived.
             assert_eq!(back.len() - before, part.len());
         }
-        assert!(
-            back == data,
-            "{} octets came back of {}",
-            back.len(),
-            data.len()
-        );
+        assert!(back == data, "{} octets came back of {}", back.len(), data.len());
         carried
     }
 
@@ -734,22 +680,9 @@ mod tests {
             (b"a".to_vec(), "one octet"),
             (Vec::new(), "nothing"),
         ] {
-            for (piece, cut) in [
-                (usize::MAX, usize::MAX),
-                (4096, 1),
-                (1, 7),
-                (23, 5),
-                (24, 1000),
-                (777, 3),
-            ] {
+            for (piece, cut) in [(usize::MAX, usize::MAX), (4096, 1), (1, 7), (23, 5), (24, 1000), (777, 3)] {
                 let carried = through(&data, piece.min(data.len().max(1)), cut);
-                assert!(
-                    carried
-                        <= data.len()
-                            + data.len() / 8
-                            + 8 * data.len().div_ceil(piece.max(1)).max(1),
-                    "{name}: {carried}"
-                );
+                assert!(carried <= data.len() + data.len() / 8 + 8 * data.len().div_ceil(piece.max(1)).max(1), "{name}: {carried}");
             }
         }
     }
@@ -758,25 +691,13 @@ mod tests {
     fn text_goes_in_a_third_and_records_in_a_fifth_and_noise_costs_little() {
         let text = prose(3, 200_000);
         let carried = through(&text, 4096, 4096);
-        assert!(
-            carried * 3 < text.len(),
-            "prose: {carried} of {}",
-            text.len()
-        );
+        assert!(carried * 3 < text.len(), "prose: {carried} of {}", text.len());
         let table = records(200_000);
         let carried = through(&table, 4096, 4096);
-        assert!(
-            carried * 5 < table.len(),
-            "records: {carried} of {}",
-            table.len()
-        );
+        assert!(carried * 5 < table.len(), "records: {carried} of {}", table.len());
         let random = noise(4, 100_000);
         let carried = through(&random, 4096, 4096);
-        assert!(
-            carried < random.len() + random.len() / 50,
-            "noise: {carried} of {}",
-            random.len()
-        );
+        assert!(carried < random.len() + random.len() / 50, "noise: {carried} of {}", random.len());
     }
 
     #[test]
@@ -825,9 +746,6 @@ mod tests {
         let _ = decoder.decode(&second, &mut back);
         // And a length no block has.
         let mut other = Decoder::new();
-        assert_eq!(
-            other.decode(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F], &mut back),
-            Err(Corrupt)
-        );
+        assert_eq!(other.decode(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F], &mut back), Err(Corrupt));
     }
 }

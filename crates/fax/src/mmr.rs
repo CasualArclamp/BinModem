@@ -206,11 +206,7 @@ mod tests {
     #[test]
     fn eofb_is_the_twenty_four_bits_t6_prints() {
         let printed = "000000000001000000000001";
-        let bits: String = encode(&[])
-            .to_bits()
-            .iter()
-            .map(|&b| if b { '1' } else { '0' })
-            .collect();
+        let bits: String = encode(&[]).to_bits().iter().map(|&b| if b { '1' } else { '0' }).collect();
         assert_eq!(bits, printed);
     }
 
@@ -240,19 +236,12 @@ mod tests {
         let bits = encode(&lines).to_bits();
         let body = &bits[..bits.len() - 24];
         let eol = eofb()[..12].to_vec();
-        assert!(
-            !body.windows(12).any(|w| w == eol.as_slice()),
-            "an EOL inside the page"
-        );
+        assert!(!body.windows(12).any(|w| w == eol.as_slice()), "an EOL inside the page");
     }
 
     #[test]
     fn a_page_comes_back_as_it_went() {
-        for lines in [
-            busy(80, crate::page::WIDTH),
-            text(120, crate::page::WIDTH),
-            Vec::new(),
-        ] {
+        for lines in [busy(80, crate::page::WIDTH), text(120, crate::page::WIDTH), Vec::new()] {
             let bits = encode(&lines).to_bits();
             let mut decoder = Decoder::new(crate::page::WIDTH);
             decoder.feed_bits(&bits);
@@ -276,11 +265,7 @@ mod tests {
         }
         assert!(decoder.is_done());
         assert_eq!(decoder.lines(), lines.as_slice());
-        assert_eq!(
-            heights,
-            (0..=lines.len()).collect::<Vec<_>>(),
-            "not a line at a time"
-        );
+        assert_eq!(heights, (0..=lines.len()).collect::<Vec<_>>(), "not a line at a time");
     }
 
     #[test]
@@ -305,14 +290,8 @@ mod tests {
         let lines = text(240, crate::page::WIDTH);
         let mr = mr::encode(&lines, 4, 0).len();
         let mmr = encode(&lines).len();
-        assert!(
-            mmr * 10 < mr * 9,
-            "MMR {mmr} bits against Modified READ's {mr}"
-        );
-        assert!(
-            mmr * 2 < t4::encode(&lines).len(),
-            "not half of Modified Huffman"
-        );
+        assert!(mmr * 10 < mr * 9, "MMR {mmr} bits against Modified READ's {mr}");
+        assert!(mmr * 2 < t4::encode(&lines).len(), "not half of Modified Huffman");
     }
 
     #[test]
@@ -342,11 +321,7 @@ mod tests {
                 lines[..intact],
                 "a line before the damage at bit {at} changed"
             );
-            assert_ne!(
-                decoder.lines(),
-                lines.as_slice(),
-                "the damage at bit {at} went unnoticed"
-            );
+            assert_ne!(decoder.lines(), lines.as_slice(), "the damage at bit {at} went unnoticed");
             assert!(!decoder.is_done() || decoder.damaged() == 0);
         }
     }
@@ -368,9 +343,6 @@ mod tests {
             decoder.feed_bits(&more.to_bits());
         }
         assert_eq!(decoder.damaged(), 1, "still waiting");
-        assert!(
-            decoder.bits.len() <= 2 * LONGEST_LINE + more.len(),
-            "kept everything"
-        );
+        assert!(decoder.bits.len() <= 2 * LONGEST_LINE + more.len(), "kept everything");
     }
 }

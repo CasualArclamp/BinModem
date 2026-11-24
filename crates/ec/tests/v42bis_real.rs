@@ -21,10 +21,7 @@ const PLAIN: &[u8] = include_bytes!("vectors/dialup-world.txt");
 /// The parameters the far end is decoded with: it stated none, so these are
 /// what this end offered and therefore the most it could have read.
 fn offered() -> Params {
-    Params {
-        n2: v42bis::OFFERED_N2,
-        n7: v42bis::OFFERED_N7,
-    }
+    Params { n2: v42bis::OFFERED_N2, n7: v42bis::OFFERED_N7 }
 }
 
 #[test]
@@ -76,9 +73,7 @@ fn arriving_in_pieces_decodes_the_same() {
     let mut piecemeal = Decoder::new(offered());
     let mut out = Vec::new();
     for octet in WIRE {
-        piecemeal
-            .decode(&[*octet], &mut out)
-            .expect("decode failed");
+        piecemeal.decode(&[*octet], &mut out).expect("decode failed");
     }
     assert_eq!(out, expected);
 }

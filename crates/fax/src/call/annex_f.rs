@@ -596,11 +596,7 @@ mod tests {
 
     fn octets(bits: &[bool]) -> Vec<u8> {
         bits.chunks(8)
-            .map(|c| {
-                c.iter()
-                    .enumerate()
-                    .fold(0u8, |o, (i, &b)| o | u8::from(b) << i)
-            })
+            .map(|c| c.iter().enumerate().fold(0u8, |o, (i, &b)| o | u8::from(b) << i))
             .collect()
     }
 
@@ -641,10 +637,7 @@ mod tests {
         call.start_annex_f();
         assert!(call.error_correction());
         let bits = talk(&mut call, &mut VecDeque::new(), 1.0, true);
-        let dis = frames_in(&bits)
-            .into_iter()
-            .find(|m| m.frame == Frame::Dis)
-            .expect("no DIS");
+        let dis = frames_in(&bits).into_iter().find(|m| m.frame == Frame::Dis).expect("no DIS");
         assert!(t30::capabilities(&dis.fif).error_correction);
     }
 
@@ -655,11 +648,7 @@ mod tests {
         call.set_primary_rate(31_200);
         let bits = talk(&mut call, &mut burst(&[a_dcs()]), 0.5, true);
         let sent: Vec<Frame> = frames_in(&bits).iter().map(|m| m.frame).collect();
-        assert_eq!(
-            sent,
-            [Frame::Cfr],
-            "no training check, and CFR straight back"
-        );
+        assert_eq!(sent, [Frame::Cfr], "no training check, and CFR straight back");
         assert_eq!(call.phase(), Phase::TurningAround);
         assert_eq!(call.line(), Line::V34Listen, "flags until the ones");
         assert_eq!(call.rate(), 31_200, "the DCS's bits 11 to 14 set a rate");
@@ -689,8 +678,8 @@ mod tests {
     /// The source the moment a CFR has let it go, with a page or without one.
     fn let_go(page: bool) -> Call {
         let mut call = calling(page.then(a_page));
-        let dis = Message::new(Frame::Dis, false)
-            .with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
         talk(&mut call, &mut burst(&[dis]), 1.0, true);
         assert_eq!(call.phase(), Phase::AwaitingConfirm);
         tell(&mut call, &[Message::new(Frame::Cfr, false)]);
@@ -724,16 +713,8 @@ mod tests {
     fn the_source_sends_ones_until_the_far_ends_flags_stop() {
         let mut call = let_go(true);
         let ones = talk(&mut call, &mut VecDeque::new(), 2.0, true);
-        assert!(
-            ones.len() > 2000 && ones.iter().all(|&b| b),
-            "{} bits",
-            ones.len()
-        );
-        assert_eq!(
-            call.phase(),
-            Phase::TurningAround,
-            "the far end is still flagging"
-        );
+        assert!(ones.len() > 2000 && ones.iter().all(|&b| b), "{} bits", ones.len());
+        assert_eq!(call.phase(), Phase::TurningAround, "the far end is still flagging");
         talk(&mut call, &mut VecDeque::new(), FLAGS_GONE - 0.02, false);
         assert_eq!(call.phase(), Phase::TurningAround, "too soon");
         talk(&mut call, &mut VecDeque::new(), 0.04, false);
@@ -743,8 +724,8 @@ mod tests {
     #[test]
     fn a_silence_from_before_the_line_began_turning_round_does_not_count() {
         let mut call = calling(Some(a_page()));
-        let dis = Message::new(Frame::Dis, false)
-            .with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
         talk(&mut call, &mut burst(&[dis]), 1.0, true);
         assert_eq!(call.phase(), Phase::AwaitingConfirm);
         // The modem's carrier detector dropped out for a moment before the
@@ -754,11 +735,7 @@ mod tests {
         assert_eq!(call.phase(), Phase::TurningAround);
         // The far end is still flagging, so the ones go on.
         talk(&mut call, &mut VecDeque::new(), 1.0, true);
-        assert_eq!(
-            call.phase(),
-            Phase::TurningAround,
-            "a stale silence let the page go"
-        );
+        assert_eq!(call.phase(), Phase::TurningAround, "a stale silence let the page go");
         call.set_far_silent(true);
         talk(&mut call, &mut VecDeque::new(), 0.01, true);
         assert_eq!(call.phase(), Phase::Sending);
@@ -767,8 +744,8 @@ mod tests {
     #[test]
     fn a_response_arriving_as_t4_runs_out_is_waited_for() {
         let mut call = calling(Some(a_page()));
-        let dis = Message::new(Frame::Dis, false)
-            .with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
         talk(&mut call, &mut burst(&[dis]), 1.0, true);
         assert_eq!(call.phase(), Phase::AwaitingConfirm);
         // T4 all but out as the CFR begins: its address and control field are
@@ -777,22 +754,9 @@ mod tests {
         // after, at some 75 ms. Without the wait the command would go again
         // and the CFR, arriving while it went, would be ignored.
         call.timer = 0.06;
-        let bits = talk(
-            &mut call,
-            &mut burst(&[Message::new(Frame::Cfr, false)]),
-            0.5,
-            true,
-        );
-        assert_eq!(
-            call.phase(),
-            Phase::TurningAround,
-            "T4 ran out under the response"
-        );
-        assert_eq!(
-            count(&bits, Frame::Dcs),
-            0,
-            "the command went again over its own answer"
-        );
+        let bits = talk(&mut call, &mut burst(&[Message::new(Frame::Cfr, false)]), 0.5, true);
+        assert_eq!(call.phase(), Phase::TurningAround, "T4 ran out under the response");
+        assert_eq!(count(&bits, Frame::Dcs), 0, "the command went again over its own answer");
         let dis = Message::new(Frame::Dis, false)
             .with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
         // And the start of a frame that never ends -- the address and control
@@ -806,11 +770,7 @@ mod tests {
         let mut start: VecDeque<bool> = cfr.into_iter().take(8 * (V34_FLAGS + 1) + 20).collect();
         start.extend(std::iter::repeat_n(true, 8));
         let bits = talk(&mut call, &mut start, FRAME_SECONDS, true);
-        assert_eq!(
-            count(&bits, Frame::Dcs),
-            0,
-            "T4 ran out under the start of a frame"
-        );
+        assert_eq!(count(&bits, Frame::Dcs), 0, "T4 ran out under the start of a frame");
         let bits = talk(&mut call, &mut VecDeque::new(), 0.6, true);
         assert_eq!(count(&bits, Frame::Dcs), 1, "held past the longest frame");
     }
@@ -823,11 +783,7 @@ mod tests {
         let sent: Vec<Frame> = frames_in(&bits).iter().map(|m| m.frame).collect();
         assert_eq!(sent, [Frame::Dcn]);
         assert_eq!(call.phase(), Phase::Done);
-        assert_eq!(
-            call.next_control_bit(),
-            None,
-            "anything after the disconnect"
-        );
+        assert_eq!(call.next_control_bit(), None, "anything after the disconnect");
     }
 
     #[test]
@@ -849,27 +805,15 @@ mod tests {
     #[test]
     fn a_dis_again_is_the_command_again_and_an_ftt_is_not_heard() {
         let mut call = calling(Some(a_page()));
-        let dis = Message::new(Frame::Dis, false)
-            .with_fif(&t30::v34_capabilities(&[Modulation::V29], false));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], false));
         let first = talk(&mut call, &mut burst(std::slice::from_ref(&dis)), 1.0, true);
         assert_eq!(call.phase(), Phase::AwaitingConfirm);
-        talk(
-            &mut call,
-            &mut burst(&[Message::new(Frame::Ftt, false)]),
-            0.5,
-            true,
-        );
-        assert_eq!(
-            call.phase(),
-            Phase::AwaitingConfirm,
-            "F.3.2.1: there is no FTT"
-        );
+        talk(&mut call, &mut burst(&[Message::new(Frame::Ftt, false)]), 0.5, true);
+        assert_eq!(call.phase(), Phase::AwaitingConfirm, "F.3.2.1: there is no FTT");
         let again = talk(&mut call, &mut burst(&[dis]), 1.0, true);
         let dcs = |bits: &[bool]| {
-            frames_in(bits)
-                .into_iter()
-                .find(|m| m.frame == Frame::Dcs)
-                .expect("no DCS")
+            frames_in(bits).into_iter().find(|m| m.frame == Frame::Dcs).expect("no DCS")
         };
         assert_eq!(dcs(&again), dcs(&first), "not the same command again");
         assert_eq!(t30::field_of(&dcs(&first).fif, 11, 14), 0, "Note 33");
@@ -900,11 +844,7 @@ mod tests {
         bits.extend(talk(&mut call, &mut start, 0.1, true));
         bits.extend(talk(&mut call, &mut VecDeque::new(), 2.0, true));
         assert_eq!(call.phase(), Phase::AwaitingCommand);
-        assert_eq!(
-            count(&bits, Frame::Dis),
-            0,
-            "T2 ran out counting from before the frame began"
-        );
+        assert_eq!(count(&bits, Frame::Dis), 0, "T2 ran out counting from before the frame began");
     }
 
     #[test]
@@ -913,11 +853,7 @@ mod tests {
         talk(&mut call, &mut VecDeque::new(), 1.0, true);
         call.set_control_carrier(true);
         let bits = talk(&mut call, &mut VecDeque::new(), T2_SECONDS + 0.5, true);
-        assert_eq!(
-            count(&bits, Frame::Dis),
-            1,
-            "the far end's carrier held T2 open"
-        );
+        assert_eq!(count(&bits, Frame::Dis), 1, "the far end's carrier held T2 open");
     }
 
     #[test]
@@ -931,10 +867,7 @@ mod tests {
         let bits = talk(&mut call, &mut VecDeque::new(), 1.0, true);
         let sent: Vec<Frame> = frames_in(&bits).iter().map(|m| m.frame).collect();
         assert_eq!(sent, [Frame::Csi, Frame::Dis]);
-        assert!(
-            octets(&bits[..8 * V34_FLAGS]).iter().all(|&o| o == FLAG),
-            "no flags first"
-        );
+        assert!(octets(&bits[..8 * V34_FLAGS]).iter().all(|&o| o == FLAG), "no flags first");
         // And a burst not yet begun is left as it is.
         let mut call = answering();
         call.control_restarted();

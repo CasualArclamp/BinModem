@@ -85,10 +85,7 @@ impl Constellation {
     /// neither of which is a constellation.
     pub fn new(points: Vec<Complex>) -> Self {
         let n = points.len();
-        assert!(
-            (2..=usize::from(u16::MAX)).contains(&n),
-            "a constellation of {n} points"
-        );
+        assert!((2..=usize::from(u16::MAX)).contains(&n), "a constellation of {n} points");
         let mut d2min = f64::INFINITY;
         let mut pair = (0, 1);
         for i in 0..n {
@@ -100,19 +97,10 @@ impl Constellation {
                 }
             }
         }
-        assert!(
-            d2min > 0.0,
-            "two points of a constellation in the same place"
-        );
+        assert!(d2min > 0.0, "two points of a constellation in the same place");
         let power = points.iter().map(|p| p.norm_sqr()).sum::<f64>() / n as f64;
-        let spread = points
-            .iter()
-            .map(|p| (p.norm_sqr() - power).powi(2))
-            .sum::<f64>()
-            / n as f64;
-        let m4 = points
-            .iter()
-            .fold(Complex::ZERO, |sum, p| sum + *p * *p * *p * *p);
+        let spread = points.iter().map(|p| (p.norm_sqr() - power).powi(2)).sum::<f64>() / n as f64;
+        let m4 = points.iter().fold(Complex::ZERO, |sum, p| sum + *p * *p * *p * *p);
         let fourth_line = m4.abs() / points.iter().map(|p| p.norm_sqr().powi(2)).sum::<f64>();
         // A square constellation's fourth power points exactly the opposite
         // way to the real axis. Rounding in the table must not move that off
@@ -121,23 +109,9 @@ impl Constellation {
         if (fourth.abs() - std::f64::consts::PI).abs() < 1e-9 {
             fourth = std::f64::consts::PI;
         }
-        let density = if n <= 16 {
-            Density::Sparse
-        } else {
-            Density::Dense
-        };
+        let density = if n <= 16 { Density::Sparse } else { Density::Dense };
         let lattice = Lattice::find(&points, points[pair.1] - points[pair.0]);
-        let mut table = Self {
-            points,
-            d2min,
-            power,
-            spread,
-            garbage: 0.0,
-            fourth,
-            fourth_line,
-            density,
-            lattice,
-        };
+        let mut table = Self { points, d2min, power, spread, garbage: 0.0, fourth, fourth_line, density, lattice };
         table.garbage = table.measure_garbage();
         table
     }
@@ -187,10 +161,7 @@ impl Constellation {
 
     /// The label of the point nearest `z`.
     pub fn nearest(&self, z: Complex) -> usize {
-        self.lattice
-            .as_ref()
-            .and_then(|l| l.nearest(&self.points, z))
-            .unwrap_or_else(|| self.nearest_exhaustive(z))
+        self.lattice.as_ref().and_then(|l| l.nearest(&self.points, z)).unwrap_or_else(|| self.nearest_exhaustive(z))
     }
 
     /// The label of the point nearest `z`, by trying every one: what the fast
@@ -244,12 +215,8 @@ impl Lattice {
             }
             coordinates.push((u as i64, v as i64));
         }
-        let (u_low, u_high) = coordinates
-            .iter()
-            .fold((i64::MAX, i64::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
-        let (v_low, v_high) = coordinates
-            .iter()
-            .fold((i64::MAX, i64::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
+        let (u_low, u_high) = coordinates.iter().fold((i64::MAX, i64::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
+        let (v_low, v_high) = coordinates.iter().fold((i64::MAX, i64::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
         // A whole constellation's width beyond each edge, and two sites more:
         // far enough out that only garbage and the grossest gain errors fall
         // off the map.
@@ -279,10 +246,7 @@ impl Lattice {
                         .iter()
                         .map(|&(a, b)| (((a - u) as f64).abs(), ((b - v) as f64).abs()))
                         .collect();
-                    let farthest = offsets
-                        .iter()
-                        .map(|&(x, y)| (x + 0.5).powi(2) + (y + 0.5).powi(2))
-                        .fold(f64::INFINITY, f64::min);
+                    let farthest = offsets.iter().map(|&(x, y)| (x + 0.5).powi(2) + (y + 0.5).powi(2)).fold(f64::INFINITY, f64::min);
                     for (label, &(x, y)) in offsets.iter().enumerate() {
                         let nearest = (x - 0.5).max(0.0).powi(2) + (y - 0.5).max(0.0).powi(2);
                         if nearest <= farthest + 1e-9 {
@@ -293,15 +257,7 @@ impl Lattice {
                 sites.push((start, (candidates.len() as u32 - start) as u16));
             }
         }
-        Some(Self {
-            origin,
-            inverse,
-            low,
-            width,
-            height,
-            sites,
-            candidates,
-        })
+        Some(Self { origin, inverse, low, width, height, sites, candidates })
     }
 
     /// The nearest point by the map, or None off the map.
@@ -358,14 +314,9 @@ impl Slicer {
             // As `v34/receiver.rs:157-161`.
             Self::Grid { scale, limit } => {
                 let (scale, limit) = (*scale, *limit);
-                let odd = |v: f64| {
-                    (2 * ((v * scale - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit)
-                };
+                let odd = |v: f64| (2 * ((v * scale - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
                 let point = (odd(z.re), odd(z.im));
-                (
-                    None,
-                    Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale),
-                )
+                (None, Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale))
             }
         }
     }

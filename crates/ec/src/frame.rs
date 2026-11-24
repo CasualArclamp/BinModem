@@ -87,19 +87,13 @@ impl Address {
             return Err(DecodeError::ExtendedAddress);
         }
         let dlci = octet >> 2;
-        let addressed = if octet & 0x02 != 0 {
-            Role::Answerer
-        } else {
-            Role::Originator
-        };
+        let addressed =
+            if octet & 0x02 != 0 { Role::Answerer } else { Role::Originator };
         // Our own address on a frame the peer sent means it is addressed to
         // us, and only commands are. The peer's own address means the frame
         // came from there, which is what a response carries.
-        let kind = if addressed == receiver {
-            Kind::Command
-        } else {
-            Kind::Response
-        };
+        let kind =
+            if addressed == receiver { Kind::Command } else { Kind::Response };
         Ok(Self { dlci, kind })
     }
 }
@@ -130,12 +124,7 @@ mod supervisory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// Numbered information transfer (V.42 8.2.4.2).
-    I {
-        ns: u8,
-        nr: u8,
-        poll: bool,
-        info: Vec<u8>,
-    },
+    I { ns: u8, nr: u8, poll: bool, info: Vec<u8> },
     /// Receive ready.
     Rr { nr: u8, pf: bool },
     /// Receive not ready.
@@ -196,9 +185,9 @@ impl Frame {
             | Self::Ui { pf, .. }
             | Self::Xid { pf, .. }
             | Self::Test { pf, .. } => *pf,
-            Self::Ua { final_bit } | Self::Dm { final_bit } | Self::Frmr { final_bit, .. } => {
-                *final_bit
-            }
+            Self::Ua { final_bit }
+            | Self::Dm { final_bit }
+            | Self::Frmr { final_bit, .. } => *final_bit,
             Self::Srej { .. } => false,
         }
     }
@@ -311,10 +300,7 @@ impl Frame {
                 // field on these.
                 return Err(DecodeError::UnexpectedInfo);
             }
-            code::FRMR => Self::Frmr {
-                final_bit: pf,
-                info,
-            },
+            code::FRMR => Self::Frmr { final_bit: pf, info },
             code::UI => Self::Ui { pf, info },
             code::XID => Self::Xid { pf, info },
             code::TEST => Self::Test { pf, info },
@@ -336,16 +322,10 @@ mod tests {
     fn address_encodes_dlci_cr_and_ea() {
         // DLCI 0, EA set, and the C/R bit naming an end rather than a
         // direction: everything addressed to or from the answerer is 0x03.
-        let a = Address {
-            dlci: DLCI_DATA,
-            kind: Kind::Command,
-        };
+        let a = Address { dlci: DLCI_DATA, kind: Kind::Command };
         assert_eq!(a.encode(Role::Originator), 0x03);
         assert_eq!(a.encode(Role::Answerer), 0x01);
-        let r = Address {
-            dlci: DLCI_DATA,
-            kind: Kind::Response,
-        };
+        let r = Address { dlci: DLCI_DATA, kind: Kind::Response };
         assert_eq!(r.encode(Role::Originator), 0x01);
         assert_eq!(r.encode(Role::Answerer), 0x03);
     }
@@ -389,10 +369,7 @@ mod tests {
     fn address_round_trips_for_both_roles() {
         for sender in [Role::Originator, Role::Answerer] {
             for kind in [Kind::Command, Kind::Response] {
-                let a = Address {
-                    dlci: DLCI_DATA,
-                    kind,
-                };
+                let a = Address { dlci: DLCI_DATA, kind };
                 let octet = a.encode(sender);
                 let back = Address::decode(octet, sender.peer()).unwrap();
                 assert_eq!(back, a, "{sender:?} {kind:?}");
@@ -415,45 +392,19 @@ mod tests {
             (Frame::Disc { poll: false }, 0x43),
             (Frame::Ua { final_bit: false }, 0x63),
             (Frame::Dm { final_bit: false }, 0x0f),
-            (
-                Frame::Ui {
-                    pf: false,
-                    info: vec![],
-                },
-                0x03,
-            ),
-            (
-                Frame::Xid {
-                    pf: false,
-                    info: vec![],
-                },
-                0xaf,
-            ),
+            (Frame::Ui { pf: false, info: vec![] }, 0x03),
+            (Frame::Xid { pf: false, info: vec![] }, 0xaf),
         ];
         for (frame, want) in cases {
             let bytes = encode(&frame, Role::Originator, Kind::Command);
             assert_eq!(bytes[1], want, "{frame:?}");
         }
         assert_eq!(
-            encode(
-                &Frame::Frmr {
-                    final_bit: false,
-                    info: vec![]
-                },
-                Role::Originator,
-                Kind::Response
-            )[1],
+            encode(&Frame::Frmr { final_bit: false, info: vec![] }, Role::Originator, Kind::Response)[1],
             0x87
         );
         assert_eq!(
-            encode(
-                &Frame::Test {
-                    pf: false,
-                    info: vec![]
-                },
-                Role::Originator,
-                Kind::Command
-            )[1],
+            encode(&Frame::Test { pf: false, info: vec![] }, Role::Originator, Kind::Command)[1],
             0xe3
         );
     }
@@ -461,19 +412,11 @@ mod tests {
     #[test]
     fn the_poll_bit_sits_in_bit_five() {
         assert_eq!(
-            encode(
-                &Frame::Sabme { poll: true },
-                Role::Originator,
-                Kind::Command
-            )[1],
+            encode(&Frame::Sabme { poll: true }, Role::Originator, Kind::Command)[1],
             0x7f
         );
         assert_eq!(
-            encode(
-                &Frame::Ua { final_bit: true },
-                Role::Answerer,
-                Kind::Response
-            )[1],
+            encode(&Frame::Ua { final_bit: true }, Role::Answerer, Kind::Response)[1],
             0x73
         );
     }
@@ -495,11 +438,7 @@ mod tests {
     #[test]
     fn sequence_numbers_occupy_seven_bits() {
         // Modulo 128, so N(R) 127 must survive intact rather than wrapping.
-        let bytes = encode(
-            &Frame::Rr { nr: 127, pf: true },
-            Role::Originator,
-            Kind::Command,
-        );
+        let bytes = encode(&Frame::Rr { nr: 127, pf: true }, Role::Originator, Kind::Command);
         assert_eq!(bytes[2], 0xff);
         let (_, back) = Frame::decode(&bytes, Role::Answerer).unwrap();
         assert_eq!(back, Frame::Rr { nr: 127, pf: true });
@@ -507,12 +446,7 @@ mod tests {
 
     #[test]
     fn information_frames_carry_both_sequence_numbers() {
-        let frame = Frame::I {
-            ns: 5,
-            nr: 9,
-            poll: false,
-            info: b"payload".to_vec(),
-        };
+        let frame = Frame::I { ns: 5, nr: 9, poll: false, info: b"payload".to_vec() };
         let bytes = encode(&frame, Role::Originator, Kind::Command);
         assert_eq!(bytes[1] & 1, 0, "bit 1 clear marks an I frame");
         assert_eq!(bytes[1] >> 1, 5);
@@ -524,18 +458,8 @@ mod tests {
     #[test]
     fn every_frame_type_round_trips() {
         let frames = vec![
-            Frame::I {
-                ns: 0,
-                nr: 0,
-                poll: false,
-                info: vec![],
-            },
-            Frame::I {
-                ns: 127,
-                nr: 126,
-                poll: true,
-                info: b"data".to_vec(),
-            },
+            Frame::I { ns: 0, nr: 0, poll: false, info: vec![] },
+            Frame::I { ns: 127, nr: 126, poll: true, info: b"data".to_vec() },
             Frame::Rr { nr: 3, pf: true },
             Frame::Rnr { nr: 4, pf: false },
             Frame::Rej { nr: 5, pf: true },
@@ -544,22 +468,10 @@ mod tests {
             Frame::Disc { poll: true },
             Frame::Ua { final_bit: true },
             Frame::Dm { final_bit: false },
-            Frame::Frmr {
-                final_bit: true,
-                info: vec![1, 2, 3, 4, 5],
-            },
-            Frame::Ui {
-                pf: false,
-                info: b"note".to_vec(),
-            },
-            Frame::Xid {
-                pf: true,
-                info: b"params".to_vec(),
-            },
-            Frame::Test {
-                pf: false,
-                info: b"loop".to_vec(),
-            },
+            Frame::Frmr { final_bit: true, info: vec![1, 2, 3, 4, 5] },
+            Frame::Ui { pf: false, info: b"note".to_vec() },
+            Frame::Xid { pf: true, info: b"params".to_vec() },
+            Frame::Test { pf: false, info: b"loop".to_vec() },
         ];
         for frame in frames {
             let bytes = encode(&frame, Role::Originator, Kind::Command);
@@ -606,18 +518,9 @@ mod tests {
 
     #[test]
     fn truncated_frames_are_rejected() {
-        assert_eq!(
-            Frame::decode(&[], Role::Answerer),
-            Err(DecodeError::Truncated)
-        );
-        assert_eq!(
-            Frame::decode(&[0x01], Role::Answerer),
-            Err(DecodeError::Truncated)
-        );
+        assert_eq!(Frame::decode(&[], Role::Answerer), Err(DecodeError::Truncated));
+        assert_eq!(Frame::decode(&[0x01], Role::Answerer), Err(DecodeError::Truncated));
         // An I frame needs a second control octet.
-        assert_eq!(
-            Frame::decode(&[0x01, 0x00], Role::Answerer),
-            Err(DecodeError::Truncated)
-        );
+        assert_eq!(Frame::decode(&[0x01, 0x00], Role::Answerer), Err(DecodeError::Truncated));
     }
 }

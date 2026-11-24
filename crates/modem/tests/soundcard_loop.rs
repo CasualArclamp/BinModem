@@ -52,10 +52,10 @@ impl Cable {
         let mut host = Modem::new(FS);
         for m in [&mut caller, &mut host] {
             // Automode off. These are about one modulation over one line, and
-            // with it on the modem would negotiate its way to whichever
-            // modulation the two ends liked best -- which is the right
-            // answer to a different question.
-            for b in format!("AT+MS={carrier},0\r").bytes() {
+        // with it on the modem would negotiate its way to whichever
+        // modulation the two ends liked best -- which is the right
+        // answer to a different question.
+        for b in format!("AT+MS={carrier},0\r").bytes() {
                 m.feed_dte(b);
             }
             m.take_dte();
@@ -102,10 +102,7 @@ fn a_v32_call_goes_through_a_sound_card_loopback() {
         cable.host.line_phase(),
         cable.caller.round_trip_symbols(),
         cable.caller.reflection(),
-        cable
-            .caller
-            .echo_return_loss()
-            .map(|d| (d * 10.0).round() / 10.0),
+        cable.caller.echo_return_loss().map(|d| (d * 10.0).round() / 10.0),
     );
     assert!(
         cable.up(),
@@ -255,10 +252,7 @@ fn sweep_the_crossing() {
             crossing as f64 / FS * 1000.0,
             cable.caller.line_phase(),
             cable.host.line_phase(),
-            cable
-                .caller
-                .reflection()
-                .map(|r| (r.delay, (r.strength * 100.0).round() / 100.0)),
+            cable.caller.reflection().map(|r| (r.delay, (r.strength * 100.0).round() / 100.0)),
         );
     }
 }

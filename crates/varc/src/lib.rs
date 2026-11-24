@@ -7,13 +7,13 @@
 pub mod dmt;
 pub mod echo;
 pub mod exact;
+pub mod octets;
 pub mod frame;
 pub mod hello;
 pub mod interp;
 pub mod link;
 pub mod lz;
 pub mod map;
-pub mod octets;
 pub mod rs;
 pub mod sc;
 pub mod squeeze;

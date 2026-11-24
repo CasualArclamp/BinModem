@@ -4,7 +4,9 @@
 //! every control protocol, so a [`Session`] is told what it is negotiating by
 //! a [`Protocol`] and does not otherwise care.
 
-use crate::control::{Action, Code, ConfigOption, Event, Limits, Message, State, transition};
+use crate::control::{
+    Action, Code, ConfigOption, Event, Limits, Message, State, transition,
+};
 
 /// What a control protocol has to be able to say for itself.
 pub trait Protocol {
@@ -161,9 +163,7 @@ impl<P: Protocol> Session<P> {
                     // The automaton has one event for both -- this end cannot
                     // agree -- and which packet says so is settled here, since
                     // only here is the difference still known.
-                    crate::lcp::Review::Nak(counter)
-                        if self.failures >= self.limits.max_failure =>
-                    {
+                    crate::lcp::Review::Nak(counter) if self.failures >= self.limits.max_failure => {
                         // 4.6: not converging, so the options this end keeps
                         // suggesting alternatives to are refused instead. A
                         // Configure-Reject carries them as they arrived (5.4),
@@ -402,10 +402,7 @@ mod tests {
             crate::protocol::LCP
         }
         fn request(&self) -> Vec<ConfigOption> {
-            vec![ConfigOption {
-                kind: 5,
-                value: vec![1, 2, 3, 4],
-            }]
+            vec![ConfigOption { kind: 5, value: vec![1, 2, 3, 4] }]
         }
         fn review(&mut self, _: &[ConfigOption]) -> Review {
             Review::Ack
@@ -442,16 +439,8 @@ mod tests {
         for peer_first in [true, false] {
             let mut s = started();
             let id = s.take_output()[0].id;
-            let ack = Message {
-                code: Code::ConfigureAck,
-                id,
-                data: vec![5, 6, 1, 2, 3, 4],
-            };
-            let req = Message {
-                code: Code::ConfigureRequest,
-                id: 7,
-                data: vec![],
-            };
+            let ack = Message { code: Code::ConfigureAck, id, data: vec![5, 6, 1, 2, 3, 4] };
+            let req = Message { code: Code::ConfigureRequest, id: 7, data: vec![] };
             if peer_first {
                 s.receive(req);
                 s.receive(ack);
@@ -470,11 +459,7 @@ mod tests {
     fn an_ack_for_the_wrong_request_is_ignored() {
         let mut s = started();
         let id = s.take_output()[0].id;
-        s.receive(Message {
-            code: Code::ConfigureAck,
-            id: id.wrapping_add(9),
-            data: vec![],
-        });
+        s.receive(Message { code: Code::ConfigureAck, id: id.wrapping_add(9), data: vec![] });
         assert_eq!(s.state(), State::ReqSent, "a stale ack moved the automaton");
         assert_eq!(s.protocol.acked, 0);
     }
@@ -482,11 +467,7 @@ mod tests {
     /// 4.6: the request is repeated, and eventually given up on.
     #[test]
     fn a_silent_peer_is_asked_ten_times_and_then_abandoned() {
-        let limits = Limits {
-            max_configure: 10,
-            restart_ms: 3000,
-            ..Limits::default()
-        };
+        let limits = Limits { max_configure: 10, restart_ms: 3000, ..Limits::default() };
         let mut s = Session::new(Agreeable::default(), limits);
         s.open();
         s.up();
@@ -512,16 +493,8 @@ mod tests {
     fn a_settled_link_has_no_timer_left_running() {
         let mut s = started();
         let id = s.take_output()[0].id;
-        s.receive(Message {
-            code: Code::ConfigureAck,
-            id,
-            data: vec![],
-        });
-        s.receive(Message {
-            code: Code::ConfigureRequest,
-            id: 1,
-            data: vec![],
-        });
+        s.receive(Message { code: Code::ConfigureAck, id, data: vec![] });
+        s.receive(Message { code: Code::ConfigureRequest, id: 1, data: vec![] });
         assert_eq!(s.state(), State::Opened);
         // Including the acknowledgement that answered the peer's request,
         // which is owed and not unprompted.
@@ -531,10 +504,7 @@ mod tests {
             s.tick(10_000);
         }
         assert_eq!(s.state(), State::Opened);
-        assert!(
-            s.take_output().is_empty(),
-            "a settled link sent something unprompted"
-        );
+        assert!(s.take_output().is_empty(), "a settled link sent something unprompted");
     }
 
     /// 5.8: an Echo-Request is answered without disturbing anything.
@@ -542,16 +512,8 @@ mod tests {
     fn an_echo_is_answered_in_place() {
         let mut s = started();
         let id = s.take_output()[0].id;
-        s.receive(Message {
-            code: Code::ConfigureAck,
-            id,
-            data: vec![],
-        });
-        s.receive(Message {
-            code: Code::ConfigureRequest,
-            id: 1,
-            data: vec![],
-        });
+        s.receive(Message { code: Code::ConfigureAck, id, data: vec![] });
+        s.receive(Message { code: Code::ConfigureRequest, id: 1, data: vec![] });
         let _ = s.take_output();
         s.receive(Message {
             code: Code::EchoRequest,
@@ -572,11 +534,7 @@ mod tests {
     fn an_unknown_code_is_rejected_by_number() {
         let mut s = started();
         let _ = s.take_output();
-        s.receive(Message {
-            code: Code::Unknown(0x5a),
-            id: 3,
-            data: vec![9, 9],
-        });
+        s.receive(Message { code: Code::Unknown(0x5a), id: 3, data: vec![9, 9] });
         let out = s.take_output();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].code, Code::CodeReject);
@@ -587,16 +545,8 @@ mod tests {
     fn opened() -> Session<Agreeable> {
         let mut s = started();
         let id = s.take_output()[0].id;
-        s.receive(Message {
-            code: Code::ConfigureAck,
-            id,
-            data: vec![],
-        });
-        s.receive(Message {
-            code: Code::ConfigureRequest,
-            id: 1,
-            data: vec![],
-        });
+        s.receive(Message { code: Code::ConfigureAck, id, data: vec![] });
+        s.receive(Message { code: Code::ConfigureRequest, id: 1, data: vec![] });
         let _ = s.take_output();
         let _ = s.take_reports();
         assert_eq!(s.state(), State::Opened);
@@ -617,11 +567,7 @@ mod tests {
         let ms_chap = vec![3, 5, 0xc2, 0x23, 0x80];
         let mut answers = Vec::new();
         for id in 0..7u8 {
-            s.receive(Message {
-                code: Code::ConfigureRequest,
-                id: 100 + id,
-                data: ms_chap.clone(),
-            });
+            s.receive(Message { code: Code::ConfigureRequest, id: 100 + id, data: ms_chap.clone() });
             answers.extend(
                 s.take_output()
                     .into_iter()
@@ -644,11 +590,7 @@ mod tests {
         s.close();
         let mut requests = 0;
         for _ in 0..60_000 {
-            requests += s
-                .take_output()
-                .iter()
-                .filter(|m| m.code == Code::TerminateRequest)
-                .count();
+            requests += s.take_output().iter().filter(|m| m.code == Code::TerminateRequest).count();
             s.tick(1);
         }
         assert_eq!(requests, 2);
@@ -660,11 +602,7 @@ mod tests {
     #[test]
     fn the_pause_after_a_terminate_request_ends() {
         let mut s = opened();
-        s.receive(Message {
-            code: Code::TerminateRequest,
-            id: 9,
-            data: vec![],
-        });
+        s.receive(Message { code: Code::TerminateRequest, id: 9, data: vec![] });
         assert_eq!(s.state(), State::Stopping);
         assert!(s.take_reports().contains(&Report::Down));
         s.tick(Limits::default().restart_ms);
@@ -677,11 +615,7 @@ mod tests {
     fn a_terminate_request_is_acknowledged_with_its_own_identifier() {
         let mut s = started();
         let _ = s.take_output();
-        s.receive(Message {
-            code: Code::TerminateRequest,
-            id: 0x1f,
-            data: vec![],
-        });
+        s.receive(Message { code: Code::TerminateRequest, id: 0x1f, data: vec![] });
         let out = s.take_output();
         assert_eq!(out[0].code, Code::TerminateAck);
         assert_eq!(out[0].id, 0x1f);

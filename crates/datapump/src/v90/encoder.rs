@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use super::INTERVALS;
 use super::modulus::{self, Constellation, Moduli};
 use super::sequences::Cp;
-use super::sign::{Differential, Redundancy, Shaper, ShapingFrame, SignDecoder, Signs};
+use super::sign::{Differential, Redundancy, ShapingFrame, Shaper, SignDecoder, Signs};
 use super::ucode::{self, Law};
 
 /// One data frame's worth of output: six codewords with their signs.
@@ -69,30 +69,17 @@ impl Mapping {
         let moduli: Moduli = std::array::from_fn(|i| sets[i].modulus());
         let s = redundancy.data_bits() as u32;
         let k = modulus::capacity(moduli).min(super::largest_k(s));
-        Self {
-            sets,
-            k,
-            redundancy,
-            lookahead: 0,
-            shaping: [0; 4],
-        }
+        Self { sets, k, redundancy, lookahead: 0, shaping: [0; 4] }
     }
 
     /// What a CP or a CPt asks for (8.5.2): its constellations, its rate, and
     /// its shaping. None if the rate is more than the constellations can
     /// carry, which 5.4.3's inequality forbids.
     pub fn from_cp(cp: &Cp) -> Option<Self> {
-        let sets: [Constellation; INTERVALS] =
-            std::array::from_fn(|i| Constellation::new(cp.points(i)));
+        let sets: [Constellation; INTERVALS] = std::array::from_fn(|i| Constellation::new(cp.points(i)));
         let s = cp.redundancy.data_bits();
         let k = cp.frame_bits().checked_sub(s)? as u32;
-        let mapping = Self {
-            sets,
-            k,
-            redundancy: cp.redundancy,
-            lookahead: usize::from(cp.lookahead),
-            shaping: cp.shaping,
-        };
+        let mapping = Self { sets, k, redundancy: cp.redundancy, lookahead: usize::from(cp.lookahead), shaping: cp.shaping };
         modulus::fits(mapping.moduli(), k).then_some(mapping)
     }
 
@@ -195,9 +182,7 @@ impl Encoder {
     /// the order Figure 1 draws them in.
     fn map(&mut self, bits: &[bool]) -> ([u8; INTERVALS], Vec<bool>) {
         let s_count = self.mapping.redundancy.data_bits();
-        let s: Vec<bool> = (0..s_count)
-            .map(|i| bits.get(i).copied().unwrap_or(false))
-            .collect();
+        let s: Vec<bool> = (0..s_count).map(|i| bits.get(i).copied().unwrap_or(false)).collect();
         let b: Vec<bool> = bits.iter().skip(s_count).copied().collect();
         let labels = modulus::encode(&b, self.mapping.moduli());
         let ucodes = std::array::from_fn(|i| {
@@ -237,11 +222,7 @@ impl Encoder {
             return Some(frame);
         }
         let per = self.shaper.frames_per_data_frame();
-        let wanted = if finishing {
-            per
-        } else {
-            per + self.shaper.lookahead()
-        };
+        let wanted = if finishing { per } else { per + self.shaper.lookahead() };
         if per == 0 || self.shaping.len() < wanted {
             return None;
         }
@@ -252,10 +233,7 @@ impl Encoder {
             self.shaping.pop_front();
         }
         let ucodes = self.magnitudes.pop_front()?;
-        Some(Frame {
-            ucodes,
-            positive: std::array::from_fn(|i| positive[i]),
-        })
+        Some(Frame { ucodes, positive: std::array::from_fn(|i| positive[i]) })
     }
 
     /// The next data frame, pulling D bits from `bit` for each frame that has
@@ -317,8 +295,7 @@ impl Decoder {
 
     /// Six codewords back to the D bits they carried.
     pub fn frame(&mut self, frame: Frame) -> Vec<bool> {
-        let labels: [u16; INTERVALS] =
-            std::array::from_fn(|i| self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0));
+        let labels: [u16; INTERVALS] = std::array::from_fn(|i| self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0));
         let b = modulus::decode(labels, self.mapping.moduli(), self.mapping.k);
         let mut out = self.signs.decode(frame.positive);
         out.extend(b);
@@ -392,9 +369,7 @@ mod tests {
                 mapping.redundancy = sr;
                 mapping.lookahead = lookahead;
                 mapping.shaping = [-40, 20, 60, -64];
-                mapping.k = mapping
-                    .k
-                    .min(super::super::largest_k(sr.data_bits() as u32));
+                mapping.k = mapping.k.min(super::super::largest_k(sr.data_bits() as u32));
                 assert!(mapping.valid());
                 let d = mapping.frame_bits();
                 let mut tx = Encoder::new(mapping.clone(), Law::Mu);
@@ -414,11 +389,7 @@ mod tests {
                         b
                     });
                     let wanted: Vec<bool> = sent.drain(..d).collect();
-                    assert_eq!(
-                        rx.frame(frame),
-                        wanted,
-                        "Sr {sr:?}, ld {lookahead}, frame {n}"
-                    );
+                    assert_eq!(rx.frame(frame), wanted, "Sr {sr:?}, ld {lookahead}, frame {n}");
                 }
             }
         }
@@ -430,26 +401,14 @@ mod tests {
     fn a_cp_is_a_mapping() {
         use super::super::sequences::Cp;
         let mask: super::super::sequences::Mask = (24..112).fold(0, |m, u| m | 1 << u);
-        let cp = Cp {
-            data_mode: true,
-            drn: 22,
-            constellations: vec![mask],
-            ..Cp::default()
-        };
+        let cp = Cp { data_mode: true, drn: 22, constellations: vec![mask], ..Cp::default() };
         let mapping = Mapping::from_cp(&cp).expect("56 000 fits 88 codes a frame");
         assert_eq!(mapping.frame_bits(), 42);
         assert_eq!(mapping.k, 36);
         assert_eq!(mapping.rate(), 56_000);
         let small: super::super::sequences::Mask = (100..108).fold(0, |m, u| m | 1 << u);
-        let too_much = Cp {
-            constellations: vec![small],
-            ..cp
-        };
-        assert_eq!(
-            Mapping::from_cp(&too_much),
-            None,
-            "eight codes cannot carry 36 bits"
-        );
+        let too_much = Cp { constellations: vec![small], ..cp };
+        assert_eq!(Mapping::from_cp(&too_much), None, "eight codes cannot carry 36 bits");
     }
 
     /// And through the amplitudes, which is what the analogue end actually
@@ -462,9 +421,7 @@ mod tests {
         let mut rx = Decoder::new(mapping);
 
         for value in 0..200u64 {
-            let bits: Vec<bool> = (0..d)
-                .map(|i| value.wrapping_mul(2654435761) >> i & 1 == 1)
-                .collect();
+            let bits: Vec<bool> = (0..d).map(|i| value.wrapping_mul(2654435761) >> i & 1 == 1).collect();
             let frame = tx.frame(&bits);
             let samples = frame.amplitudes(Law::Mu);
             assert_eq!(rx.from_amplitudes(Law::Mu, samples), bits, "value {value}");
@@ -529,15 +486,8 @@ mod tests {
         // A poorer route, where capacity is what settles the rate.
         let tight = build(60..92, false);
         let tight_robbed = build(60..92, true);
-        assert!(
-            tight.rate() < super::super::FASTEST,
-            "this route is not tight"
-        );
-        assert_eq!(
-            tight.k - tight_robbed.k,
-            1,
-            "halving an interval cost more than a bit"
-        );
+        assert!(tight.rate() < super::super::FASTEST, "this route is not tight");
+        assert_eq!(tight.k - tight_robbed.k, 1, "halving an interval cost more than a bit");
         let step = tight.rate() - tight_robbed.rate();
         assert!(step == 1333 || step == 1334, "it cost {step} bit/s");
     }
@@ -561,12 +511,7 @@ mod tests {
             }
         });
         let robbed_k = modulus::capacity(std::array::from_fn(|i| robbed_sets[i].modulus()));
-        assert_eq!(
-            clean_k - robbed_k,
-            1,
-            "halving one interval cost {} bits",
-            clean_k - robbed_k
-        );
+        assert_eq!(clean_k - robbed_k, 1, "halving one interval cost {} bits", clean_k - robbed_k);
         let step = super::super::rate_for(clean_k + 6) - super::super::rate_for(robbed_k + 6);
         assert!(step == 1333 || step == 1334, "it cost {step} bit/s");
         let _ = robbed_sets;
@@ -603,11 +548,7 @@ mod rates {
         let cases: [(&str, Vec<u8>, bool); 3] = [
             ("every code above the noise", (24..112).collect(), false),
             ("a quieter line", (40..104).collect(), false),
-            (
-                "every code above the noise, one interval robbed",
-                (24..112).collect(),
-                true,
-            ),
+            ("every code above the noise, one interval robbed", (24..112).collect(), true),
         ];
         for (what, usable, robbed) in cases {
             let sets: [Constellation; INTERVALS] = std::array::from_fn(|i| {
@@ -619,15 +560,9 @@ mod rates {
             });
             let moduli: Moduli = std::array::from_fn(|i| sets[i].modulus());
             let mapping = Mapping::best(sets, Redundancy::None);
-            assert!(
-                mapping.valid(),
-                "{what} produced a mapping V.90 does not define"
-            );
+            assert!(mapping.valid(), "{what} produced a mapping V.90 does not define");
             let rate = mapping.rate();
-            println!(
-                "  {what}: M {:?} -> K {} -> {rate} bit/s",
-                moduli, mapping.k
-            );
+            println!("  {what}: M {:?} -> K {} -> {rate} bit/s", moduli, mapping.k);
             assert!(
                 (super::super::SLOWEST..=super::super::FASTEST).contains(&rate),
                 "{what} came out at {rate}, off the ladder"

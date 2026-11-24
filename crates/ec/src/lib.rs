@@ -15,7 +15,7 @@ pub mod xid;
 
 pub use detect::{Answer, Answerer, Originator, Outcome};
 pub use frame::{Address, Frame, Kind, Role};
-pub use hdlc::{Crc16, Crc32, Decoder, Encoder, Fcs, FrameError};
 pub use lapm::{Cause, Event, Lapm, Params, State};
 pub use stack::Stack;
 pub use xid::{Compression, Xid};
+pub use hdlc::{Crc16, Crc32, Decoder, Encoder, Fcs, FrameError};

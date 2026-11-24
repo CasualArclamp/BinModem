@@ -40,9 +40,7 @@ use std::f64::consts::TAU;
 use std::sync::OnceLock;
 
 use dsp::Complex;
-use dsp::qam::{
-    Band, Constellation, Core, Heard, Options, Point, Slicer, Training as Solve, Via, Window,
-};
+use dsp::qam::{Band, Constellation, Core, Heard, Options, Point, Slicer, Training as Solve, Via, Window};
 
 use super::super::v32::trellis::Decoder;
 use super::super::v32::{CONSTELLATION_RMS, Scrambler};
@@ -95,26 +93,14 @@ const FRESH: u32 = 16;
 /// Symbols of segment 2, counted from its first, that a long train's
 /// equaliser is solved over: V.32's two tries on TRN, both well inside the
 /// 2976 symbols (`v32/receiver.rs`).
-const FIRST: Window = Window {
-    align: (16, 256),
-    solve: (16, 512),
-    search: 8,
-};
-const RETRY: Window = Window {
-    align: (640, 1152),
-    solve: (640, 1152),
-    search: 200,
-};
+const FIRST: Window = Window { align: (16, 256), solve: (16, 512), search: 8 };
+const RETRY: Window = Window { align: (640, 1152), solve: (640, 1152), search: 200 };
 
 /// The one try made when segment 1 ends without turning into segment 2,
 /// which a slip across the join does: the join is taken to be LAPSED_AHEAD
 /// half symbols after segment 1 ended and searched a long way either side,
 /// on a window well inside segment 2 whatever the slip did (V.32's LAPSED).
-const LAPSED: Window = Window {
-    align: (272, 528),
-    solve: (272, 656),
-    search: 330,
-};
+const LAPSED: Window = Window { align: (272, 528), solve: (272, 656), search: 330 };
 const LAPSED_AHEAD: u64 = 48;
 
 /// Signal to noise, in decibels, below which a fit is taken to be the wrong
@@ -175,33 +161,20 @@ fn tables() -> &'static Tables {
     static TABLES: OnceLock<Tables> = OnceLock::new();
     TABLES.get_or_init(|| {
         let unit = |(x, y): (f64, f64)| Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS);
-        let four = Slicer::table(Constellation::new(
-            State::ALL.iter().map(|s| s.unit()).collect(),
-        ));
+        let four = Slicer::table(Constellation::new(State::ALL.iter().map(|s| s.unit()).collect()));
         let coded = [Rate::R7200, Rate::R9600, Rate::R12000, Rate::R14400].map(|rate| {
             let coded = rate.coded();
-            Slicer::table(Constellation::new(
-                (0..coded.size())
-                    .map(|code| unit(coded.point(code)))
-                    .collect(),
-            ))
+            Slicer::table(Constellation::new((0..coded.size()).map(|code| unit(coded.point(code))).collect()))
         });
         let states = segment_two();
         let known = states.iter().map(|s| s.unit()).collect();
-        Tables {
-            four,
-            coded,
-            states,
-            known,
-        }
+        Tables { four, coded, states, known }
     })
 }
 
 /// Which of the four states a point is nearest, by its label in the table.
 fn four_label(z: Complex) -> usize {
-    let Slicer::Table(four) = &tables().four else {
-        unreachable!("the four states are a table")
-    };
+    let Slicer::Table(four) = &tables().four else { unreachable!("the four states are a table") };
     four.nearest(z)
 }
 
@@ -240,17 +213,12 @@ enum Part {
     Waiting,
     /// Deciding against the four states until segment 4 begins, at symbol
     /// `data` of segment 2 counting from its first.
-    Training {
-        data: u64,
-    },
+    Training { data: u64 },
     /// Following the four states with the old taps: the points from
     /// [`RESYNC_AT`] kept until they have been checked against segment 2,
     /// and then the points from [`PROBE`]'s first on, held until they say
     /// which training this is.
-    Telling {
-        kept: Vec<(u64, Complex)>,
-        checked: bool,
-    },
+    Telling { kept: Vec<(u64, Complex)>, checked: bool },
     Data,
 }
 
@@ -303,11 +271,7 @@ impl Receiver {
     pub fn new(fs: f64) -> Self {
         let rate = Rate::default();
         Self {
-            core: Core::new(
-                Band::new(fs, BAUD, CARRIER),
-                Options::fixed(),
-                tables().four.clone(),
-            ),
+            core: Core::new(Band::new(fs, BAUD, CARRIER), Options::fixed(), tables().four.clone()),
             fs,
             rate,
             trellis: Decoder::new(rate.coded()),
@@ -373,10 +337,7 @@ impl Receiver {
         self.watch_level();
         self.listen();
         // A training nothing has overtaken: its window is in.
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(_, _, due)| self.core.halves() >= *due)
+        if self.pending.as_ref().is_some_and(|(_, _, due)| self.core.halves() >= *due)
             && let Some((attempt, solve, _)) = self.pending.take()
         {
             self.attempt = Some(attempt);
@@ -384,9 +345,7 @@ impl Receiver {
         }
         while let Some(point) = self.core.next() {
             let target = self.decide(&point);
-            let Some(symbol) = self.core.settle(target) else {
-                break;
-            };
+            let Some(symbol) = self.core.settle(target) else { break };
             self.last = symbol.point;
             if self.core.slips() != self.slips {
                 // Found again after a slip: the trellis decoder's paths
@@ -449,11 +408,7 @@ impl Receiver {
                     self.s_offset_hz = Some(turn * BAUD / TAU);
                     self.measured = Some((turn, drift));
                     self.at = at;
-                    self.pending = Some(if self.taught {
-                        self.resync_at(at)
-                    } else {
-                        self.long_at(at, Attempt::Long)
-                    });
+                    self.pending = Some(if self.taught { self.resync_at(at) } else { self.long_at(at, Attempt::Long) });
                     self.part = Part::Waiting;
                     // Held back while the hunt goes on, as V.32's is: a
                     // concealment that repeats a fragment of segment 1 has
@@ -521,11 +476,7 @@ impl Receiver {
     /// found, and RESYNC_AT symbols on.
     fn resync_at(&self, at: u64) -> (Attempt, Solve, u64) {
         let start = at.saturating_add_signed(self.offset);
-        let window = Window {
-            align: (0, RESYNC_AT as usize),
-            solve: (0, RESYNC_AT as usize),
-            search: 0,
-        };
+        let window = Window { align: (0, RESYNC_AT as usize), solve: (0, RESYNC_AT as usize), search: 0 };
         let solve = Solve {
             targets: Vec::new(),
             start,
@@ -570,10 +521,7 @@ impl Receiver {
             }
             (Some(Attempt::Resync), _) => {
                 self.symbol = self.place();
-                self.part = Part::Telling {
-                    kept: Vec::new(),
-                    checked: false,
-                };
+                self.part = Part::Telling { kept: Vec::new(), checked: false };
             }
             // A long train that fitted nothing, followed with the old taps.
             _ => {
@@ -608,11 +556,7 @@ impl Receiver {
             }
             Part::Data => {
                 let target = self.data(point.z);
-                if self.fresh > 0 {
-                    point.nearest
-                } else {
-                    target.unwrap_or(point.nearest)
-                }
+                if self.fresh > 0 { point.nearest } else { target.unwrap_or(point.nearest) }
             }
         }
     }
@@ -638,18 +582,12 @@ impl Receiver {
     fn moved_on(&mut self) {
         match &mut self.part {
             Part::Training { data } if self.symbol >= *data => self.enter_data(),
-            Part::Telling {
-                kept,
-                checked: false,
-            } if self.symbol >= CHECKED => {
+            Part::Telling { kept, checked: false } if self.symbol >= CHECKED => {
                 let kept = std::mem::take(kept);
                 match check(&kept) {
                     Some(late) => {
                         self.symbol = self.symbol.saturating_add_signed(late);
-                        self.part = Part::Telling {
-                            kept: Vec::new(),
-                            checked: true,
-                        };
+                        self.part = Part::Telling { kept: Vec::new(), checked: true };
                         self.moved_on();
                     }
                     // Not segment 2 after all: listen for the real one.
@@ -660,10 +598,7 @@ impl Receiver {
                 // Nothing learns from these until it is known what they are.
                 self.core.hold(true);
             }
-            Part::Telling {
-                kept,
-                checked: true,
-            } if self.symbol >= PROBE.2 => {
+            Part::Telling { kept, checked: true } if self.symbol >= PROBE.2 => {
                 let kept = std::mem::take(kept);
                 self.tell(kept);
             }
@@ -675,9 +610,7 @@ impl Receiver {
     /// segment 2.
     fn tell(&mut self, kept: Vec<(u64, Complex)>) {
         self.core.hold(false);
-        let Slicer::Table(four) = &tables().four else {
-            unreachable!("the four states are a table")
-        };
+        let Slicer::Table(four) = &tables().four else { unreachable!("the four states are a table") };
         let judged: Vec<f64> = kept
             .iter()
             .filter(|(k, _)| (PROBE.1..PROBE.2).contains(k))
@@ -718,11 +651,7 @@ impl Receiver {
     pub fn take_bytes(&mut self) -> Vec<u8> {
         let whole = self.bits.len() / 8;
         let bits: Vec<bool> = self.bits.drain(..whole * 8).collect();
-        bits.as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| c.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
-            .collect()
+        bits.as_chunks::<8>().0.iter().map(|c| c.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b))).collect()
     }
 
     /// Circuit 109: on from segment 4 while the level holds, off 30 to 50 ms
@@ -831,12 +760,7 @@ fn check(kept: &[(u64, Complex)]) -> Option<i64> {
             let misses = kept
                 .iter()
                 .filter(|(k, z)| {
-                    let Some(state) = k
-                        .checked_add_signed(late)
-                        .and_then(|k| states.get(k as usize))
-                    else {
-                        return true;
-                    };
+                    let Some(state) = k.checked_add_signed(late).and_then(|k| states.get(k as usize)) else { return true };
                     four_label(*z) != (*state as usize + turn) % 4
                 })
                 .count();
@@ -864,15 +788,8 @@ mod tests {
     fn every_table_is_at_unit_power_and_sliced_as_by_search() {
         let tables = tables();
         for slicer in std::iter::once(&tables.four).chain(&tables.coded) {
-            let Slicer::Table(table) = slicer else {
-                panic!("V.17's constellations are tables")
-            };
-            assert!(
-                (table.power() - 1.0).abs() < 1e-12,
-                "{} points at power {}",
-                table.len(),
-                table.power()
-            );
+            let Slicer::Table(table) = slicer else { panic!("V.17's constellations are tables") };
+            assert!((table.power() - 1.0).abs() < 1e-12, "{} points at power {}", table.len(), table.power());
             let mut seed = 0x2545_f491u32;
             for _ in 0..20_000 {
                 seed ^= seed << 13;
@@ -884,12 +801,7 @@ mod tests {
                 seed ^= seed << 5;
                 let b = f64::from(seed) / f64::from(u32::MAX) - 0.5;
                 let z = Complex::new(a, b).scale(4.0);
-                assert_eq!(
-                    table.nearest(z),
-                    table.nearest_exhaustive(z),
-                    "{} points at {z:?}",
-                    table.len()
-                );
+                assert_eq!(table.nearest(z), table.nearest_exhaustive(z), "{} points at {z:?}", table.len());
             }
         }
     }
@@ -900,10 +812,7 @@ mod tests {
         assert_eq!(known.len(), 2976);
         // Table 4's opening, at unit power.
         use State::{B, C, D};
-        for (k, state) in [C, D, C, D, C, D, C, D, C, D, C, D, B, D, B, D]
-            .into_iter()
-            .enumerate()
-        {
+        for (k, state) in [C, D, C, D, C, D, C, D, C, D, C, D, B, D, B, D].into_iter().enumerate() {
             assert!((known[k] - state.unit()).norm_sqr() < 1e-24, "symbol {k}");
         }
     }

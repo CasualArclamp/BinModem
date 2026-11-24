@@ -241,8 +241,7 @@ impl Server {
         for handle in self.stack.take_arrived() {
             // Said out loud because everything between a browser asking and a
             // socket opening happens over the link, where nobody can see it.
-            self.log
-                .push("proxy: a connection arrived over the link".to_owned());
+            self.log.push("proxy: a connection arrived over the link".to_owned());
             self.relays.insert(
                 handle,
                 Relayed {
@@ -303,8 +302,7 @@ impl Server {
             && let Some(why) = relay.talk.trouble()
         {
             relay.complained = true;
-            self.log
-                .push(format!("proxy: the connection made no sense: {why}"));
+            self.log.push(format!("proxy: the connection made no sense: {why}"));
         }
 
         // Somewhere to open, and possibly not the place already open. A
@@ -341,11 +339,7 @@ impl Server {
             relay.told_socket = false;
             let where_to = want.authority.clone();
             relay.going_to = where_to.clone();
-            let how = if want.tunnel {
-                " to tunnel through"
-            } else {
-                ""
-            };
+            let how = if want.tunnel { " to tunnel through" } else { "" };
             self.log.push(format!("proxy: opening {where_to}{how}"));
             let (sender, receiver) = channel();
             let (tunnel, anywhere) = (want.tunnel, self.anywhere);
@@ -485,7 +479,9 @@ fn open(where_to: &str, tunnel: bool, anywhere: bool) -> Result<TcpStream, Unope
     let mut forbidden = None;
     let mut last = None;
     for address in addresses {
-        if !anywhere && let Some(why) = policy::refused(address.ip(), address.port(), tunnel) {
+        if !anywhere
+            && let Some(why) = policy::refused(address.ip(), address.port(), tunnel)
+        {
             forbidden = Some(why);
             continue;
         }
@@ -533,10 +529,7 @@ mod opening {
     fn a_request_says_where_it_wants_to_go() {
         let mut http = Conversation::Silent;
         http.feed(b"GET http://example.invalid/ HTTP/1.1\r\n\r\n");
-        assert_eq!(
-            http.wants().map(|w| w.authority),
-            Some("example.invalid:80".to_owned())
-        );
+        assert_eq!(http.wants().map(|w| w.authority), Some("example.invalid:80".to_owned()));
         assert!(http.trouble().is_none());
         // And until something arrives there is nothing to decide.
         assert!(Conversation::Silent.wants().is_none());

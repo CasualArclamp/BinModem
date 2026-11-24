@@ -54,10 +54,7 @@ fn connected_at(transcript: &str) -> Option<u32> {
 }
 
 #[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "two modems in real time: run it with --release"
-)]
+#[cfg_attr(debug_assertions, ignore = "two modems in real time: run it with --release")]
 fn two_of_them_on_one_machine_connect_at_a_rate_worth_having() {
     let host_port = free_port();
     let caller_port = free_port();
@@ -88,49 +85,20 @@ fn two_of_them_on_one_machine_connect_at_a_rate_worth_having() {
             .spawn()
             .expect("could not start modem-sip")
     };
-    let host = run(
-        "host",
-        &[
-            "--answer",
-            "--type",
-            "AT+MS=V34",
-            "--hold",
-            "30",
-            "--seconds",
-            "50",
-        ],
-    );
+    let host = run("host", &["--answer", "--type", "AT+MS=V34", "--hold", "30", "--seconds", "50"]);
     // The answering end has to be listening before the INVITE is sent.
     thread::sleep(Duration::from_secs(2));
     let caller = run(
         "caller",
-        &[
-            "--type",
-            "AT+MS=V34",
-            "--type",
-            "ATD100",
-            "--send",
-            "hello",
-            "--hold",
-            "3",
-            "--seconds",
-            "45",
-        ],
+        &["--type", "AT+MS=V34", "--type", "ATD100", "--send", "hello", "--hold", "3", "--seconds", "45"],
     );
 
-    let caller = caller
-        .wait_with_output()
-        .expect("the calling end did not finish");
-    let host = host
-        .wait_with_output()
-        .expect("the answering end did not finish");
+    let caller = caller.wait_with_output().expect("the calling end did not finish");
+    let host = host.wait_with_output().expect("the answering end did not finish");
     let _ = std::fs::remove_dir_all(&dir);
 
     let said = |o: &std::process::Output| {
-        (
-            String::from_utf8_lossy(&o.stdout).into_owned(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-        )
+        (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
     };
     let (caller_terminal, caller_notes) = said(&caller);
     let (host_terminal, host_notes) = said(&host);
@@ -139,20 +107,9 @@ fn two_of_them_on_one_machine_connect_at_a_rate_worth_having() {
          the answering end's terminal:\n{host_terminal}\nits notes:\n{host_notes}"
     );
 
-    let calling = connected_at(&caller_terminal)
-        .unwrap_or_else(|| panic!("the calling end never connected\n{both}"));
-    let answering = connected_at(&host_terminal)
-        .unwrap_or_else(|| panic!("the answering end never connected\n{both}"));
-    assert!(
-        calling >= LEAST,
-        "the calling end connected at {calling}\n{both}"
-    );
-    assert!(
-        answering >= LEAST,
-        "the answering end connected at {answering}\n{both}"
-    );
-    assert!(
-        host_terminal.contains("hello"),
-        "what was sent did not arrive\n{both}"
-    );
+    let calling = connected_at(&caller_terminal).unwrap_or_else(|| panic!("the calling end never connected\n{both}"));
+    let answering = connected_at(&host_terminal).unwrap_or_else(|| panic!("the answering end never connected\n{both}"));
+    assert!(calling >= LEAST, "the calling end connected at {calling}\n{both}");
+    assert!(answering >= LEAST, "the answering end connected at {answering}\n{both}");
+    assert!(host_terminal.contains("hello"), "what was sent did not arrive\n{both}");
 }

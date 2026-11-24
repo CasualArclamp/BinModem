@@ -501,18 +501,10 @@ impl Capabilities {
             .max()
             .map_or_else(|| "-".to_owned(), |r| format!("{r} bit/s"));
         vec![
-            (
-                "receives",
-                if self.receives { "yes" } else { "no" }.to_owned(),
-            ),
+            ("receives", if self.receives { "yes" } else { "no" }.to_owned()),
             (
                 "has a document",
-                if self.can_be_polled {
-                    "yes, for polling"
-                } else {
-                    "no"
-                }
-                .to_owned(),
+                if self.can_be_polled { "yes, for polling" } else { "no" }.to_owned(),
             ),
             ("modulations", modulations),
             ("fastest", rates),
@@ -578,13 +570,7 @@ impl Capabilities {
 pub fn identification(fif: &[u8]) -> String {
     fif.iter()
         .rev()
-        .map(|&c| {
-            if (32..127).contains(&c) {
-                c as char
-            } else {
-                ' '
-            }
-        })
+        .map(|&c| if (32..127).contains(&c) { c as char } else { ' ' })
         .collect::<String>()
         .trim()
         .to_owned()
@@ -725,11 +711,7 @@ pub fn command(command: Command) -> Vec<u8> {
     // Bit 16 is T.4 4.2's coding, and an MMR page is not in it: T.6 says its
     // coding is "in principle the same", and a DCS says which of the two with
     // bit 31 alone.
-    set_bit(
-        &mut fif,
-        16,
-        command.coding == crate::coding::Coding::ModifiedRead,
-    );
+    set_bit(&mut fif, 16, command.coding == crate::coding::Coding::ModifiedRead);
     set_field(&mut fif, 17, 18, 0b00);
     set_field(&mut fif, 19, 20, 0b01);
     // What the receiver asked for, said the way a DCS says it: this is the
@@ -851,10 +833,7 @@ mod tests {
         for dis in 0..8u8 {
             for fine in [false, true] {
                 let dcs = dcs_scan_line(dis, fine);
-                assert!(
-                    dcs_rows.contains(&dcs),
-                    "DIS {dis:03b}, fine {fine}: DCS {dcs:03b}"
-                );
+                assert!(dcs_rows.contains(&dcs), "DIS {dis:03b}, fine {fine}: DCS {dcs:03b}");
                 let want = if fine && scan_line_halves(dis) {
                     scan_line_ms(dis) / 2.0
                 } else {
@@ -876,23 +855,11 @@ mod tests {
             optional_l0: false,
             error_correction,
         };
-        assert_eq!(
-            field_of(&super::command(command(true, 0b110, false)), 21, 23),
-            0b010
-        );
-        assert_eq!(
-            field_of(&super::command(command(false, 0b110, false)), 21, 23),
-            0b000
-        );
-        assert_eq!(
-            field_of(&super::command(command(true, 0b001, false)), 21, 23),
-            0b001
-        );
+        assert_eq!(field_of(&super::command(command(true, 0b110, false)), 21, 23), 0b010);
+        assert_eq!(field_of(&super::command(command(false, 0b110, false)), 21, 23), 0b000);
+        assert_eq!(field_of(&super::command(command(true, 0b001, false)), 21, 23), 0b001);
         // And error correction is none at all, whatever was asked.
-        assert_eq!(
-            field_of(&super::command(command(true, 0b110, true)), 21, 23),
-            0b111
-        );
+        assert_eq!(field_of(&super::command(command(true, 0b110, true)), 21, 23), 0b111);
     }
 
     /// A DIS off the line from a real fax machine.
@@ -905,8 +872,8 @@ mod tests {
 
     /// The CSI that came with it, which is the number that was dialled.
     const REAL_CSI: [u8; 20] = [
-        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x39, 0x30, 0x39, 0x20, 0x38, 0x36, 0x33, 0x20,
-        0x20, 0x30, 0x30, 0x33, 0x31,
+        0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x39, 0x30, 0x39, 0x20, 0x38,
+        0x36, 0x33, 0x20, 0x20, 0x30, 0x30, 0x33, 0x31,
     ];
 
     #[test]
@@ -962,16 +929,8 @@ mod tests {
     fn the_control_field_says_which_frame_and_not_which_end() {
         // 5.3.6.2.1 puts the originating end in the top bit, so a DIS from
         // one end and a DTC from the other come off the same underneath.
-        assert_eq!(
-            Frame::from_code(0x80),
-            Frame::Dis,
-            "DIS from the called end"
-        );
-        assert_eq!(
-            Frame::from_code(0x81),
-            Frame::Dis,
-            "DTC from the calling end"
-        );
+        assert_eq!(Frame::from_code(0x80), Frame::Dis, "DIS from the called end");
+        assert_eq!(Frame::from_code(0x81), Frame::Dis, "DTC from the calling end");
         assert_eq!(Frame::from_code(0x40), Frame::Csi);
         assert_eq!(Frame::from_code(0x41), Frame::Csi, "CIG");
         assert_eq!(Frame::from_code(0x83), Frame::Dcs);
@@ -984,20 +943,9 @@ mod tests {
     #[test]
     fn every_frame_survives_being_written_and_read_again() {
         for frame in [
-            Frame::Nsf,
-            Frame::Csi,
-            Frame::Dis,
-            Frame::Tsi,
-            Frame::Dcs,
-            Frame::Cfr,
-            Frame::Ftt,
-            Frame::Mcf,
-            Frame::Rtp,
-            Frame::Rtn,
-            Frame::Eop,
-            Frame::Eom,
-            Frame::Mps,
-            Frame::Dcn,
+            Frame::Nsf, Frame::Csi, Frame::Dis, Frame::Tsi, Frame::Dcs,
+            Frame::Cfr, Frame::Ftt, Frame::Mcf, Frame::Rtp, Frame::Rtn,
+            Frame::Eop, Frame::Eom, Frame::Mps, Frame::Dcn,
         ] {
             for from_caller in [false, true] {
                 let code = frame.code(from_caller);
@@ -1017,15 +965,9 @@ mod tests {
         // answering end's identification and capabilities, the calling end's
         // identification and command, then the confirmations and the end.
         for (code, frame) in [
-            (0x40u8, Frame::Csi),
-            (0x80, Frame::Dis),
-            (0x43, Frame::Tsi),
-            (0x83, Frame::Dcs),
-            (0x84, Frame::Cfr),
-            (0x4F, Frame::Mps),
-            (0x8C, Frame::Mcf),
-            (0x2F, Frame::Eop),
-            (0xFB, Frame::Dcn),
+            (0x40u8, Frame::Csi), (0x80, Frame::Dis), (0x43, Frame::Tsi),
+            (0x83, Frame::Dcs), (0x84, Frame::Cfr), (0x4F, Frame::Mps),
+            (0x8C, Frame::Mcf), (0x2F, Frame::Eop), (0xFB, Frame::Dcn),
         ] {
             assert_eq!(Frame::from_code(code), frame, "{code:02x}");
             assert_eq!(frame.code(code & 1 == 1), code, "{frame:?}");
@@ -1052,18 +994,10 @@ mod tests {
             Some((Modulation::V17, 14_400))
         );
         // The slowest there is, which every fax machine has.
-        assert_eq!(
-            command_rate(&[0x00, 0x00]),
-            Some((Modulation::V27ter, 2400))
-        );
+        assert_eq!(command_rate(&[0x00, 0x00]), Some((Modulation::V27ter, 2400)));
         // And each of the four V.17 carries, which are the four this modem
         // has constellations for.
-        for (bits, rate) in [
-            (0b0001u8, 14_400),
-            (0b0101, 12_000),
-            (0b1001, 9600),
-            (0b1101, 7200),
-        ] {
+        for (bits, rate) in [(0b0001u8, 14_400), (0b0101, 12_000), (0b1001, 9600), (0b1101, 7200)] {
             // Bits 11 to 14 sit in the second octet, first bit lowest.
             let packed: u8 = (0..4).fold(0, |a, i| a | (((bits >> (3 - i)) & 1) << (i + 2)));
             assert_eq!(
@@ -1084,10 +1018,7 @@ mod tests {
         assert!(!bit(&ours, 80), "an extend bit with nothing after it");
         let caps = capabilities(&ours);
         assert!(caps.jbig && caps.jbig_optional_l0);
-        assert!(
-            caps.t6_coding && caps.error_correction,
-            "and everything a fourth octet said"
-        );
+        assert!(caps.t6_coding && caps.error_correction, "and everything a fourth octet said");
         // The octets between carry nothing else.
         let others: Vec<usize> = (25..=80)
             .filter(|&n| bit(&ours, n) && ![27, 31, 78, 79].contains(&n) && n % 8 != 0)
@@ -1138,10 +1069,7 @@ mod tests {
         let basic = super::command(command(false, true));
         assert_eq!(basic.len(), 10);
         assert!(bit(&basic, 27) && bit(&basic, 78) && !bit(&basic, 79));
-        assert!(
-            !bit(&basic, 31) && !bit(&basic, 16),
-            "a page is in one coding"
-        );
+        assert!(!bit(&basic, 31) && !bit(&basic, 16), "a page is in one coding");
         assert!(commands_jbig(&basic));
         let option = super::command(command(true, true));
         assert!(bit(&option, 78) && bit(&option, 79));

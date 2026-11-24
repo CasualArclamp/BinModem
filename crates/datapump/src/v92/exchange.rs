@@ -414,14 +414,8 @@ impl Exchange {
             // Hold SUVd' a little longer before Ed (see [`E_HOLD`]). The hold
             // is armed the first time E becomes due, and an owner that asked
             // for none gets E at that same boundary.
-            let until = *self
-                .e_hold_until
-                .get_or_insert(now.saturating_add(self.e_hold));
-            return if now >= until {
-                SequenceKind::E
-            } else {
-                SequenceKind::Suv
-            };
+            let until = *self.e_hold_until.get_or_insert(now.saturating_add(self.e_hold));
+            return if now >= until { SequenceKind::E } else { SequenceKind::Suv };
         }
         if self.cp_due(now) {
             return SequenceKind::Cp;
@@ -443,9 +437,7 @@ impl Exchange {
             // and clears the line down. Measured on an Agere SV92PP: two
             // hundred CPd and not one SUVd on the line, `suv=0` in its own
             // state for the whole of Phase 4, `0x96212` at the end of it.
-            return self
-                .since_cp
-                .is_none_or(|at| now.saturating_sub(at) >= self.repeat_gap);
+            return self.since_cp.is_none_or(|at| now.saturating_sub(at) >= self.repeat_gap);
         }
         if !self.need_single_cp || !self.peer_suv || !self.sent_suv {
             return false;
@@ -603,10 +595,7 @@ impl Exchange {
 /// Whether a sequence has an acknowledge bit at all. Bit 33 is it in CPu, CPt,
 /// CPus, CPd, SUVu and SUVd; TRN2, E and B1 are not framed sequences.
 fn carries_ack(kind: SequenceKind) -> bool {
-    matches!(
-        kind,
-        SequenceKind::Suv | SequenceKind::Cp | SequenceKind::Cpus
-    )
+    matches!(kind, SequenceKind::Suv | SequenceKind::Cp | SequenceKind::Cpus)
 }
 
 /// Whether a sequence discharges the one-CP obligation. CPus is the short CPu
@@ -649,11 +638,7 @@ mod tests {
                 (Self::Analogue, SequenceKind::E) => "E2u",
                 (Self::Analogue, SequenceKind::B1) => "B1u",
             };
-            if ack {
-                format!("{stem}'")
-            } else {
-                stem.to_string()
-            }
+            if ack { format!("{stem}'") } else { stem.to_string() }
         }
     }
 
@@ -682,14 +667,7 @@ mod tests {
     }
 
     impl Scripted {
-        fn new(
-            side: Side,
-            context: Context,
-            round_trip: f64,
-            suv: u64,
-            cp: u64,
-            start: u64,
-        ) -> Self {
+        fn new(side: Side, context: Context, round_trip: f64, suv: u64, cp: u64, start: u64) -> Self {
             let mut exchange = Exchange::new(context, round_trip, FS);
             // The scripted digital side is this end's own modem, so it repeats
             // the way that one does; the analogue side repeats the way Figure
@@ -751,11 +729,7 @@ mod tests {
 
     impl Line {
         fn new(digital: Scripted, analogue: Scripted, delay: u64) -> Self {
-            Self {
-                ends: [digital, analogue],
-                delay,
-                crossings: Vec::new(),
-            }
+            Self { ends: [digital, analogue], delay, crossings: Vec::new() }
         }
 
         fn run(&mut self, until: u64) {
@@ -781,13 +755,7 @@ mod tests {
                     let heard = &mut self.ends[crossing.to].exchange;
                     match crossing.kind {
                         SequenceKind::Suv => {
-                            heard.peer_suv(
-                                PeerSuv {
-                                    ack: crossing.ack,
-                                    ..crossing.suv
-                                },
-                                now,
-                            );
+                            heard.peer_suv(PeerSuv { ack: crossing.ack, ..crossing.suv }, now);
                         }
                         SequenceKind::Cp | SequenceKind::Cpus => {
                             heard.peer_cp(PeerCp { ack: crossing.ack }, now);
@@ -866,10 +834,7 @@ mod tests {
         let analogue = Scripted::new(Side::Analogue, Context::Training, rtd, 24, 96, 12);
         let mut line = Line::new(digital, analogue, 6);
         line.run(4000);
-        assert_eq!(
-            line.trace(0),
-            ["SUVd", "SUVd", "CPd", "SUVd'", "SUVd'", "Ed"]
-        );
+        assert_eq!(line.trace(0), ["SUVd", "SUVd", "CPd", "SUVd'", "SUVd'", "Ed"]);
         assert_eq!(
             line.trace(1),
             ["SUVu", "SUVu", "CPu", "SUVu", "SUVu'", "SUVu'", "E2u"]
@@ -903,10 +868,7 @@ mod tests {
         // Figure 12's two SUVd' before the hold began, the hold, and the
         // rest of the SUVd' in flight when it ran out.
         let held = digital[2].1 as u64 * 36;
-        assert!(
-            (E_HOLD..=E_HOLD + 3 * 36).contains(&held),
-            "SUVd' was held for {held} symbols"
-        );
+        assert!((E_HOLD..=E_HOLD + 3 * 36).contains(&held), "SUVd' was held for {held} symbols");
         assert!(line.ends[0].exchange.finished() && line.ends[1].exchange.finished());
     }
 
@@ -931,15 +893,11 @@ mod tests {
         line.run(4000);
         assert_eq!(
             line.trace(0),
-            [
-                "SUVd", "SUVd", "SUVd", "SUVd", "SUVd'", "CPd'", "SUVd'", "SUVd'", "Ed"
-            ]
+            ["SUVd", "SUVd", "SUVd", "SUVd", "SUVd'", "CPd'", "SUVd'", "SUVd'", "Ed"]
         );
         assert_eq!(
             line.trace(1),
-            [
-                "SUVu", "SUVu", "CPu", "SUVu", "SUVu", "SUVu", "SUVu", "SUVu'", "E2u"
-            ]
+            ["SUVu", "SUVu", "CPu", "SUVu", "SUVu", "SUVu", "SUVu", "SUVu'", "E2u"]
         );
     }
 
@@ -997,19 +955,12 @@ mod tests {
             .position(|label| label == "CPu'")
             .expect("the analogue modem repeated its CPu");
         let repeat_start = line.ends[1].starts[repeat];
-        assert!(
-            repeat_start > cp_end + window,
-            "{repeat_start} was not past {}",
-            cp_end + window
-        );
+        assert!(repeat_start > cp_end + window, "{repeat_start} was not past {}", cp_end + window);
         // And not much past it: one SUVd has to finish arriving after the
         // deadline before the rule fires, and the repeat then waits for our
         // own next boundary, so 12 + 12 samples is the whole of the slack.
         let late = repeat_start - (cp_end + window);
-        assert!(
-            late <= 24,
-            "the repeat waited {late} samples past the deadline"
-        );
+        assert!(late <= 24, "the repeat waited {late} samples past the deadline");
     }
 
     /// 9.6.1.1.3's "up to and including the entire CPu or SUVu sequence that
@@ -1033,13 +984,7 @@ mod tests {
         assert!(!exchange.repeating());
         // The one that crosses the deadline carries the acknowledgement, so
         // the repeat never starts.
-        exchange.peer_suv(
-            PeerSuv {
-                ack: true,
-                ..PeerSuv::default()
-            },
-            120 + window + 1,
-        );
+        exchange.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, 120 + window + 1);
         assert!(!exchange.repeating());
         assert!(exchange.peer_acked());
         assert_eq!(exchange.next_sequence(200 + window), SequenceKind::Suv);
@@ -1069,14 +1014,8 @@ mod tests {
         exchange.sequence_ended(SequenceKind::Cp, 120 + 1200 + 96);
         // And the group goes on: another gap, another CPd.
         assert_eq!(exchange.next_sequence(120 + 1200 + 96), SequenceKind::Suv);
-        assert_eq!(
-            exchange.next_sequence(120 + 1200 + 96 + 1199),
-            SequenceKind::Suv
-        );
-        assert_eq!(
-            exchange.next_sequence(120 + 1200 + 96 + 1200),
-            SequenceKind::Cp
-        );
+        assert_eq!(exchange.next_sequence(120 + 1200 + 96 + 1199), SequenceKind::Suv);
+        assert_eq!(exchange.next_sequence(120 + 1200 + 96 + 1200), SequenceKind::Cp);
     }
 
     /// The same window with the straddling sequence unacknowledged: 9.6.2.1.3
@@ -1115,22 +1054,10 @@ mod tests {
         exchange.sequence_ended(SequenceKind::Suv, 24);
         exchange.sequence_started(SequenceKind::Cp);
         exchange.sequence_ended(SequenceKind::Cp, 120);
-        exchange.peer_suv(
-            PeerSuv {
-                ack: true,
-                ..PeerSuv::default()
-            },
-            150,
-        );
+        exchange.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, 150);
         for step in 0..8 {
             let now = 150 + step * window;
-            exchange.peer_suv(
-                PeerSuv {
-                    ack: true,
-                    ..PeerSuv::default()
-                },
-                now,
-            );
+            exchange.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, now);
             assert!(!exchange.repeating(), "a repeat started at {now}");
         }
         // Nothing of ours has carried the acknowledge bit yet -- no CP has
@@ -1275,24 +1202,15 @@ mod tests {
                 let mut line = Line::new(digital, analogue, 6);
                 line.ends[0].exchange.request_silence(true);
                 line.run(4000);
-                assert!(
-                    !line.ends[0].exchange.peer_silence(),
-                    "{context:?} reported a request"
-                );
+                assert!(!line.ends[0].exchange.peer_silence(), "{context:?} reported a request");
                 assert!(!line.ends[0].exchange.peer_asked_silence());
                 assert!(
                     !line.ends[0].exchange.silence_requested(),
                     "{context:?} let our own bit 32 be set"
                 );
                 traces.push((
-                    line.trace(0)
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>(),
-                    line.trace(1)
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>(),
+                    line.trace(0).iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    line.trace(1).iter().map(ToString::to_string).collect::<Vec<_>>(),
                 ));
             }
             assert_eq!(traces[0], traces[1], "{context:?} changed with bit 32");
@@ -1307,13 +1225,7 @@ mod tests {
         let mut exchange = Exchange::new(Context::Renegotiation, 0.0, FS);
         exchange.request_silence(true);
         assert!(exchange.silence_requested());
-        exchange.peer_suv(
-            PeerSuv {
-                silence: true,
-                ..PeerSuv::default()
-            },
-            100,
-        );
+        exchange.peer_suv(PeerSuv { silence: true, ..PeerSuv::default() }, 100);
         assert!(exchange.peer_silence());
         assert!(exchange.peer_asked_silence());
         // 9.8.1.1.4 waits for "an SUVu with bit 32 clear", so the reported bit
@@ -1331,14 +1243,7 @@ mod tests {
     fn leaving_a_silent_period_clears_the_acknowledge_state() {
         let mut exchange = Exchange::new(Context::Renegotiation, 0.0, FS);
         exchange.request_silence(true);
-        exchange.peer_suv(
-            PeerSuv {
-                ack: true,
-                silence: true,
-                ..PeerSuv::default()
-            },
-            0,
-        );
+        exchange.peer_suv(PeerSuv { ack: true, silence: true, ..PeerSuv::default() }, 0);
         exchange.peer_cp(PeerCp { ack: true }, 20);
         exchange.sequence_started(SequenceKind::Suv);
         exchange.sequence_ended(SequenceKind::Suv, 24);
@@ -1368,10 +1273,7 @@ mod tests {
     /// ([`HONOUR_WAIT_FOR_CP`]).
     #[test]
     fn a_peer_that_asks_us_to_wait_for_its_cp_delays_our_cp() {
-        let asked = PeerSuv {
-            wait_for_cp: true,
-            ..PeerSuv::default()
-        };
+        let asked = PeerSuv { wait_for_cp: true, ..PeerSuv::default() };
 
         // Asked, and the peer's CP arrives: no CP of ours goes before it.
         let mut waiting = Exchange::new(Context::Training, 0.0, FS);
@@ -1432,13 +1334,7 @@ mod tests {
     fn e_follows_only_an_acknowledged_sequence_both_ways() {
         // Received but not sent: our CP has not been acknowledged.
         let mut one_way = Exchange::new(Context::Training, 0.0, FS);
-        one_way.peer_suv(
-            PeerSuv {
-                ack: true,
-                ..PeerSuv::default()
-            },
-            0,
-        );
+        one_way.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, 0);
         one_way.sequence_started(SequenceKind::Suv);
         one_way.sequence_ended(SequenceKind::Suv, 24);
         assert!(one_way.peer_acked() && !one_way.sent_ack());
@@ -1472,13 +1368,7 @@ mod tests {
 
         let mut exchange = Exchange::new(Context::FastExchange, 0.0, FS);
         exchange.hold_before_e(0);
-        exchange.peer_suv(
-            PeerSuv {
-                ack: true,
-                ..PeerSuv::default()
-            },
-            0,
-        );
+        exchange.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, 0);
         exchange.peer_cp(PeerCp { ack: true }, 10);
         exchange.sequence_started(SequenceKind::Suv);
         exchange.sequence_ended(SequenceKind::Suv, 24);
@@ -1513,16 +1403,8 @@ mod tests {
             assert_eq!(exchange.next_sequence(200), SequenceKind::Suv);
             assert!(exchange.sequence_started(SequenceKind::Suv));
             exchange.sequence_ended(SequenceKind::Suv, 236);
-            let wanted = if hold == Some(0) {
-                SequenceKind::E
-            } else {
-                SequenceKind::Suv
-            };
-            assert_eq!(
-                exchange.next_sequence(236),
-                wanted,
-                "with a hold of {hold:?}"
-            );
+            let wanted = if hold == Some(0) { SequenceKind::E } else { SequenceKind::Suv };
+            assert_eq!(exchange.next_sequence(236), wanted, "with a hold of {hold:?}");
             // And the default hold lets E go once it has run out.
             assert_eq!(exchange.next_sequence(236 + E_HOLD), SequenceKind::E);
         }

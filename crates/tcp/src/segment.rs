@@ -95,7 +95,9 @@ impl Segment {
     /// sequence space although neither is an octet of anybody's data, which is
     /// what lets them be retransmitted and acknowledged like everything else.
     pub fn length(&self) -> u32 {
-        self.payload.len() as u32 + u32::from(self.syn()) + u32::from(self.fin())
+        self.payload.len() as u32
+            + u32::from(self.syn())
+            + u32::from(self.fin())
     }
 
     /// How long the header will be, options included: 3.1's Data Offset in
@@ -283,10 +285,7 @@ mod tests {
         let empty = Segment::default();
         assert_eq!(empty.length(), 0);
 
-        let syn = Segment {
-            flags: flag::SYN,
-            ..Segment::default()
-        };
+        let syn = Segment { flags: flag::SYN, ..Segment::default() };
         assert_eq!(syn.length(), 1);
 
         let data_and_fin = Segment {
@@ -374,10 +373,7 @@ mod tests {
     fn an_unknown_option_is_ignored_and_the_next_one_is_still_read() {
         // A window scale (kind 3, length 3), a no-operation for alignment,
         // then the size. All three are legal and only the last is understood.
-        assert_eq!(
-            read_mss(&[3, 3, 7, option::NOP, option::MSS, 4, 0x05, 0xb4]),
-            Some(1460)
-        );
+        assert_eq!(read_mss(&[3, 3, 7, option::NOP, option::MSS, 4, 0x05, 0xb4]), Some(1460));
         assert_eq!(read_mss(&[option::NOP, option::NOP, option::END]), None);
         assert_eq!(read_mss(&[]), None);
     }
@@ -387,16 +383,8 @@ mod tests {
     #[test]
     fn an_illegal_option_length_is_survived() {
         assert_eq!(read_mss(&[3, 0, 0, 0]), None, "a zero length looped");
-        assert_eq!(
-            read_mss(&[3, 99]),
-            None,
-            "a length past the end was believed"
-        );
-        assert_eq!(
-            read_mss(&[option::MSS]),
-            None,
-            "a truncated option was read"
-        );
+        assert_eq!(read_mss(&[3, 99]), None, "a length past the end was believed");
+        assert_eq!(read_mss(&[option::MSS]), None, "a truncated option was read");
     }
 
     /// A header shorter than the fixed part, or one whose data offset points

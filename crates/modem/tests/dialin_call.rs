@@ -72,10 +72,7 @@ fn dial_in(script: bool, password: &str) -> Option<Outcome> {
         Box::new(Link::with_authentication(
             [0; 4],
             [0; 4],
-            Authentication {
-                account: Some(offered.clone()),
-                ..Authentication::default()
-            },
+            Authentication { account: Some(offered.clone()), ..Authentication::default() },
         ))
     };
     let mut calling = if script {
@@ -133,10 +130,7 @@ fn dial_in(script: bool, password: &str) -> Option<Outcome> {
                     host.feed_dte(b);
                 }
                 match server.take_outcome() {
-                    Some(server::Outcome::Ppp {
-                        user: logged_in,
-                        early,
-                    }) => {
+                    Some(server::Outcome::Ppp { user: logged_in, early }) => {
                         user = logged_in.clone();
                         let mut link = Box::new(Link::with_authentication(
                             SERVER,
@@ -240,30 +234,14 @@ fn dial_in(script: bool, password: &str) -> Option<Outcome> {
 fn a_caller_logs_in_at_the_prompt_types_ppp_and_pings() {
     let outcome = dial_in(true, "letmein").expect("never got a ping across");
     assert!(outcome.screen.contains("login: "), "{:?}", outcome.screen);
-    assert!(
-        outcome.screen.contains("Welcome to binmodem, guest."),
-        "{:?}",
-        outcome.screen
-    );
-    assert!(
-        outcome
-            .screen
-            .contains("PPP session from 10.0.0.1 to 10.0.0.2"),
-        "{:?}",
-        outcome.screen
-    );
-    assert!(
-        !outcome.screen.contains("letmein"),
-        "the password came back on the screen"
-    );
+    assert!(outcome.screen.contains("Welcome to binmodem, guest."), "{:?}", outcome.screen);
+    assert!(outcome.screen.contains("PPP session from 10.0.0.1 to 10.0.0.2"), "{:?}", outcome.screen);
+    assert!(!outcome.screen.contains("letmein"), "the password came back on the screen");
     assert_eq!(outcome.user.as_deref(), Some("guest"));
     // Logged in at the prompt, so PPP did not ask again.
     assert_eq!(outcome.checked_with, None);
     assert_eq!(outcome.client_address, CLIENT);
-    println!(
-        "  logged in, PPP up {:.1} s into the call, {} echoes back",
-        outcome.up_at, outcome.echoes
-    );
+    println!("  logged in, PPP up {:.1} s into the call, {} echoes back", outcome.up_at, outcome.echoes);
 }
 
 #[test]
@@ -272,16 +250,10 @@ fn a_caller_that_goes_straight_to_ppp_is_asked_with_chap() {
     assert_eq!(outcome.user.as_deref(), Some("guest"));
     assert_eq!(outcome.checked_with, Some(Auth::ChapMd5));
     assert_eq!(outcome.client_address, CLIENT);
-    println!(
-        "  straight to PPP, CHAP, up {:.1} s into the call",
-        outcome.up_at
-    );
+    println!("  straight to PPP, CHAP, up {:.1} s into the call", outcome.up_at);
 }
 
 #[test]
 fn a_caller_with_the_wrong_password_gets_no_link() {
-    assert!(
-        dial_in(false, "guessing").is_none(),
-        "a wrong password got IP across"
-    );
+    assert!(dial_in(false, "guessing").is_none(), "a wrong password got IP across");
 }

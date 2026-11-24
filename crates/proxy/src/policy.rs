@@ -140,14 +140,8 @@ mod tests {
             v6("64:ff9b::a00:1"),
             v6("2002:c0a8:101::1"),
         ] {
-            assert!(
-                refused(address, 80, false).is_some(),
-                "{address} was allowed"
-            );
-            assert!(
-                refused(address, 443, true).is_some(),
-                "{address} was allowed a tunnel"
-            );
+            assert!(refused(address, 80, false).is_some(), "{address} was allowed");
+            assert!(refused(address, 443, true).is_some(), "{address} was allowed a tunnel");
         }
     }
 
@@ -175,16 +169,10 @@ mod tests {
     fn a_tunnel_goes_only_to_443_and_a_request_to_web_ports() {
         let internet = v4([93, 184, 216, 34]);
         for port in [22, 25, 80, 8443, 6379] {
-            assert!(
-                refused(internet, port, true).is_some(),
-                "a tunnel to {port} was allowed"
-            );
+            assert!(refused(internet, port, true).is_some(), "a tunnel to {port} was allowed");
         }
         for port in [22, 25, 110, 143, 445] {
-            assert!(
-                refused(internet, port, false).is_some(),
-                "a request to {port} was allowed"
-            );
+            assert!(refused(internet, port, false).is_some(), "a request to {port} was allowed");
         }
         for port in [80, 443, 1024, 8080, 8443] {
             assert_eq!(refused(internet, port, false), None, "a request to {port}");

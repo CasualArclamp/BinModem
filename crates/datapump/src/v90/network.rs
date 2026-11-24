@@ -290,12 +290,7 @@ impl Network {
     /// all at once or a little at a time.
     pub fn with_rising_noise(mut self, from: f64, over: f64, level: f64) -> Self {
         let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
-        self.rising = Some(Rising {
-            from: codewords(from),
-            over: codewords(over),
-            end: level,
-            start: None,
-        });
+        self.rising = Some(Rising { from: codewords(from), over: codewords(over), end: level, start: None });
         self
     }
 
@@ -310,12 +305,7 @@ impl Network {
     /// these is what the downstream's receiver makes of them.
     pub fn with_bursts(mut self, from: f64, every: f64, length: f64, level: f64) -> Self {
         let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
-        self.bursts = Some(Bursts {
-            from: codewords(from),
-            every: codewords(every).max(1),
-            length: codewords(length),
-            level,
-        });
+        self.bursts = Some(Bursts { from: codewords(from), every: codewords(every).max(1), length: codewords(length), level });
         self
     }
 
@@ -385,6 +375,7 @@ impl Network {
         self
     }
 
+
     /// The same, of `codewords` in place of a twenty-millisecond packet's
     /// 160: a buffer moves whole packets, and a packet holds ten, twenty or
     /// thirty milliseconds of G.711 -- 80, 160 or 240 codewords.
@@ -414,12 +405,7 @@ impl Network {
     /// buffer has time to conceal it rather than resynchronise -- the usual
     /// case for a single loss, and the one Rory's line gives.
     pub fn with_dropout(self, from: f64, every: f64, length: f64, repeat: bool) -> Self {
-        self.dropping_into(
-            from,
-            every,
-            length,
-            if repeat { Fill::Repeat } else { Fill::Comfort },
-        )
+        self.dropping_into(from, every, length, if repeat { Fill::Repeat } else { Fill::Comfort })
     }
 
     /// The same, with digital silence in the hole: nothing inserted, nothing
@@ -438,12 +424,7 @@ impl Network {
         let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
         let length = codewords(length);
         self.kept = self.kept.max(length as usize);
-        self.dropout = Some(Dropout {
-            from: codewords(from),
-            every: codewords(every).max(1),
-            length,
-            fill,
-        });
+        self.dropout = Some(Dropout { from: codewords(from), every: codewords(every).max(1), length, fill });
         self
     }
 
@@ -470,9 +451,7 @@ impl Network {
     /// resampler's filter is, and delays everything by [`CUT_REACH`].
     pub fn with_band_edge_cut(mut self) -> Self {
         let reach = (CUT_REACH * self.fs).round() as i64;
-        let mut taps: Vec<f64> = (-reach + 1..reach)
-            .map(|n| kernel(n as f64, CUT_HZ / self.fs, reach as f64))
-            .collect();
+        let mut taps: Vec<f64> = (-reach + 1..reach).map(|n| kernel(n as f64, CUT_HZ / self.fs, reach as f64)).collect();
         // Unit gain at DC, which the taps come to only approximately.
         let sum: f64 = taps.iter().sum();
         for tap in &mut taps {
@@ -535,11 +514,7 @@ impl Network {
         self.octets += 1;
         let (u, negative) = ucode::from_octet(self.law, octet);
         let level = ucode::level(self.law, u) * if negative { -1.0 } else { 1.0 };
-        if self.pad == 1.0 {
-            level
-        } else {
-            self.quantise(level * self.pad)
-        }
+        if self.pad == 1.0 { level } else { self.quantise(level * self.pad) }
     }
 
     /// One downstream level in, and whatever line samples the analogue modem
@@ -553,14 +528,10 @@ impl Network {
             self.noise = level;
         }
         let burst = self.bursts.map_or(0.0, |b| b.level(self.now));
-        let concealed = self
-            .dropout
-            .and_then(|d| d.within(self.now).map(|k| (d, k)));
+        let concealed = self.dropout.and_then(|d| d.within(self.now).map(|k| (d, k)));
         self.now += 1;
         // The jitter buffer, between the network and the sound card.
-        let periodic = self
-            .slips
-            .filter(|(every, _)| self.now.is_multiple_of(*every));
+        let periodic = self.slips.filter(|(every, _)| self.now.is_multiple_of(*every));
         let once = self.slip_at.filter(|(at, _)| self.now == *at);
         if let Some((_, inserted)) = periodic.or(once) {
             self.slip_count += 1;
@@ -569,8 +540,7 @@ impl Network {
                 // loss concealment makes up.
                 for k in 0..self.slip_length {
                     let made_up = self.made_up(self.slip_length, k);
-                    self.down_levels
-                        .push_back(made_up * (1.0 - k as f64 / self.slip_length as f64));
+                    self.down_levels.push_back(made_up * (1.0 - k as f64 / self.slip_length as f64));
                 }
             } else {
                 self.dropping = self.slip_length;
@@ -585,16 +555,11 @@ impl Network {
             // `recent`, so what is repeated is the last packet that arrived.
             let length = dropout.length as usize;
             if k == 0 && dropout.fill == Fill::Comfort {
-                let power: f64 = (0..length)
-                    .map(|j| self.made_up(length, j))
-                    .map(|v| v * v)
-                    .sum();
+                let power: f64 = (0..length).map(|j| self.made_up(length, j)).map(|v| v * v).sum();
                 self.comfort = (power / length as f64).sqrt();
             }
             let made_up = match dropout.fill {
-                Fill::Repeat => {
-                    self.made_up(length, k as usize) * (1.0 - k as f64 / dropout.length as f64)
-                }
+                Fill::Repeat => self.made_up(length, k as usize) * (1.0 - k as f64 / dropout.length as f64),
                 Fill::Comfort => self.comfort * self.gaussian(),
                 Fill::Silence => 0.0,
             };
@@ -609,10 +574,7 @@ impl Network {
         let mut out = Vec::new();
         if self.down_delay > 0.0 {
             // The delay, as silence first.
-            out.extend(std::iter::repeat_n(
-                0.0,
-                (self.down_delay * self.fs).round() as usize,
-            ));
+            out.extend(std::iter::repeat_n(0.0, (self.down_delay * self.fs).round() as usize));
             self.down_delay = 0.0;
         }
         // Line samples up to where the reconstruction has everything it
@@ -628,9 +590,7 @@ impl Network {
                 if index < 0.0 {
                     continue;
                 }
-                let Some(&v) = self.down_levels.get(index as usize) else {
-                    continue;
-                };
+                let Some(&v) = self.down_levels.get(index as usize) else { continue };
                 sum += v * kernel(t - j as f64, 3800.0 / NETWORK_FS, DOWN_REACH as f64 + 1.0);
             }
             if let Some((taps, kept)) = self.cut.as_mut() {
@@ -648,18 +608,12 @@ impl Network {
                 self.gain += (1.0 - self.gain) / (release * self.fs);
             }
             // A burst is noise of its own on top of the floor's.
-            let level = if burst > 0.0 {
-                self.noise.hypot(burst)
-            } else {
-                self.noise
-            };
+            let level = if burst > 0.0 { self.noise.hypot(burst) } else { self.noise };
             let noise = level * self.gaussian();
             out.push(heard + noise);
             self.down_next += step;
         }
-        while self.down_first + (DOWN_REACH as f64) + 1.0 < self.down_next.floor()
-            && self.down_levels.len() > 1
-        {
+        while self.down_first + (DOWN_REACH as f64) + 1.0 < self.down_next.floor() && self.down_levels.len() > 1 {
             self.down_levels.pop_front();
             self.down_first += 1.0;
         }
@@ -671,10 +625,7 @@ impl Network {
     pub fn up(&mut self, samples: &[f64]) -> f64 {
         if self.up_delay > 0.0 {
             // The delay, as silence ahead of everything the modem says.
-            self.up_samples.extend(std::iter::repeat_n(
-                0.0,
-                (self.up_delay * self.fs).round() as usize,
-            ));
+            self.up_samples.extend(std::iter::repeat_n(0.0, (self.up_delay * self.fs).round() as usize));
             self.up_delay = 0.0;
         }
         for &x in samples {
@@ -698,20 +649,14 @@ impl Network {
             if index < 0.0 {
                 continue;
             }
-            let Some(&v) = self.up_samples.get(index as usize) else {
-                continue;
-            };
+            let Some(&v) = self.up_samples.get(index as usize) else { continue };
             sum += v * kernel(t - j as f64, cutoff, reach + 1.0);
         }
         while self.up_first + reach + 2.0 < t && self.up_samples.len() > 1 {
             self.up_samples.pop_front();
             self.up_first += 1.0;
         }
-        if self.quantised {
-            self.quantise(sum)
-        } else {
-            sum
-        }
+        if self.quantised { self.quantise(sum) } else { sum }
     }
 }
 
@@ -722,14 +667,8 @@ fn kernel(t: f64, cutoff: f64, edge: f64) -> f64 {
         return 0.0;
     }
     let x = 2.0 * cutoff * t;
-    let sinc = if x.abs() < 1e-12 {
-        1.0
-    } else {
-        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-    };
-    let window = 0.42
-        + 0.5 * (std::f64::consts::PI * t / edge).cos()
-        + 0.08 * (2.0 * std::f64::consts::PI * t / edge).cos();
+    let sinc = if x.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+    let window = 0.42 + 0.5 * (std::f64::consts::PI * t / edge).cos() + 0.08 * (2.0 * std::f64::consts::PI * t / edge).cos();
     2.0 * cutoff * sinc * window
 }
 
@@ -776,6 +715,7 @@ mod tests {
         }
     }
 
+
     /// A slip of a chosen length moves everything after it by that length and
     /// by nothing else: 240 codewords, a thirty-millisecond packet, by thirty
     /// milliseconds.
@@ -790,10 +730,7 @@ mod tests {
             assert_eq!(net.slips(), 1);
             // Two line samples a codeword at 16 kHz.
             let moved = 2 * codewords as i64 * if inserted { 1 } else { -1 };
-            assert!(
-                (heard as i64 - (24_000 + moved)).abs() < 60,
-                "{codewords}, inserted {inserted}: {heard}"
-            );
+            assert!((heard as i64 - (24_000 + moved)).abs() < 60, "{codewords}, inserted {inserted}: {heard}");
         }
     }
 
@@ -804,9 +741,7 @@ mod tests {
         let mut u = 0u8;
         for _ in 0..(seconds * NETWORK_FS) as usize {
             u = u.wrapping_add(37);
-            out.extend(net.down(
-                ucode::level(Law::Mu, u % 128) * if u.is_multiple_of(2) { 1.0 } else { -1.0 },
-            ));
+            out.extend(net.down(ucode::level(Law::Mu, u % 128) * if u.is_multiple_of(2) { 1.0 } else { -1.0 }));
         }
         out
     }
@@ -819,39 +754,22 @@ mod tests {
     #[test]
     fn a_silent_dropout_leaves_a_hole_where_the_packet_was_and_moves_nothing() {
         let plain = heard_codewords(Network::new(Law::Mu, 16_000.0), 1.0);
-        let silent = heard_codewords(
-            Network::new(Law::Mu, 16_000.0).with_silent_dropout(0.5, 1.0, 0.02),
-            1.0,
-        );
-        assert_eq!(
-            silent.len(),
-            plain.len(),
-            "the hole moved what came after it"
-        );
+        let silent = heard_codewords(Network::new(Law::Mu, 16_000.0).with_silent_dropout(0.5, 1.0, 0.02), 1.0);
+        assert_eq!(silent.len(), plain.len(), "the hole moved what came after it");
         // Codewords 4000 to 4160 are line samples 8000 to 8320 at 16 kHz,
         // and the codec's reconstruction reaches DOWN_REACH either side.
         let reach = 2 * DOWN_REACH as usize;
-        let differs: Vec<usize> = plain
-            .iter()
-            .zip(&silent)
-            .enumerate()
-            .filter(|(_, (a, b))| (*a - *b).abs() > 1e-9)
-            .map(|(k, _)| k)
-            .collect();
+        let differs: Vec<usize> =
+            plain.iter().zip(&silent).enumerate().filter(|(_, (a, b))| (*a - *b).abs() > 1e-9).map(|(k, _)| k).collect();
         let (first, last) = (differs[0], differs[differs.len() - 1]);
         println!("{} samples differ, {first} to {last}", differs.len());
-        assert!(
-            first > 8000 - reach && last < 8320 + reach,
-            "{first} to {last}"
-        );
+        assert!(first > 8000 - reach && last < 8320 + reach, "{first} to {last}");
         // Well inside the hole, past the reconstruction's reach, there is
         // nothing at all -- where a concealed one has audio at the level of
         // the packet that was lost.
         let inside = &silent[8000 + reach..8320 - reach];
         let loudest = inside.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let level = plain[8000 + reach..8320 - reach]
-            .iter()
-            .fold(0.0f64, |m, x| m.max(x.abs()));
+        let level = plain[8000 + reach..8320 - reach].iter().fold(0.0f64, |m, x| m.max(x.abs()));
         println!("the hole reaches {loudest}, where the line reaches {level}");
         assert!(loudest < 1e-9, "the hole is not silent: {loudest}");
         assert!(level > 0.01, "the line was quiet there anyway: {level}");
@@ -867,35 +785,16 @@ mod tests {
         for repeat in [true, false] {
             let net = Network::new(Law::Mu, 16_000.0).with_dropout(0.5, 1.0, 0.02, repeat);
             let dropped = heard_codewords(net, 1.0);
-            assert_eq!(
-                dropped.len(),
-                plain.len(),
-                "repeat {repeat}: the dropout moved what came after it"
-            );
-            let differs: Vec<usize> = plain
-                .iter()
-                .zip(&dropped)
-                .enumerate()
-                .filter(|(_, (a, b))| (*a - *b).abs() > 1e-9)
-                .map(|(k, _)| k)
-                .collect();
+            assert_eq!(dropped.len(), plain.len(), "repeat {repeat}: the dropout moved what came after it");
+            let differs: Vec<usize> =
+                plain.iter().zip(&dropped).enumerate().filter(|(_, (a, b))| (*a - *b).abs() > 1e-9).map(|(k, _)| k).collect();
             // Codewords 4000 to 4160 are line samples 8000 to 8320 at 16 kHz,
             // and the codec's reconstruction reaches DOWN_REACH either side.
             let reach = 2 * DOWN_REACH as usize;
             let (first, last) = (differs[0], differs[differs.len() - 1]);
-            println!(
-                "repeat {repeat}: {} samples differ, {first} to {last}",
-                differs.len()
-            );
-            assert!(
-                differs.len() > 300,
-                "repeat {repeat}: only {} samples differ",
-                differs.len()
-            );
-            assert!(
-                first > 8000 - reach && last < 8320 + reach,
-                "repeat {repeat}: {first} to {last}"
-            );
+            println!("repeat {repeat}: {} samples differ, {first} to {last}", differs.len());
+            assert!(differs.len() > 300, "repeat {repeat}: only {} samples differ", differs.len());
+            assert!(first > 8000 - reach && last < 8320 + reach, "repeat {repeat}: {first} to {last}");
         }
     }
 
@@ -905,11 +804,7 @@ mod tests {
         let amplitude = 0.3;
         let mut heard = Vec::new();
         for n in 0..24_000 {
-            heard.extend(
-                net.down(
-                    amplitude * (2.0 * std::f64::consts::PI * hz * n as f64 / NETWORK_FS).sin(),
-                ),
-            );
+            heard.extend(net.down(amplitude * (2.0 * std::f64::consts::PI * hz * n as f64 / NETWORK_FS).sin()));
         }
         // A second's worth from the middle, correlated against the tone:
         // quantising's noise is spread across the band, and falls away.
@@ -956,9 +851,7 @@ mod tests {
     /// asked for, on top of the floor, and the floor alone between them.
     #[test]
     fn noise_bursts_come_and_go_on_top_of_the_floor() {
-        let net = Network::new(Law::Mu, 16_000.0)
-            .with_noise(1e-4)
-            .with_bursts(0.5, 1.0, 0.2, 1e-3);
+        let net = Network::new(Law::Mu, 16_000.0).with_noise(1e-4).with_bursts(0.5, 1.0, 0.2, 1e-3);
         let heard = noise_heard(net, 3.0);
         let with_burst = 1e-4f64.hypot(1e-3);
         for (tenth, rms) in heard.iter().enumerate() {
@@ -966,10 +859,7 @@ mod tests {
             // begins and ends where it was asked to, on tenths here.
             let bursting = tenth >= 5 && (tenth - 5) % 10 < 2;
             let expected = if bursting { with_burst } else { 1e-4 };
-            assert!(
-                (rms / expected - 1.0).abs() < 0.1,
-                "tenth {tenth}: {rms:.2e} against {expected:.2e}"
-            );
+            assert!((rms / expected - 1.0).abs() < 0.1, "tenth {tenth}: {rms:.2e} against {expected:.2e}");
         }
     }
 
@@ -977,35 +867,19 @@ mod tests {
     /// by as many decibels each second, and stays there.
     #[test]
     fn a_rising_floor_rises_by_the_same_decibels_each_second() {
-        let net = Network::new(Law::Mu, 16_000.0)
-            .with_noise(1e-5)
-            .with_rising_noise(1.0, 2.0, 1e-3);
+        let net = Network::new(Law::Mu, 16_000.0).with_noise(1e-5).with_rising_noise(1.0, 2.0, 1e-3);
         let heard = noise_heard(net, 4.0);
         // Tenths 0 to 9 before the rise, 10 to 29 during it, 30 on after.
         let db = |rms: f64| 20.0 * rms.log10();
-        assert!(
-            (db(heard[5]) - db(1e-5)).abs() < 1.0,
-            "before: {:.2e}",
-            heard[5]
-        );
+        assert!((db(heard[5]) - db(1e-5)).abs() < 1.0, "before: {:.2e}", heard[5]);
         // Half way through, half way in decibels: the middle of the tenth
         // that starts it is 2.05 s, a fortieth of the way on from 2.0.
         let middle = db(1e-5) + (db(1e-3) - db(1e-5)) * 0.525;
-        assert!(
-            (db(heard[20]) - middle).abs() < 1.0,
-            "half way: {:.1} dB against {middle:.1}",
-            db(heard[20])
-        );
-        assert!(
-            (db(heard[35]) - db(1e-3)).abs() < 1.0,
-            "after: {:.2e}",
-            heard[35]
-        );
+        assert!((db(heard[20]) - middle).abs() < 1.0, "half way: {:.1} dB against {middle:.1}", db(heard[20]));
+        assert!((db(heard[35]) - db(1e-3)).abs() < 1.0, "after: {:.2e}", heard[35]);
         // It is the loop's floor, as `set_noise` sets it: the upstream hears
         // it too.
-        let mut net = Network::new(Law::Mu, 16_000.0)
-            .with_noise(1e-5)
-            .with_rising_noise(0.0, 0.0, 1e-3);
+        let mut net = Network::new(Law::Mu, 16_000.0).with_noise(1e-5).with_rising_noise(0.0, 0.0, 1e-3);
         let _ = net.down(0.0);
         assert_eq!(net.noise, 1e-3);
     }

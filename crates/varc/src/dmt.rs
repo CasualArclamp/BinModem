@@ -113,13 +113,7 @@ impl Plan {
         } else {
             4096
         };
-        Self {
-            fs,
-            n,
-            cp: n / 16,
-            symbols: 32,
-            colour: 0,
-        }
+        Self { fs, n, cp: n / 16, symbols: 32, colour: 0 }
     }
 
     /// The same plan with a different set of known points.
@@ -219,10 +213,7 @@ impl Plan {
                 u8::from(first) * 2
             })
             .collect();
-        Table {
-            parity: DEFAULT_PARITY,
-            bits,
-        }
+        Table { parity: DEFAULT_PARITY, bits }
     }
 
     /// Data symbols in each group sent with `table`: the fewest, in powers
@@ -237,10 +228,7 @@ impl Plan {
 
     /// How a group sent with `table` is laid out, if it holds anything.
     pub fn layout(&self, table: &Table) -> Option<Layout> {
-        Layout::new(
-            self.group(table) * table.total() / 8,
-            usize::from(table.parity),
-        )
+        Layout::new(self.group(table) * table.total() / 8, usize::from(table.parity))
     }
 
     /// Bits a second `table` carries on the line, coding and all.
@@ -251,9 +239,7 @@ impl Plan {
     /// Bits a second of frames `table` carries.
     pub fn net(&self, table: &Table) -> f64 {
         let groups = self.symbols / self.group(table);
-        self.layout(table).map_or(0.0, |l| {
-            (groups * l.payload() * 8) as f64 / self.superframe()
-        })
+        self.layout(table).map_or(0.0, |l| (groups * l.payload() * 8) as f64 / self.superframe())
     }
 
     /// The known points: a row for each sync sequence, then a row for each
@@ -306,10 +292,7 @@ pub struct Tx {
 
 impl std::fmt::Debug for Tx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tx")
-            .field("plan", &self.plan)
-            .field("id", &self.id)
-            .finish_non_exhaustive()
+        f.debug_struct("Tx").field("plan", &self.plan).field("id", &self.id).finish_non_exhaustive()
     }
 }
 
@@ -362,11 +345,7 @@ impl Tx {
 
     fn build(&mut self) {
         let (n, half) = (self.plan.n, self.plan.half());
-        let row = if self.symbol == 0 {
-            usize::from(self.id)
-        } else {
-            TABLES + self.symbol - 1
-        };
+        let row = if self.symbol == 0 { usize::from(self.id) } else { TABLES + self.symbol - 1 };
         self.re.fill(0.0);
         self.im.fill(0.0);
         // The starting table: a few points, each on many carriers.
@@ -430,11 +409,7 @@ impl Tx {
 
 impl Sender for Tx {
     fn wants(&self) -> Option<Layout> {
-        if self.wanting {
-            self.plan.layout(&self.table)
-        } else {
-            None
-        }
+        if self.wanting { self.plan.layout(&self.table) } else { None }
     }
 
     fn give(&mut self, line: Vec<u8>) {
@@ -749,12 +724,7 @@ impl Rx {
         let x = if self.echo_learned > 0 {
             let under = self.echo_under_at(self.count);
             // Taps are newest first: the last sample under is the first tap's.
-            x - self
-                .echo_taps
-                .iter()
-                .zip(under.iter().rev())
-                .map(|(t, r)| t * r)
-                .sum::<f64>()
+            x - self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum::<f64>()
         } else {
             x
         };
@@ -809,12 +779,7 @@ impl Rx {
             }
             // What this stage had already taken off this sample, so that
             // what it does can be said.
-            let had: f64 = self
-                .echo_taps
-                .iter()
-                .zip(under.iter().rev())
-                .map(|(t, r)| t * r)
-                .sum();
+            let had: f64 = self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum();
             before += (left + had) * (left + had);
             after += left * left;
             // Large steps at first, since there is only noise to be misled
@@ -843,9 +808,7 @@ impl Rx {
                 }
             }
             _ => {
-                while self.stage != Stage::Hunting
-                    && self.count >= self.next_start + self.plan.n as i64
-                {
+                while self.stage != Stage::Hunting && self.count >= self.next_start + self.plan.n as i64 {
                     self.symbol_at(self.next_start);
                 }
                 let keep = (self.next_start - span).min(self.count - span);
@@ -964,9 +927,7 @@ impl Rx {
             // framed on it.
             let half = self.plan.half();
             let power = |k: usize| self.re[k] * self.re[k] + self.im[k] * self.im[k];
-            let (total, most) = (1..half)
-                .map(power)
-                .fold((0.0, 0.0f64), |(sum, most), p| (sum + p, most.max(p)));
+            let (total, most) = (1..half).map(power).fold((0.0, 0.0f64), |(sum, most), p| (sum + p, most.max(p)));
             if quality < 0.5 || 8.0 * most > total {
                 self.next_start += span;
                 self.searched += 1;
@@ -992,23 +953,14 @@ impl Rx {
                 }
             }
             self.anchor = self.delay_of();
-            let peak = self
-                .h
-                .iter()
-                .map(|h| h.norm_sqr())
-                .fold(0.0, f64::max)
-                .max(1e-30);
+            let peak = self.h.iter().map(|h| h.norm_sqr()).fold(0.0, f64::max).max(1e-30);
             // Until the line has been measured the only guide to which
             // carriers to time against is how strongly they arrive, and that
             // is no guide at the very top of the band: the resampler's own
             // response up there moves as the two clocks slide past each
             // other, which reads as timing error and is not.
             for k in 0..self.plan.half() {
-                self.weight[k] = if k <= self.plan.top() {
-                    self.h[k].norm_sqr() / peak
-                } else {
-                    0.0
-                };
+                self.weight[k] = if k <= self.plan.top() { self.h[k].norm_sqr() / peak } else { 0.0 };
                 // A first guess at each carrier's noise, from how strongly
                 // it arrived: ten decibels clear on the strongest.
                 self.heard[k] = 0.1 / self.weight[k].max(1e-9);
@@ -1047,11 +999,7 @@ impl Rx {
             self.trained = 0;
             self.measured.fill(0.0);
         }
-        let row = if self.symbol == 0 {
-            id
-        } else {
-            TABLES + self.symbol - 1
-        };
+        let row = if self.symbol == 0 { id } else { TABLES + self.symbol - 1 };
         self.demodulate(row);
 
         let table = self.tables[id].as_ref();
@@ -1060,11 +1008,7 @@ impl Rx {
             match table.and_then(|t| self.plan.layout(t)) {
                 Some(layout) => {
                     let line = self.writer.finish(layout.capacity());
-                    self.arrived.push_back(Arrived::Octets {
-                        line,
-                        layout,
-                        erased: None,
-                    });
+                    self.arrived.push_back(Arrived::Octets { line, layout, erased: None });
                 }
                 None => {
                     self.writer = BitWriter::default();
@@ -1072,11 +1016,7 @@ impl Rx {
                 }
             }
         }
-        self.symbol = if self.symbol == self.plan.symbols {
-            0
-        } else {
-            self.symbol + 1
-        };
+        self.symbol = if self.symbol == self.plan.symbols { 0 } else { self.symbol + 1 };
         self.next_start += span;
     }
 
@@ -1108,22 +1048,12 @@ impl Rx {
         // estimates are updated.
         let table = self.tables[id].clone();
         let bits_at = |k: usize| -> u8 {
-            if is_sync {
-                0
-            } else {
-                table.as_ref().map_or(0, |t| t.bits[k])
-            }
+            if is_sync { 0 } else { table.as_ref().map_or(0, |t| t.bits[k]) }
         };
         let unknown = table.is_none() && !is_sync;
         // The starting table: a few points, each on many carriers.
         let spreading = !is_sync && id == 0 && table.is_some();
-        let carries = |k: usize| {
-            if spreading {
-                self.spread[k].is_some()
-            } else {
-                bits_at(k) > 0
-            }
-        };
+        let carries = |k: usize| if spreading { self.spread[k].is_some() } else { bits_at(k) > 0 };
 
         // One diagram cannot hold every carrier: they carry different
         // numbers of bits, and a grid of four points laid over one of a
@@ -1141,10 +1071,7 @@ impl Rx {
             for k in 1..=top {
                 count[usize::from(bits_at(k))] += 1;
             }
-            let shown = (1..count.len())
-                .max_by_key(|&b| count[b])
-                .filter(|&b| count[b] > 0)
-                .unwrap_or(0);
+            let shown = (1..count.len()).max_by_key(|&b| count[b]).filter(|&b| count[b] > 0).unwrap_or(0);
             (shown as u8, (count[shown] / 64).max(1))
         };
         if !is_sync && shown != self.shown {
@@ -1153,11 +1080,7 @@ impl Rx {
         }
         let reach = {
             let (bi, _) = crate::map::split(shown);
-            if shown == 0 {
-                1.0
-            } else {
-                crate::map::qam_scale(shown) * ((1u64 << bi) - 1) as f64
-            }
+            if shown == 0 { 1.0 } else { crate::map::qam_scale(shown) * ((1u64 << bi) - 1) as f64 }
         };
         let mut passed = 0usize;
 
@@ -1170,11 +1093,7 @@ impl Rx {
             }
             let y = Complex::new(self.re[k], self.im[k]);
             let z = y * (self.h[k] * self.known[row][k]).conj();
-            let w = if spreading {
-                1.0 / self.heard[k]
-            } else {
-                self.weight[k]
-            } * k as f64;
+            let w = if spreading { 1.0 / self.heard[k] } else { self.weight[k] } * k as f64;
             num += w * z.arg();
             den += w * k as f64;
         }
@@ -1210,11 +1129,7 @@ impl Rx {
                     weight[usize::from(turn)] += w;
                 }
                 for (sum, &weight) in sum.iter_mut().zip(&weight) {
-                    *sum = if weight > 0.0 {
-                        *sum * (1.0 / weight)
-                    } else {
-                        Complex::ZERO
-                    };
+                    *sum = if weight > 0.0 { *sum * (1.0 / weight) } else { Complex::ZERO };
                 }
                 sum
             };
@@ -1232,11 +1147,7 @@ impl Rx {
                 };
                 let y = Complex::new(self.re[k], self.im[k]);
                 let z = y * (self.h[k] * point).conj();
-                let w = if k <= top {
-                    k as f64 / self.heard[k]
-                } else {
-                    0.0
-                };
+                let w = if k <= top { k as f64 / self.heard[k] } else { 0.0 };
                 num += w * z.arg();
                 den += w * k as f64;
             }
@@ -1282,13 +1193,7 @@ impl Rx {
             }
             let z = Complex::new(self.re[k], self.im[k]) * back / self.h[k];
             let bits = if spreading { 0 } else { bits_at(k) };
-            if !is_sync
-                && !unknown
-                && !spreading
-                && bits == shown
-                && k <= top
-                && !(shown == 0 && Plan::is_pilot(k))
-            {
+            if !is_sync && !unknown && !spreading && bits == shown && k <= top && !(shown == 0 && Plan::is_pilot(k)) {
                 passed += 1;
                 if passed.is_multiple_of(every) && self.points.len() < POINTS_KEPT {
                     // The known points sit at a root of a half on each axis.
@@ -1363,11 +1268,9 @@ impl Rx {
         // A second-order loop about a hertz wide: most of each error is
         // taken out at once, and a fiftieth of it changes the rate.
         self.interp.nudge(0.2 * late);
-        self.interp
-            .adjust_step(0.02 * late / self.plan.span() as f64);
+        self.interp.adjust_step(0.02 * late / self.plan.span() as f64);
         self.echo_interp.nudge(0.2 * late);
-        self.echo_interp
-            .adjust_step(0.02 * late / self.plan.span() as f64);
+        self.echo_interp.adjust_step(0.02 * late / self.plan.span() as f64);
         // The echo stage learns from a symbol only if the symbol was read:
         // what it takes away as the far end's part is the decisions, and if
         // those are wrong what is left is not the echo but the far end, and
@@ -1440,10 +1343,7 @@ impl Rx {
                     ((1.0 + snr / gap).log2().floor() as i64).clamp(0, i64::from(MAX_BITS)) as u8
                 })
                 .collect();
-            let mut table = Table {
-                parity: LOADED_PARITY,
-                bits,
-            };
+            let mut table = Table { parity: LOADED_PARITY, bits };
             if let Some(rate) = rate {
                 let capacity = self.plan.group(&table) * table.total() / 8;
                 table.parity = crate::link::checks_for(rate, capacity);
@@ -1501,8 +1401,7 @@ impl Receiver for Rx {
 
     fn echo_left_db(&self) -> Option<f64> {
         let (before, after) = self.echo_power;
-        (self.echo_learned > 0 && before > 0.0 && after > 0.0)
-            .then(|| 10.0 * (before / after).log10())
+        (self.echo_learned > 0 && before > 0.0 && after > 0.0).then(|| 10.0 * (before / after).log10())
     }
 
     fn take(&mut self) -> Option<Arrived> {
@@ -1551,9 +1450,7 @@ impl Receiver for Rx {
     }
 
     fn code(&self) -> Option<(usize, usize)> {
-        let table = self
-            .id
-            .and_then(|id| self.tables[usize::from(id)].as_ref())?;
+        let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref())?;
         self.plan.layout(table).map(|layout| layout.code())
     }
 
@@ -1571,11 +1468,7 @@ impl Receiver for Rx {
         (1..self.plan.half())
             .map(|k| Bin {
                 hz: self.plan.frequency(k),
-                snr_db: if self.stage == Stage::Steady {
-                    self.snr_db(k)
-                } else {
-                    0.0
-                },
+                snr_db: if self.stage == Stage::Steady { self.snr_db(k) } else { 0.0 },
                 bits: table.map_or(0, |t| t.bits[k]),
             })
             .collect()
@@ -1594,10 +1487,7 @@ mod tests {
             Self(seed)
         }
         fn uniform(&mut self) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         pub(crate) fn gaussian(&mut self) -> f64 {
@@ -1615,13 +1505,7 @@ mod tests {
     impl Band {
         fn new(fs: f64, low: f64, high: f64) -> Self {
             let half = 400i64;
-            let sinc = |x: f64| {
-                if x == 0.0 {
-                    1.0
-                } else {
-                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-                }
-            };
+            let sinc = |x: f64| if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
             let taps: Vec<f64> = (-half..=half)
                 .map(|i| {
                     let t = i as f64;
@@ -1630,10 +1514,7 @@ mod tests {
                     (a * sinc(a * t) - b * sinc(b * t)) * window
                 })
                 .collect();
-            Self {
-                past: VecDeque::from(vec![0.0; taps.len()]),
-                taps,
-            }
+            Self { past: VecDeque::from(vec![0.0; taps.len()]), taps }
         }
 
         fn pass(&mut self, x: f64) -> f64 {
@@ -1698,8 +1579,7 @@ mod tests {
                     None => s,
                 };
                 let (rx, noise, sigma) = (&mut self.rx, &mut self.noise, self.sigma);
-                self.clock
-                    .feed(s, |y| rx.feed(y + sigma * noise.gaussian()));
+                self.clock.feed(s, |y| rx.feed(y + sigma * noise.gaussian()));
                 while let Some(arrived) = self.rx.take() {
                     match arrived {
                         Arrived::Octets { line, layout, .. } => {
@@ -1769,24 +1649,17 @@ mod tests {
             if let Some((low, high)) = band {
                 let plan = line.rx.plan().clone();
                 let outside: usize = (1..plan.half())
-                    .filter(|&k| {
-                        plan.frequency(k) < low - 300.0 || plan.frequency(k) > high + 300.0
-                    })
+                    .filter(|&k| plan.frequency(k) < low - 300.0 || plan.frequency(k) > high + 300.0)
                     .map(|k| usize::from(table.bits[k]))
                     .sum();
                 assert_eq!(outside, 0, "{what}: bits loaded outside the band");
                 if snr > 20.0 {
                     let inside: usize = (1..plan.half())
-                        .filter(|&k| {
-                            plan.frequency(k) > low + 300.0 && plan.frequency(k) < high - 300.0
-                        })
+                        .filter(|&k| plan.frequency(k) > low + 300.0 && plan.frequency(k) < high - 300.0)
                         .filter(|&k| !Plan::is_pilot(k))
                         .map(|k| usize::from(table.bits[k].min(1)))
                         .sum();
-                    assert!(
-                        inside > 30,
-                        "{what}: {inside} carriers loaded inside the band"
-                    );
+                    assert!(inside > 30, "{what}: {inside} carriers loaded inside the band");
                 }
             }
         }
@@ -1804,10 +1677,7 @@ mod tests {
             let mean = mid.iter().sum::<f64>() / mid.len() as f64;
             assert!((mean - snr).abs() < 1.0, "asked {snr}, measured {mean:.1}");
             let expect = ((1.0 + 10f64.powf((snr - GAP_DB) / 10.0)).log2().floor()) as u8;
-            let near = (40..400)
-                .filter(|&k| !Plan::is_pilot(k))
-                .filter(|&k| table.bits[k].abs_diff(expect) <= 1)
-                .count();
+            let near = (40..400).filter(|&k| !Plan::is_pilot(k)).filter(|&k| table.bits[k].abs_diff(expect) <= 1).count();
             assert!(near > 340, "{near} carriers near {expect} bits at {snr} dB");
         }
     }
@@ -1818,11 +1688,7 @@ mod tests {
             let mut line = Line::new(48_000.0, 55.0, ppm);
             line.run(5.0);
             assert_eq!(line.rx.stage(), Stage::Steady, "{ppm} ppm");
-            assert!(
-                (line.rx.clock_ppm() - ppm).abs() < 2.0,
-                "asked {ppm}, found {:.2}",
-                line.rx.clock_ppm()
-            );
+            assert!((line.rx.clock_ppm() - ppm).abs() < 2.0, "asked {ppm}, found {:.2}", line.rx.clock_ppm());
             let table = line.rx.proposal().expect("a proposal after training");
             line.rx.expect(1, table.clone());
             line.tx.adopt(1, table.clone());
@@ -1830,13 +1696,7 @@ mod tests {
             assert!(rate > 230_000.0, "{rate} bit/s");
             line.got.clear();
             line.run(1.5);
-            let sent: Vec<Vec<u8>> = (0..300usize)
-                .map(|i| {
-                    (0..1000)
-                        .map(|j| (i * 7 + j * 13 + (j >> 4)) as u8)
-                        .collect()
-                })
-                .collect();
+            let sent: Vec<Vec<u8>> = (0..300usize).map(|i| (0..1000).map(|j| (i * 7 + j * 13 + (j >> 4)) as u8).collect()).collect();
             for body in &sent {
                 line.packer.push(3, body);
             }
@@ -1844,12 +1704,7 @@ mod tests {
             line.run(12.0);
             assert_eq!(line.failed, 0, "{ppm} ppm");
             assert_eq!(line.lost, 0, "{ppm} ppm");
-            let got: Vec<Vec<u8>> = line
-                .got
-                .iter()
-                .filter(|f| f.0 == 3)
-                .map(|f| f.1.clone())
-                .collect();
+            let got: Vec<Vec<u8>> = line.got.iter().filter(|f| f.0 == 3).map(|f| f.1.clone()).collect();
             assert_eq!(got.len(), sent.len(), "{ppm} ppm");
             assert!(got == sent, "{ppm} ppm");
         }

@@ -259,10 +259,7 @@ pub struct Modem {
 impl Modem {
     /// The call or answer end, at `fs` samples a second.
     pub fn new(side: Side, fs: f64) -> Self {
-        Self {
-            transmitter: Transmitter::new(side, fs),
-            receiver: Receiver::new(side, fs),
-        }
+        Self { transmitter: Transmitter::new(side, fs), receiver: Receiver::new(side, fs) }
     }
 
     pub fn side(&self) -> Side {

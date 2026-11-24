@@ -39,10 +39,7 @@ fn a_browsers_request_becomes_one_an_origin_server_will_answer() {
     assert!(out.starts_with("GET /index.html HTTP/1.1\r\n"), "{out}");
     assert!(out.contains("User-Agent: Mozilla/5.0\r\n"), "{out}");
     // 7.6.1: this one is for the hop and goes no further.
-    assert!(
-        !out.to_ascii_lowercase().contains("proxy-connection"),
-        "{out}"
-    );
+    assert!(!out.to_ascii_lowercase().contains("proxy-connection"), "{out}");
     assert!(out.ends_with("\r\n\r\n"), "{out}");
 }
 
@@ -66,10 +63,7 @@ fn the_host_comes_from_the_request_target_and_not_from_the_browser() {
 #[test]
 fn a_target_without_a_port_gets_the_one_http_uses() {
     let mut session = Session::new();
-    forward(
-        &mut session,
-        b"GET http://example.invalid/ HTTP/1.1\r\n\r\n",
-    );
+    forward(&mut session, b"GET http://example.invalid/ HTTP/1.1\r\n\r\n");
     // Asked for and answered inside `forward`, so what it opened is what the
     // session now considers open.
     assert!(session.open());
@@ -81,10 +75,7 @@ fn what_it_wants_opened_is_the_host_in_the_request() {
     session.feed(b"GET http://example.invalid:8080/ HTTP/1.1\r\n\r\n");
     assert_eq!(
         session.request(),
-        Some(&Target {
-            authority: "example.invalid:8080".to_owned(),
-            tunnel: false
-        })
+        Some(&Target { authority: "example.invalid:8080".to_owned(), tunnel: false })
     );
 }
 
@@ -95,25 +86,14 @@ fn an_empty_path_is_sent_as_a_slash() {
     // obligation lands here.
     let mut session = Session::new();
     let asked = forward(&mut session, b"GET http://example.invalid HTTP/1.1\r\n\r\n");
-    assert!(
-        text(&asked).starts_with("GET / HTTP/1.1\r\n"),
-        "{}",
-        text(&asked)
-    );
+    assert!(text(&asked).starts_with("GET / HTTP/1.1\r\n"), "{}", text(&asked));
 }
 
 #[test]
 fn a_query_with_no_path_keeps_its_question_mark() {
     let mut session = Session::new();
-    let asked = forward(
-        &mut session,
-        b"GET http://example.invalid?q=1 HTTP/1.1\r\n\r\n",
-    );
-    assert!(
-        text(&asked).starts_with("GET ?q=1 HTTP/1.1\r\n"),
-        "{}",
-        text(&asked)
-    );
+    let asked = forward(&mut session, b"GET http://example.invalid?q=1 HTTP/1.1\r\n\r\n");
+    assert!(text(&asked).starts_with("GET ?q=1 HTTP/1.1\r\n"), "{}", text(&asked));
 }
 
 #[test]
@@ -123,17 +103,10 @@ fn a_second_request_to_the_same_host_reuses_the_socket() {
     // every one of them needed a socket opened, the saving would be given
     // straight back.
     let mut session = Session::new();
-    forward(
-        &mut session,
-        b"GET http://example.invalid/one HTTP/1.1\r\n\r\n",
-    );
+    forward(&mut session, b"GET http://example.invalid/one HTTP/1.1\r\n\r\n");
     let asked = session.feed(b"GET http://example.invalid/two HTTP/1.1\r\n\r\n");
     assert_eq!(session.request(), None, "it asked for a second socket");
-    assert!(
-        text(&asked).starts_with("GET /two HTTP/1.1\r\n"),
-        "{}",
-        text(&asked)
-    );
+    assert!(text(&asked).starts_with("GET /two HTTP/1.1\r\n"), "{}", text(&asked));
 }
 
 #[test]
@@ -151,11 +124,7 @@ fn a_request_to_somewhere_else_waits_for_its_own_socket() {
         Some("second.invalid:80")
     );
     let asked = session.answer(Answer::Opened);
-    assert!(
-        text(&asked).starts_with("GET / HTTP/1.1\r\n"),
-        "{}",
-        text(&asked)
-    );
+    assert!(text(&asked).starts_with("GET / HTTP/1.1\r\n"), "{}", text(&asked));
 }
 
 #[test]
@@ -175,10 +144,7 @@ fn a_body_of_known_length_goes_through_and_the_next_request_is_still_found() {
     let out = text(&asked);
     assert!(out.contains("Content-Length: 9\r\n"), "{out}");
     assert!(out.contains("name=rory"), "{out}");
-    assert!(
-        out.contains("GET /after HTTP/1.1\r\n"),
-        "the second request was eaten: {out}"
-    );
+    assert!(out.contains("GET /after HTTP/1.1\r\n"), "the second request was eaten: {out}");
 }
 
 #[test]
@@ -210,19 +176,10 @@ fn a_chunked_body_is_passed_through_and_its_end_is_found() {
           GET http://example.invalid/after HTTP/1.1\r\n\r\n",
     );
     let out = text(&asked);
-    assert!(
-        out.contains("Transfer-Encoding: chunked\r\n"),
-        "the framing was dropped: {out}"
-    );
+    assert!(out.contains("Transfer-Encoding: chunked\r\n"), "the framing was dropped: {out}");
     assert!(out.contains("4\r\nabcd\r\n"), "{out}");
-    assert!(
-        out.contains("3;ext=1\r\nefg\r\n"),
-        "a chunk extension broke it: {out}"
-    );
-    assert!(
-        out.contains("GET /after HTTP/1.1\r\n"),
-        "the end of the body was missed: {out}"
-    );
+    assert!(out.contains("3;ext=1\r\nefg\r\n"), "a chunk extension broke it: {out}");
+    assert!(out.contains("GET /after HTTP/1.1\r\n"), "the end of the body was missed: {out}");
 }
 
 #[test]
@@ -241,10 +198,7 @@ fn both_framings_at_once_forwards_only_the_transfer_encoding() {
     );
     let out = text(&asked);
     assert!(out.contains("Transfer-Encoding: chunked\r\n"), "{out}");
-    assert!(
-        !out.to_ascii_lowercase().contains("content-length"),
-        "{out}"
-    );
+    assert!(!out.to_ascii_lowercase().contains("content-length"), "{out}");
 }
 
 #[test]
@@ -272,18 +226,11 @@ fn a_connect_becomes_a_tunnel_once_the_socket_is_open() {
     // 9112 3.2.3 and 9110 9.3.6. This is how https goes over the link: nothing
     // here reads a byte of it, which is the point.
     let mut session = Session::new();
-    let asked =
-        session.feed(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid\r\n\r\n");
-    assert!(
-        asked.is_empty(),
-        "a CONNECT head was forwarded to the origin"
-    );
+    let asked = session.feed(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid\r\n\r\n");
+    assert!(asked.is_empty(), "a CONNECT head was forwarded to the origin");
     assert_eq!(
         session.request(),
-        Some(&Target {
-            authority: "example.invalid:443".to_owned(),
-            tunnel: true
-        })
+        Some(&Target { authority: "example.invalid:443".to_owned(), tunnel: true })
     );
     let asked = session.answer(Answer::Opened);
     assert!(asked.is_empty());
@@ -304,11 +251,7 @@ fn a_tunnel_carries_what_would_otherwise_look_like_a_request() {
     session.feed(b"CONNECT example.invalid:443 HTTP/1.1\r\n\r\n");
     session.answer(Answer::Opened);
     let inside = b"GET http://elsewhere.invalid/ HTTP/1.1\r\n\r\n";
-    assert_eq!(
-        session.feed(inside),
-        inside,
-        "the tunnel read its own contents"
-    );
+    assert_eq!(session.feed(inside), inside, "the tunnel read its own contents");
     assert_eq!(session.request(), None);
 }
 
@@ -323,10 +266,7 @@ fn a_far_end_that_will_not_open_is_explained_to_the_browser() {
     let out = text(&session.take_out());
     assert!(out.starts_with("HTTP/1.1 502 Bad Gateway\r\n"), "{out}");
     assert!(out.contains("refused"), "{out}");
-    assert!(
-        out.contains("Content-Length: "),
-        "a reply with no length: {out}"
-    );
+    assert!(out.contains("Content-Length: "), "a reply with no length: {out}");
     assert_eq!(session.state(), State::Failed);
     assert!(session.trouble().is_some());
 }
@@ -358,11 +298,7 @@ fn a_head_split_across_arrivals_is_still_one_head() {
     // head split down the middle is the normal case rather than the odd one.
     let mut session = Session::new();
     assert!(session.feed(b"GET http://example.inv").is_empty());
-    assert!(
-        session
-            .feed(b"alid/page HTTP/1.1\r\nUser-Agent: x")
-            .is_empty()
-    );
+    assert!(session.feed(b"alid/page HTTP/1.1\r\nUser-Agent: x").is_empty());
     assert!(session.feed(b"\r\n\r").is_empty());
     assert!(session.feed(b"\n").is_empty());
     let asked = session.answer(Answer::Opened);
@@ -408,10 +344,7 @@ fn a_userinfo_in_the_target_does_not_reach_the_origin_server() {
 fn a_request_with_a_bare_linefeed_is_still_read() {
     // 9112 2.2 asks a recipient to accept a bare LF as a line terminator.
     let mut session = Session::new();
-    let asked = forward(
-        &mut session,
-        b"GET http://example.invalid/ HTTP/1.1\nHost: x\n\n",
-    );
+    let asked = forward(&mut session, b"GET http://example.invalid/ HTTP/1.1\nHost: x\n\n");
     let out = text(&asked);
     assert!(out.starts_with("GET / HTTP/1.1\r\n"), "{out}");
     // And what goes out is written properly whatever came in.

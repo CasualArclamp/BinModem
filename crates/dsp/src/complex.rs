@@ -25,17 +25,11 @@ impl Complex {
 
     /// `r` at an angle of `theta` radians.
     pub fn from_polar(r: f64, theta: f64) -> Self {
-        Self {
-            re: r * theta.cos(),
-            im: r * theta.sin(),
-        }
+        Self { re: r * theta.cos(), im: r * theta.sin() }
     }
 
     pub fn conj(self) -> Self {
-        Self {
-            re: self.re,
-            im: -self.im,
-        }
+        Self { re: self.re, im: -self.im }
     }
 
     pub fn norm_sqr(self) -> f64 {
@@ -52,10 +46,7 @@ impl Complex {
     }
 
     pub fn scale(self, k: f64) -> Self {
-        Self {
-            re: self.re * k,
-            im: self.im * k,
-        }
+        Self { re: self.re * k, im: self.im * k }
     }
 }
 
@@ -74,30 +65,21 @@ impl From<Complex> for (f64, f64) {
 impl Add for Complex {
     type Output = Self;
     fn add(self, o: Self) -> Self {
-        Self {
-            re: self.re + o.re,
-            im: self.im + o.im,
-        }
+        Self { re: self.re + o.re, im: self.im + o.im }
     }
 }
 
 impl Sub for Complex {
     type Output = Self;
     fn sub(self, o: Self) -> Self {
-        Self {
-            re: self.re - o.re,
-            im: self.im - o.im,
-        }
+        Self { re: self.re - o.re, im: self.im - o.im }
     }
 }
 
 impl Mul for Complex {
     type Output = Self;
     fn mul(self, o: Self) -> Self {
-        Self {
-            re: self.re * o.re - self.im * o.im,
-            im: self.re * o.im + self.im * o.re,
-        }
+        Self { re: self.re * o.re - self.im * o.im, im: self.re * o.im + self.im * o.re }
     }
 }
 
@@ -125,10 +107,7 @@ impl Div for Complex {
 impl Neg for Complex {
     type Output = Self;
     fn neg(self) -> Self {
-        Self {
-            re: -self.re,
-            im: -self.im,
-        }
+        Self { re: -self.re, im: -self.im }
     }
 }
 
@@ -256,11 +235,7 @@ mod tests {
     fn least_squares_finds_the_filter_that_made_the_targets() {
         // Targets made by a known three-tap filter from pseudo-random inputs,
         // which the solver should get back exactly.
-        let truth = [
-            Complex::new(0.2, -0.1),
-            Complex::new(1.0, 0.3),
-            Complex::new(-0.4, 0.05),
-        ];
+        let truth = [Complex::new(0.2, -0.1), Complex::new(1.0, 0.3), Complex::new(-0.4, 0.05)];
         let mut seed = 12345u32;
         let mut next = || {
             seed ^= seed << 13;
@@ -268,17 +243,9 @@ mod tests {
             seed ^= seed << 5;
             f64::from(seed) / f64::from(u32::MAX) - 0.5
         };
-        let rows: Vec<Vec<Complex>> = (0..50)
-            .map(|_| (0..3).map(|_| Complex::new(next(), next())).collect())
-            .collect();
-        let targets: Vec<Complex> = rows
-            .iter()
-            .map(|r| {
-                r.iter()
-                    .zip(&truth)
-                    .fold(Complex::ZERO, |s, (x, w)| s + *x * *w)
-            })
-            .collect();
+        let rows: Vec<Vec<Complex>> = (0..50).map(|_| (0..3).map(|_| Complex::new(next(), next())).collect()).collect();
+        let targets: Vec<Complex> =
+            rows.iter().map(|r| r.iter().zip(&truth).fold(Complex::ZERO, |s, (x, w)| s + *x * *w)).collect();
         let refs: Vec<&[Complex]> = rows.iter().map(Vec::as_slice).collect();
         let w = least_squares(&refs, &targets, 0.0).expect("solvable");
         for (got, want) in w.iter().zip(&truth) {
@@ -289,9 +256,7 @@ mod tests {
     #[test]
     fn a_system_with_no_unique_answer_is_refused_unless_ridged() {
         // Two identical columns: without a ridge, nothing picks between them.
-        let rows: Vec<Vec<Complex>> = (0..10)
-            .map(|i| vec![Complex::new(f64::from(i), 0.0); 2])
-            .collect();
+        let rows: Vec<Vec<Complex>> = (0..10).map(|i| vec![Complex::new(f64::from(i), 0.0); 2]).collect();
         let refs: Vec<&[Complex]> = rows.iter().map(Vec::as_slice).collect();
         let targets: Vec<Complex> = (0..10).map(|i| Complex::new(f64::from(i), 0.0)).collect();
         assert!(least_squares(&refs, &targets, 0.0).is_none());

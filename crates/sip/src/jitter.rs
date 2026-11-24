@@ -462,11 +462,7 @@ impl Jitter {
         let before = out.len();
         let mut concealed = 0;
         while self.waiting.len() > self.target {
-            let first = *self
-                .waiting
-                .keys()
-                .next()
-                .expect("more than target are waiting");
+            let first = *self.waiting.keys().next().expect("more than target are waiting");
             if first == self.next {
                 let payload = self.waiting.remove(&first).expect("just read the key");
                 out.extend_from_slice(&payload);
@@ -578,8 +574,7 @@ impl Jitter {
     /// Octets in hand ahead of the play-out point: the delay this is adding,
     /// to the octet, for a clock that wants to keep it steady.
     pub fn queued(&self) -> usize {
-        self.waiting.values().map(Vec::len).sum::<usize>()
-            + self.current.len().saturating_sub(self.offset)
+        self.waiting.values().map(Vec::len).sum::<usize>() + self.current.len().saturating_sub(self.offset)
     }
 
     /// The octets in one packet of this stream, as learned from it; nought
@@ -686,11 +681,7 @@ mod tests {
         // Everything but the cushion, which is still in hand: two packets of
         // delay is what a target of two means, and the eight octets this run
         // is short are those two packets.
-        assert_eq!(
-            got,
-            sent[..sent.len() - 8],
-            "the stream was not handed over unaltered"
-        );
+        assert_eq!(got, sent[..sent.len() - 8], "the stream was not handed over unaltered");
         assert_eq!(jitter.depth(), 2, "the cushion is not there");
         assert_eq!(jitter.counters().received, 20);
         assert_eq!(jitter.counters().lost, 0);
@@ -715,11 +706,7 @@ mod tests {
         assert_eq!(jitter.drain(&mut out, SILENCE), 4);
         assert_eq!(out, packet(1));
         assert_eq!(jitter.depth(), 3);
-        assert_eq!(
-            jitter.counters().concealed,
-            0,
-            "priming was mistaken for loss"
-        );
+        assert_eq!(jitter.counters().concealed, 0, "priming was mistaken for loss");
     }
 
     /// Two packets that overtake each other in the network, which on a home
@@ -743,11 +730,7 @@ mod tests {
         assert_eq!(out, [packet(1), packet(2), packet(3), packet(4)].concat());
         assert_eq!(jitter.counters().reordered, 1);
         assert_eq!(jitter.counters().lost, 0);
-        assert_eq!(
-            jitter.counters().late,
-            0,
-            "the packet that came second was thrown away"
-        );
+        assert_eq!(jitter.counters().late, 0, "the packet that came second was thrown away");
         assert_eq!(
             jitter.counters().concealed,
             0,
@@ -806,11 +789,7 @@ mod tests {
         // Three arrives before two does, and two is still not written off.
         jitter.push(3, PCMU, packet(3));
         drained_hard(&mut jitter, &mut out);
-        assert_eq!(
-            jitter.counters().concealed,
-            0,
-            "two was given up on while in flight"
-        );
+        assert_eq!(jitter.counters().concealed, 0, "two was given up on while in flight");
         jitter.push(2, PCMU, packet(2));
         jitter.push(4, PCMU, packet(4));
         drained_hard(&mut jitter, &mut out);
@@ -852,10 +831,7 @@ mod tests {
 
         jitter.push(2, PCMU, packet(2));
         drained_hard(&mut jitter, &mut out);
-        assert_eq!(
-            out, so_far,
-            "a late packet was spliced in behind the stream"
-        );
+        assert_eq!(out, so_far, "a late packet was spliced in behind the stream");
         assert_eq!(jitter.counters().late, 1);
 
         // A second copy of one already gone by is the same event.
@@ -899,13 +875,7 @@ mod tests {
         drained_hard(&mut jitter, &mut out);
         assert_eq!(
             out,
-            [
-                packet(65534u16 as u8),
-                packet(65535u16 as u8),
-                packet(0),
-                packet(1)
-            ]
-            .concat()
+            [packet(65534u16 as u8), packet(65535u16 as u8), packet(0), packet(1)].concat()
         );
         assert_eq!(jitter.counters().reordered, 1);
         assert_eq!(jitter.counters().concealed, 0);
@@ -1041,11 +1011,7 @@ mod tests {
 
         // The first drain: the two packets that were in hand, then one burst
         // of silence and no more.
-        assert_eq!(
-            turns[0],
-            2 * 4 + CONCEAL_BURST * 4,
-            "the first drain was not bounded"
-        );
+        assert_eq!(turns[0], 2 * 4 + CONCEAL_BURST * 4, "the first drain was not bounded");
         let one_turn: usize = turns[..10].iter().sum();
         assert_eq!(
             one_turn,
@@ -1070,11 +1036,7 @@ mod tests {
         assert_eq!(jitter.counters().concealed, u64::from(GAP) * 4);
         assert_eq!(out.len(), 2 * 4 + usize::from(GAP) * 4 + 2 * 4);
         assert_eq!(&out[..4], &packet(1)[..]);
-        assert_eq!(
-            &out[8..12],
-            &[SILENCE; 4],
-            "the silence did not start where the gap did"
-        );
+        assert_eq!(&out[8..12], &[SILENCE; 4], "the silence did not start where the gap did");
         assert_eq!(
             &out[out.len() - 8..],
             [packet((3 + GAP) as u8), packet((4 + GAP) as u8)].concat(),
@@ -1102,11 +1064,7 @@ mod tests {
             drained_hard(&mut jitter, &mut out);
         }
         assert_eq!(jitter.counters().resynced, 1);
-        assert_eq!(
-            jitter.counters().concealed,
-            0,
-            "a new stream was read as a hole"
-        );
+        assert_eq!(jitter.counters().concealed, 0, "a new stream was read as a hole");
         // What it had in hand at the jump went out, then the new stream from
         // its own beginning.
         assert_eq!(out.len(), before + 4 * 4);
@@ -1124,11 +1082,7 @@ mod tests {
         jitter.push(3, PCMA, packet(3));
         drained_hard(&mut jitter, &mut out);
         assert_eq!(out, [packet(1), packet(2)].concat());
-        assert_eq!(
-            jitter.counters().payload_changed,
-            1,
-            "the switch was not noticed"
-        );
+        assert_eq!(jitter.counters().payload_changed, 1, "the switch was not noticed");
     }
 
     /// One odd-sized packet does not decide how long a concealment is.
@@ -1179,11 +1133,7 @@ mod tests {
             drained_hard(&mut jitter, &mut out);
         }
         assert_eq!(jitter.counters().lost, 1);
-        assert_eq!(
-            jitter.counters().concealed,
-            320,
-            "the new packet time was not taken up"
-        );
+        assert_eq!(jitter.counters().concealed, 320, "the new packet time was not taken up");
     }
 
     /// A second call on the same buffer starts from nothing, including its
@@ -1222,11 +1172,7 @@ mod tests {
         drained_hard(&mut jitter, &mut out);
         assert_eq!(out, packet(3));
         assert_eq!(jitter.counters().late, 0);
-        assert_eq!(
-            jitter.counters().lost,
-            before.lost,
-            "the second call lost nothing"
-        );
+        assert_eq!(jitter.counters().lost, before.lost, "the second call lost nothing");
     }
 
     /// The whole reason for the counters: a stretch of packets that simply

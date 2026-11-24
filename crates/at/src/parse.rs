@@ -7,11 +7,7 @@ use std::fmt;
 pub enum Command {
     /// Basic syntax: a single letter, optionally prefixed with `&`, with an
     /// optional decimal number (V.250 5.3.1).
-    Basic {
-        amp: bool,
-        letter: char,
-        number: Option<u32>,
-    },
+    Basic { amp: bool, letter: char, number: Option<u32> },
     /// `D<dial string>`; the rest of the line belongs to it (V.250 6.3.1).
     Dial(String),
     /// `S<n>?` — read an S-parameter (V.250 5.3.2).
@@ -82,11 +78,7 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(src: &'a str) -> Self {
-        Self {
-            chars: src.chars().collect(),
-            pos: 0,
-            _src: src,
-        }
+        Self { chars: src.chars().collect(), pos: 0, _src: src }
     }
 
     fn peek(&self) -> Option<char> {
@@ -128,13 +120,7 @@ impl<'a> Cursor<'a> {
         digits
             .trim_start_matches('0')
             .parse::<u32>()
-            .or_else(|_| {
-                if digits.chars().all(|c| c == '0') {
-                    Ok(0)
-                } else {
-                    Err(ParseError::NumberTooLarge)
-                }
-            })
+            .or_else(|_| if digits.chars().all(|c| c == '0') { Ok(0) } else { Err(ParseError::NumberTooLarge) })
             .map(Some)
     }
 
@@ -205,11 +191,7 @@ pub fn parse_body(body: &str) -> Result<Vec<Command>, ParseError> {
             'S' => out.push(parse_s_parameter(&mut cur)?),
             _ => {
                 let number = cur.number()?;
-                out.push(Command::Basic {
-                    amp: false,
-                    letter,
-                    number,
-                });
+                out.push(Command::Basic { amp: false, letter, number });
             }
         }
     }
@@ -286,11 +268,7 @@ mod tests {
     use super::*;
 
     fn basic(letter: char, number: Option<u32>) -> Command {
-        Command::Basic {
-            amp: false,
-            letter,
-            number,
-        }
+        Command::Basic { amp: false, letter, number }
     }
 
     #[test]
@@ -298,11 +276,7 @@ mod tests {
         // V.250 5.3.1: additional commands may follow with no separator.
         assert_eq!(
             parse_body("E0Q0V1").unwrap(),
-            vec![
-                basic('E', Some(0)),
-                basic('Q', Some(0)),
-                basic('V', Some(1))
-            ]
+            vec![basic('E', Some(0)), basic('Q', Some(0)), basic('V', Some(1))]
         );
     }
 
@@ -326,10 +300,8 @@ mod tests {
     #[test]
     fn spaces_are_ignored_for_formatting() {
         // V.250 5.2.1.
-        assert_eq!(
-            parse_body(" E 0  Q 1 ").unwrap(),
-            vec![basic('E', Some(0)), basic('Q', Some(1))]
-        );
+        assert_eq!(parse_body(" E 0  Q 1 ").unwrap(),
+                   vec![basic('E', Some(0)), basic('Q', Some(1))]);
     }
 
     #[test]
@@ -337,16 +309,8 @@ mod tests {
         assert_eq!(
             parse_body("&C1&D2").unwrap(),
             vec![
-                Command::Basic {
-                    amp: true,
-                    letter: 'C',
-                    number: Some(1)
-                },
-                Command::Basic {
-                    amp: true,
-                    letter: 'D',
-                    number: Some(2)
-                },
+                Command::Basic { amp: true, letter: 'C', number: Some(1) },
+                Command::Basic { amp: true, letter: 'D', number: Some(2) },
             ]
         );
     }
@@ -354,10 +318,7 @@ mod tests {
     #[test]
     fn parses_s_parameter_read_and_write() {
         assert_eq!(parse_body("S7?").unwrap(), vec![Command::ReadS(7)]);
-        assert_eq!(
-            parse_body("S7=60").unwrap(),
-            vec![Command::SetS(7, Some(60))]
-        );
+        assert_eq!(parse_body("S7=60").unwrap(), vec![Command::SetS(7, Some(60))]);
         assert_eq!(parse_body("S7=").unwrap(), vec![Command::SetS(7, None)]);
     }
 
@@ -381,19 +342,12 @@ mod tests {
             ("+GMI", "GMI", ExtOp::Execute),
             ("+GMI?", "GMI", ExtOp::Read),
             ("+GMI=?", "GMI", ExtOp::Test),
-            (
-                "+MS=V34,1,2400,33600",
-                "MS",
-                ExtOp::Set("V34,1,2400,33600".into()),
-            ),
+            ("+MS=V34,1,2400,33600", "MS", ExtOp::Set("V34,1,2400,33600".into())),
         ];
         for (src, want_name, want_op) in cases {
             assert_eq!(
                 parse_body(src).unwrap(),
-                vec![Command::Extended {
-                    name: want_name.into(),
-                    op: want_op
-                }],
+                vec![Command::Extended { name: want_name.into(), op: want_op }],
                 "{src}"
             );
         }
@@ -406,10 +360,7 @@ mod tests {
         // followed by "E0". The interpreter rejects it as unrecognised.
         assert_eq!(
             parse_body("+GMIE0").unwrap(),
-            vec![Command::Extended {
-                name: "GMIE0".into(),
-                op: ExtOp::Execute
-            }]
+            vec![Command::Extended { name: "GMIE0".into(), op: ExtOp::Execute }]
         );
     }
 
@@ -423,18 +374,12 @@ mod tests {
         // anything following and this error cannot arise there.
         assert_eq!(
             parse_body("+MS=V34E0").unwrap(),
-            vec![Command::Extended {
-                name: "MS".into(),
-                op: ExtOp::Set("V34E0".into())
-            }]
+            vec![Command::Extended { name: "MS".into(), op: ExtOp::Set("V34E0".into()) }]
         );
         assert_eq!(
             parse_body("+GMI;E0").unwrap(),
             vec![
-                Command::Extended {
-                    name: "GMI".into(),
-                    op: ExtOp::Execute
-                },
+                Command::Extended { name: "GMI".into(), op: ExtOp::Execute },
                 basic('E', Some(0)),
             ]
         );
@@ -447,10 +392,7 @@ mod tests {
             parse_body("E0+GMI").unwrap(),
             vec![
                 basic('E', Some(0)),
-                Command::Extended {
-                    name: "GMI".into(),
-                    op: ExtOp::Execute
-                },
+                Command::Extended { name: "GMI".into(), op: ExtOp::Execute },
             ]
         );
     }
@@ -480,10 +422,7 @@ mod tests {
     #[test]
     fn extended_name_length_is_bounded() {
         // V.250 5.4.1: one to sixteen characters after the '+'.
-        assert!(
-            parse_body("+ABCDEFGHIJKLMNOP").is_ok(),
-            "16 characters is legal"
-        );
+        assert!(parse_body("+ABCDEFGHIJKLMNOP").is_ok(), "16 characters is legal");
         assert_eq!(
             parse_body("+ABCDEFGHIJKLMNOPQ"),
             Err(ParseError::BadExtendedName),

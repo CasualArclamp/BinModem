@@ -59,16 +59,11 @@ impl Random {
 
 fn payload(seed: u64, bytes: usize) -> Vec<u8> {
     let mut random = Random::new(seed ^ 0x5eed);
-    (0..bytes)
-        .map(|_| (random.next_u64() >> 56) as u8)
-        .collect()
+    (0..bytes).map(|_| (random.next_u64() >> 56) as u8).collect()
 }
 
 fn bits_of(bytes: &[u8]) -> Vec<bool> {
-    bytes
-        .iter()
-        .flat_map(|&b| (0..8).rev().map(move |i| b >> i & 1 != 0))
-        .collect()
+    bytes.iter().flat_map(|&b| (0..8).rev().map(move |i| b >> i & 1 != 0)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -120,22 +115,11 @@ fn shifted(samples: &[f64], hz: f64) -> Vec<f64> {
             }
         })
         .collect();
-    let at = |n: isize| {
-        if n >= 0 && (n as usize) < samples.len() {
-            samples[n as usize]
-        } else {
-            0.0
-        }
-    };
+    let at = |n: isize| if n >= 0 && (n as usize) < samples.len() { samples[n as usize] } else { 0.0 };
     (0..samples.len() + m)
         .map(|n| {
             let n = n as isize;
-            let q: f64 = taps
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| **t != 0.0)
-                .map(|(d, t)| t * at(n - d as isize))
-                .sum();
+            let q: f64 = taps.iter().enumerate().filter(|(_, t)| **t != 0.0).map(|(d, t)| t * at(n - d as isize)).sum();
             let i = at(n - m as isize);
             let turn = TAU * hz * n as f64 / FS;
             i * turn.cos() - q * turn.sin()
@@ -163,11 +147,7 @@ fn echoed(samples: &[f64], gain: f64, ms: f64) -> Vec<f64> {
     (0..samples.len() + delay)
         .map(|n| {
             let direct = samples.get(n).copied().unwrap_or(0.0);
-            let late = n
-                .checked_sub(delay)
-                .and_then(|k| samples.get(k))
-                .copied()
-                .unwrap_or(0.0);
+            let late = n.checked_sub(delay).and_then(|k| samples.get(k)).copied().unwrap_or(0.0);
             direct + gain * late
         })
         .collect()
@@ -186,11 +166,7 @@ fn slipped(samples: &[f64], at: usize, inserted: bool) -> Vec<f64> {
         before.extend_from_slice(&samples[at.saturating_sub(n)..at]);
         out.extend(before.iter().enumerate().map(|(i, x)| {
             let edge = i.min(n - 1 - i);
-            if edge < fade {
-                x * edge as f64 / fade as f64
-            } else {
-                *x
-            }
+            if edge < fade { x * edge as f64 / fade as f64 } else { *x }
         }));
         out.extend_from_slice(&samples[at..]);
     } else {
@@ -209,25 +185,15 @@ struct Noise {
 impl Noise {
     fn new(seed: u64, rate: Rate, snr_db: f64, power: f64) -> Self {
         let variance = (FS / 2.0) / rate.baud() * power * 10f64.powf(-snr_db / 10.0);
-        Self {
-            random: Random::new(seed),
-            sigma: variance.sqrt(),
-        }
+        Self { random: Random::new(seed), sigma: variance.sqrt() }
     }
 
     fn none() -> Self {
-        Self {
-            random: Random::new(1),
-            sigma: 0.0,
-        }
+        Self { random: Random::new(1), sigma: 0.0 }
     }
 
     fn sample(&mut self) -> f64 {
-        if self.sigma == 0.0 {
-            0.0
-        } else {
-            self.sigma * self.random.gaussian()
-        }
+        if self.sigma == 0.0 { 0.0 } else { self.sigma * self.random.gaussian() }
     }
 }
 
@@ -287,12 +253,7 @@ fn quiet(seconds: f64) -> Vec<f64> {
 /// as the whole lost (fax-qam.md 7).
 fn eighths(sent: &[bool], got: &[bool]) -> usize {
     let part = sent.len() / 8;
-    (0..8)
-        .filter(|&k| {
-            got.windows(part)
-                .any(|w| w == &sent[k * part..(k + 1) * part])
-        })
-        .count()
+    (0..8).filter(|&k| got.windows(part).any(|w| w == &sent[k * part..(k + 1) * part])).count()
 }
 
 /// Bit errors in `sent` as it came out of `got`, lined up by the first
@@ -303,15 +264,9 @@ fn errors(sent: &[bool], got: &[bool]) -> Option<usize> {
     let part = sent.len() / 8;
     let start = (0..8).find_map(|k| {
         let piece = &sent[k * part..k * part + 64.min(part)];
-        got.windows(piece.len())
-            .position(|w| w == piece)
-            .and_then(|at| at.checked_sub(k * part))
+        got.windows(piece.len()).position(|w| w == piece).and_then(|at| at.checked_sub(k * part))
     })?;
-    let wrong = sent
-        .iter()
-        .enumerate()
-        .filter(|&(i, &b)| got.get(start + i) != Some(&b))
-        .count();
+    let wrong = sent.iter().enumerate().filter(|&(i, &b)| got.get(start + i) != Some(&b)).count();
     Some(wrong)
 }
 
@@ -431,12 +386,7 @@ impl Run {
         let mut rx = receiver(self.rate);
         if self.after_long {
             let before = bits_of(&payload(self.seed + 1000, 300));
-            let far = self.channel(burst(
-                self.rate,
-                Training::Long,
-                self.echo_protection,
-                &before,
-            ));
+            let far = self.channel(burst(self.rate, Training::Long, self.echo_protection, &before));
             listen(&mut rx, &quiet(self.lead), &mut noise);
             listen(&mut rx, &far, &mut noise);
             rx.restart();
@@ -491,11 +441,7 @@ fn both_rates_at_eight_arrival_phases_long_and_short() {
                     got.push(e);
                     worst = worst.min(e);
                 }
-                eprintln!(
-                    "arrival {:>4} {training:?} {}: {whole}/8 whole, eighths {got:?}",
-                    name(rate),
-                    line_name(snr_db)
-                );
+                eprintln!("arrival {:>4} {training:?} {}: {whole}/8 whole, eighths {got:?}", name(rate), line_name(snr_db));
             }
         }
     }
@@ -537,11 +483,7 @@ fn noise_at_each_rates_working_signal_to_noise() {
     // heard by a receiver that has never heard a long one: 68 symbols are
     // too few to solve 31 taps from, and that is only said.
     for rate in [Rate::R4800, Rate::R2400] {
-        for (training, after_long) in [
-            (Training::Long, false),
-            (Training::Short, true),
-            (Training::Short, false),
-        ] {
+        for (training, after_long) in [(Training::Long, false), (Training::Short, true), (Training::Short, false)] {
             let (mut wrong, mut sent, mut whole) = (0, 0, 0);
             for seed in 0..4 {
                 let mut run = Run::new(rate, training);
@@ -566,11 +508,7 @@ fn noise_at_each_rates_working_signal_to_noise() {
                 working_snr(rate)
             );
             if training == Training::Long || after_long {
-                check!(
-                    ber < 2e-3,
-                    "{} {what}: {ber:.1e} of the bits wrong",
-                    name(rate)
-                );
+                check!(ber < 2e-3, "{} {what}: {ber:.1e} of the bits wrong", name(rate));
             }
         }
     }
@@ -591,12 +529,7 @@ fn a_twenty_millisecond_slip_in_the_data_and_in_the_reversals() {
                     run.seed = 40 + seed;
                     let (e, _, _, _) = run.go();
                     row.push(("data", inserted, e));
-                    check!(
-                        e >= 6,
-                        "{} a slip in the data cost {} eighths",
-                        name(rate),
-                        8 - e
-                    );
+                    check!(e >= 6, "{} a slip in the data cost {} eighths", name(rate), 8 - e);
                 }
             }
             // Inside segment 3's reversals: forty symbols into the long
@@ -604,11 +537,7 @@ fn a_twenty_millisecond_slip_in_the_data_and_in_the_reversals() {
             // the long one's join into segment 4, which spoils its start. The
             // transmitter's pulse puts a symbol's centre six symbols after it
             // begins.
-            let places = [
-                ("long reversals", Training::Long, 40.0),
-                ("short reversals", Training::Short, 10.0),
-                ("long join", Training::Long, 58.0),
-            ];
+            let places = [("long reversals", Training::Long, 40.0), ("short reversals", Training::Short, 10.0), ("long join", Training::Long, 58.0)];
             for (place, training, into) in places {
                 for inserted in [true, false] {
                     let mut run = Run::new(rate, training);
@@ -623,20 +552,11 @@ fn a_twenty_millisecond_slip_in_the_data_and_in_the_reversals() {
                         // A drop there takes most of the short turn-on with
                         // it, and a receiver that has heard no long one has
                         // nothing to find the rest with.
-                        check!(
-                            e == 8,
-                            "{} {place}: a slip cost {} eighths",
-                            name(rate),
-                            8 - e
-                        );
+                        check!(e == 8, "{} {place}: a slip cost {} eighths", name(rate), 8 - e);
                     }
                 }
             }
-            eprintln!(
-                "slip {:>4} {}: (where, inserted, eighths) {row:?}",
-                name(rate),
-                line_name(snr_db)
-            );
+            eprintln!("slip {:>4} {}: (where, inserted, eighths) {row:?}", name(rate), line_name(snr_db));
         }
     }
 }
@@ -662,16 +582,8 @@ fn a_burst_after_a_long_quiet_stretch_of_line_noise() {
                 name(rate),
                 100.0 * on / 6.0
             );
-            check!(
-                whole == 6,
-                "{} at {snr} dB: a page lost after a quiet line",
-                name(rate)
-            );
-            check!(
-                on == 0.0,
-                "{} at {snr} dB: carrier on line noise",
-                name(rate)
-            );
+            check!(whole == 6, "{} at {snr} dB: a page lost after a quiet line", name(rate));
+            check!(on == 0.0, "{} at {snr} dB: carrier on line noise", name(rate));
         }
     }
 }
@@ -696,21 +608,9 @@ fn talker_echo_protection_before_the_burst() {
                     let phantom = heard.flags[..(0.185 * FS) as usize].iter().any(|&on| on);
                     let edges = lead.edges + heard.edges;
                     row.push((e, edges, phantom));
-                    check!(
-                        e == 8,
-                        "{} {training:?}: page lost behind echo protection",
-                        name(rate)
-                    );
-                    check!(
-                        !phantom,
-                        "{} {training:?}: carrier on during the unmodulated carrier",
-                        name(rate)
-                    );
-                    check!(
-                        edges == 1,
-                        "{} {training:?}: the carrier came on {edges} times",
-                        name(rate)
-                    );
+                    check!(e == 8, "{} {training:?}: page lost behind echo protection", name(rate));
+                    check!(!phantom, "{} {training:?}: carrier on during the unmodulated carrier", name(rate));
+                    check!(edges == 1, "{} {training:?}: the carrier came on {edges} times", name(rate));
                 }
                 eprintln!(
                     "echo protection {:>4} {training:?} {}: (eighths, carrier edges, on in segment 1) {row:?}",
@@ -771,11 +671,7 @@ fn several_bursts_in_a_row_as_a_fax_call_makes_them() {
                 name(rate)
             );
             if reflection.is_none() || rate == Rate::R2400 {
-                check!(
-                    row.iter().all(|&e| e == 8),
-                    "{} {reflection:?}: {row:?}",
-                    name(rate)
-                );
+                check!(row.iter().all(|&e| e == 8), "{} {reflection:?}: {row:?}", name(rate));
             }
         }
     }
@@ -791,12 +687,7 @@ fn listening_that_begins_after_the_reversals() {
     for snr_db in LINES {
         for rate in [Rate::R4800, Rate::R2400] {
             let mut row = Vec::new();
-            let cases = [
-                (Training::Long, false, 10),
-                (Training::Long, false, 70),
-                (Training::Long, true, 300),
-                (Training::Short, true, 4),
-            ];
+            let cases = [(Training::Long, false, 10), (Training::Long, false, 70), (Training::Long, true, 300), (Training::Short, true, 4)];
             for (training, after_long, into) in cases {
                 let mut run = Run::new(rate, training);
                 run.snr_db = snr_db;
@@ -807,29 +698,15 @@ fn listening_that_begins_after_the_reversals() {
                 let symbols = 6 + training.reversals() as usize + into;
                 run.skip = (symbols as f64 * FS / rate.baud()) as usize;
                 let (e, _, _, _) = run.go();
-                row.push((
-                    format!(
-                        "{training:?}{} +{into}",
-                        if after_long { " after long" } else { "" }
-                    ),
-                    e,
-                ));
+                row.push((format!("{training:?}{} +{into}", if after_long { " after long" } else { "" }), e));
                 // A short one found so late has its first few data symbols
                 // go by before the taps can look for it: the core's search
                 // reads 48 symbols, and they must all be from after the
                 // receiver began to listen.
                 let whole = if training == Training::Short { 7 } else { 8 };
-                check!(
-                    e >= whole,
-                    "{} {training:?} after_long {after_long}, {into} into segment 4: {e} eighths",
-                    name(rate)
-                );
+                check!(e >= whole, "{} {training:?} after_long {after_long}, {into} into segment 4: {e} eighths", name(rate));
             }
-            eprintln!(
-                "late {:>4} {}: (joined at, eighths) {row:?}",
-                name(rate),
-                line_name(snr_db)
-            );
+            eprintln!("late {:>4} {}: (joined at, eighths) {row:?}", name(rate), line_name(snr_db));
         }
     }
 }
@@ -855,12 +732,7 @@ fn a_short_turn_on_after_a_long_one_keeps_its_taps() {
                 rx.trained_snr_db()
             );
             check!(e == 8, "{} {reflection:?}: {e} eighths", name(rate));
-            check!(
-                rx.trained_via() == Some(Via::Fallback),
-                "{} {reflection:?}: via {:?}",
-                name(rate),
-                rx.trained_via()
-            );
+            check!(rx.trained_via() == Some(Via::Fallback), "{} {reflection:?}: via {:?}", name(rate), rx.trained_via());
         }
     }
 }
