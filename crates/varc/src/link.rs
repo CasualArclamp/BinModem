@@ -35,7 +35,11 @@ impl Table {
         let mut at = 0;
         while at < self.bits.len() {
             let value = self.bits[at];
-            let run = self.bits[at..].iter().take(255).take_while(|&&b| b == value).count();
+            let run = self.bits[at..]
+                .iter()
+                .take(255)
+                .take_while(|&&b| b == value)
+                .count();
             out.push(run as u8);
             out.push(value);
             at += run;
@@ -67,7 +71,11 @@ pub enum Arrived {
     /// The octets as sliced, errors and all, and how they are laid out;
     /// and, from a receiver that can tell, which of them never arrived at
     /// all and are only there to keep the rest in their places.
-    Octets { line: Vec<u8>, layout: Layout, erased: Option<Vec<bool>> },
+    Octets {
+        line: Vec<u8>,
+        layout: Layout,
+        erased: Option<Vec<bool>>,
+    },
     /// A block went by that could not be read: sent with a table this end
     /// does not have, or missed.
     Lost,
@@ -175,7 +183,9 @@ pub fn checks_for(rate: f64, capacity: usize) -> u8 {
     }
     let words = capacity.div_ceil(255).max(1);
     let n = capacity / words;
-    (((1.0 - rate) * n as f64).round() as usize).clamp(16, n.saturating_sub(8).max(16)).min(246) as u8
+    (((1.0 - rate) * n as f64).round() as usize)
+        .clamp(16, n.saturating_sub(8).max(16))
+        .min(246) as u8
 }
 
 /// What one end hears, as it tells the other.
@@ -219,7 +229,9 @@ impl Report {
     }
 
     pub fn decode(body: &[u8]) -> Option<Self> {
-        let &[1, level, peak, c0, c1, s0, s1, trim, ..] = body else { return None };
+        let &[1, level, peak, c0, c1, s0, s1, trim, ..] = body else {
+            return None;
+        };
         Some(Self {
             level_db: -f64::from(level) / 2.0,
             peak_db: -f64::from(peak) / 2.0,
@@ -424,7 +436,10 @@ mod tests {
         assert!(body.len() < 80, "{} octets", body.len());
         assert_eq!(Table::decode(&body), Some(table));
         assert_eq!(Table::decode(&body[..body.len() - 1]), None);
-        let long = Table { parity: 8, bits: vec![9; 2047] };
+        let long = Table {
+            parity: 8,
+            bits: vec![9; 2047],
+        };
         assert_eq!(Table::decode(&long.encode()), Some(long));
     }
 }

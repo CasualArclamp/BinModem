@@ -139,7 +139,10 @@ impl ConfigOption {
             if length < 2 || length > bytes.len() {
                 return None;
             }
-            out.push(Self { kind: bytes[0], value: bytes[2..length].to_vec() });
+            out.push(Self {
+                kind: bytes[0],
+                value: bytes[2..length].to_vec(),
+            });
             bytes = &bytes[length..];
         }
         Some(out)
@@ -315,31 +318,136 @@ const TABLE: [[&str; 10]; 16] = [
     // Down
     ["-", "-", "0", "tls/1", "0", "1", "1", "1", "1", "tld/1"],
     // Open
-    ["tls/1", "1", "irc,scr/6", "3r", "5r", "5r", "6", "7", "8", "9r"],
+    [
+        "tls/1",
+        "1",
+        "irc,scr/6",
+        "3r",
+        "5r",
+        "5r",
+        "6",
+        "7",
+        "8",
+        "9r",
+    ],
     // Close
-    ["0", "tlf/0", "2", "2", "4", "4", "irc,str/4", "irc,str/4", "irc,str/4", "tld,irc,str/4"],
+    [
+        "0",
+        "tlf/0",
+        "2",
+        "2",
+        "4",
+        "4",
+        "irc,str/4",
+        "irc,str/4",
+        "irc,str/4",
+        "tld,irc,str/4",
+    ],
     // TO+
-    ["-", "-", "-", "-", "str/4", "str/5", "scr/6", "scr/6", "scr/8", "-"],
+    [
+        "-", "-", "-", "-", "str/4", "str/5", "scr/6", "scr/6", "scr/8", "-",
+    ],
     // TO-
-    ["-", "-", "-", "-", "tlf/2", "tlf/3", "tlf/3p", "tlf/3p", "tlf/3p", "-"],
+    [
+        "-", "-", "-", "-", "tlf/2", "tlf/3", "tlf/3p", "tlf/3p", "tlf/3p", "-",
+    ],
     // RCR+
-    ["-", "-", "sta/2", "irc,scr,sca/8", "4", "5", "sca/8", "sca,tlu/9", "sca/8", "tld,scr,sca/8"],
+    [
+        "-",
+        "-",
+        "sta/2",
+        "irc,scr,sca/8",
+        "4",
+        "5",
+        "sca/8",
+        "sca,tlu/9",
+        "sca/8",
+        "tld,scr,sca/8",
+    ],
     // RCR-
-    ["-", "-", "sta/2", "irc,scr,scn/6", "4", "5", "scn/6", "scn/7", "scn/6", "tld,scr,scn/6"],
+    [
+        "-",
+        "-",
+        "sta/2",
+        "irc,scr,scn/6",
+        "4",
+        "5",
+        "scn/6",
+        "scn/7",
+        "scn/6",
+        "tld,scr,scn/6",
+    ],
     // RCA
-    ["-", "-", "sta/2", "sta/3", "4", "5", "irc/7", "scr/6x", "irc,tlu/9", "tld,scr/6x"],
+    [
+        "-",
+        "-",
+        "sta/2",
+        "sta/3",
+        "4",
+        "5",
+        "irc/7",
+        "scr/6x",
+        "irc,tlu/9",
+        "tld,scr/6x",
+    ],
     // RCN
-    ["-", "-", "sta/2", "sta/3", "4", "5", "irc,scr/6", "scr/6x", "irc,scr/8", "tld,scr/6x"],
+    [
+        "-",
+        "-",
+        "sta/2",
+        "sta/3",
+        "4",
+        "5",
+        "irc,scr/6",
+        "scr/6x",
+        "irc,scr/8",
+        "tld,scr/6x",
+    ],
     // RTR
-    ["-", "-", "sta/2", "sta/3", "sta/4", "sta/5", "sta/6", "sta/6", "sta/6", "tld,zrc,sta/5"],
+    [
+        "-",
+        "-",
+        "sta/2",
+        "sta/3",
+        "sta/4",
+        "sta/5",
+        "sta/6",
+        "sta/6",
+        "sta/6",
+        "tld,zrc,sta/5",
+    ],
     // RTA
-    ["-", "-", "2", "3", "tlf/2", "tlf/3", "6", "6", "8", "tld,scr/6"],
+    [
+        "-",
+        "-",
+        "2",
+        "3",
+        "tlf/2",
+        "tlf/3",
+        "6",
+        "6",
+        "8",
+        "tld,scr/6",
+    ],
     // RUC
-    ["-", "-", "scj/2", "scj/3", "scj/4", "scj/5", "scj/6", "scj/7", "scj/8", "scj/9"],
+    [
+        "-", "-", "scj/2", "scj/3", "scj/4", "scj/5", "scj/6", "scj/7", "scj/8", "scj/9",
+    ],
     // RXJ+
     ["-", "-", "2", "3", "4", "5", "6", "6", "8", "9"],
     // RXJ-
-    ["-", "-", "tlf/2", "tlf/3", "tlf/2", "tlf/3", "tlf/3", "tlf/3", "tlf/3", "tld,irc,str/5"],
+    [
+        "-",
+        "-",
+        "tlf/2",
+        "tlf/3",
+        "tlf/2",
+        "tlf/3",
+        "tlf/3",
+        "tlf/3",
+        "tlf/3",
+        "tld,irc,str/5",
+    ],
     // RXR
     ["-", "-", "2", "3", "4", "5", "6", "7", "8", "ser/9"],
 ];
@@ -400,7 +508,12 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_configure: 10, max_terminate: 2, max_failure: 5, restart_ms: 3000 }
+        Self {
+            max_configure: 10,
+            max_terminate: 2,
+            max_failure: 5,
+            restart_ms: 3000,
+        }
     }
 }
 
@@ -481,10 +594,7 @@ mod tests {
     #[test]
     fn nothing_arrives_before_the_lower_layer_is_up() {
         for event in EVENTS {
-            let arriving = !matches!(
-                event,
-                Event::Up | Event::Down | Event::Open | Event::Close
-            );
+            let arriving = !matches!(event, Event::Up | Event::Down | Event::Open | Event::Close);
             if arriving {
                 assert!(
                     transition(State::Initial, event).is_none(),
@@ -541,7 +651,10 @@ mod tests {
         state = transition(state, Event::ReceiveConfigureAck).unwrap().next;
         assert_eq!(state, State::AckRcvd);
         let t = transition(state, Event::ReceiveConfigureRequestGood).unwrap();
-        assert_eq!(t.actions, vec![Action::SendConfigureAck, Action::ThisLayerUp]);
+        assert_eq!(
+            t.actions,
+            vec![Action::SendConfigureAck, Action::ThisLayerUp]
+        );
         assert_eq!(t.next, State::Opened);
     }
 
@@ -585,13 +698,25 @@ mod tests {
     #[test]
     fn options_read_back_as_they_were_written() {
         let options = vec![
-            ConfigOption { kind: 1, value: vec![0x05, 0xdc] },
-            ConfigOption { kind: 5, value: vec![0xde, 0xad, 0xbe, 0xef] },
-            ConfigOption { kind: 7, value: vec![] },
+            ConfigOption {
+                kind: 1,
+                value: vec![0x05, 0xdc],
+            },
+            ConfigOption {
+                kind: 5,
+                value: vec![0xde, 0xad, 0xbe, 0xef],
+            },
+            ConfigOption {
+                kind: 7,
+                value: vec![],
+            },
         ];
         let mut bytes = Vec::new();
         ConfigOption::write_all(&options, &mut bytes);
-        assert_eq!(bytes, [1, 4, 0x05, 0xdc, 5, 6, 0xde, 0xad, 0xbe, 0xef, 7, 2]);
+        assert_eq!(
+            bytes,
+            [1, 4, 0x05, 0xdc, 5, 6, 0xde, 0xad, 0xbe, 0xef, 7, 2]
+        );
         assert_eq!(ConfigOption::parse_all(&bytes), Some(options));
     }
 
@@ -600,7 +725,11 @@ mod tests {
     #[test]
     fn an_option_that_overruns_refuses_the_whole_list() {
         assert_eq!(ConfigOption::parse_all(&[1, 4, 0x05]), None);
-        assert_eq!(ConfigOption::parse_all(&[1, 1]), None, "shorter than its header");
+        assert_eq!(
+            ConfigOption::parse_all(&[1, 1]),
+            None,
+            "shorter than its header"
+        );
         assert_eq!(ConfigOption::parse_all(&[1]), None);
         assert_eq!(ConfigOption::parse_all(&[]), Some(vec![]));
     }

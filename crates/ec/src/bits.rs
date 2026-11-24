@@ -70,7 +70,9 @@ impl BitReader {
     /// Move queued octets into the accumulator until `count` bits are ready.
     fn fill(&mut self, count: u32) {
         while self.bits < count {
-            let Some(byte) = self.queue.pop_front() else { return };
+            let Some(byte) = self.queue.pop_front() else {
+                return;
+            };
             self.acc |= u32::from(byte) << self.bits;
             self.bits += 8;
         }

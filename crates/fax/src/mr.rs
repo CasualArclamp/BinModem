@@ -30,9 +30,15 @@ use crate::t4::{self, Bits, Colour, EOL, Spoiled};
 type Position = isize;
 
 /// Table 4: pass mode.
-pub const PASS: t4::Code = t4::Code { bits: 0b0001, len: 4 };
+pub const PASS: t4::Code = t4::Code {
+    bits: 0b0001,
+    len: 4,
+};
 /// Table 4: horizontal mode, followed by the two runs.
-pub const HORIZONTAL: t4::Code = t4::Code { bits: 0b001, len: 3 };
+pub const HORIZONTAL: t4::Code = t4::Code {
+    bits: 0b001,
+    len: 3,
+};
 
 /// Table 4: vertical mode, indexed by a1 minus b1 plus three, so from VL(3)
 /// through V(0) to VR(3).
@@ -41,13 +47,31 @@ pub const HORIZONTAL: t4::Code = t4::Code { bits: 0b001, len: 3 };
 /// VR(1)'s down slid one row below its notation, so VR(2) sits beside 011 and
 /// VL(1)'s 010 ends up beside the extension row.
 pub const VERTICAL: [t4::Code; 7] = [
-    t4::Code { bits: 0b0000010, len: 7 }, // VL(3)
-    t4::Code { bits: 0b000010, len: 6 },  // VL(2)
-    t4::Code { bits: 0b010, len: 3 },     // VL(1)
-    t4::Code { bits: 0b1, len: 1 },       // V(0)
-    t4::Code { bits: 0b011, len: 3 },     // VR(1)
-    t4::Code { bits: 0b000011, len: 6 },  // VR(2)
-    t4::Code { bits: 0b0000011, len: 7 }, // VR(3)
+    t4::Code {
+        bits: 0b0000010,
+        len: 7,
+    }, // VL(3)
+    t4::Code {
+        bits: 0b000010,
+        len: 6,
+    }, // VL(2)
+    t4::Code {
+        bits: 0b010,
+        len: 3,
+    }, // VL(1)
+    t4::Code { bits: 0b1, len: 1 }, // V(0)
+    t4::Code {
+        bits: 0b011,
+        len: 3,
+    }, // VR(1)
+    t4::Code {
+        bits: 0b000011,
+        len: 6,
+    }, // VR(2)
+    t4::Code {
+        bits: 0b0000011,
+        len: 7,
+    }, // VR(3)
 ];
 
 /// The maximum K of 4.2.1.1: how many lines apart the one-dimensional lines
@@ -86,7 +110,13 @@ pub fn changes(line: &[bool]) -> Vec<usize> {
 /// white, to black: the k-th turns to black exactly when k is even. b1 has to
 /// turn to the colour opposite a0's, which is at most one change further on.
 /// A change that is not there is the imaginary one just past the last pel.
-fn b1_b2(reference: &[usize], width: usize, a0: Position, black: bool, from: &mut usize) -> (usize, usize) {
+fn b1_b2(
+    reference: &[usize],
+    width: usize,
+    a0: Position,
+    black: bool,
+    from: &mut usize,
+) -> (usize, usize) {
     while *from < reference.len() && reference[*from] as Position <= a0 {
         *from += 1;
     }
@@ -169,7 +199,10 @@ fn read_mode(reader: &mut t4::Reader<'_>) -> Result<Mode, Spoiled> {
         if len == PASS.len && value == PASS.bits {
             return Ok(Mode::Pass);
         }
-        if let Some(i) = VERTICAL.iter().position(|c| c.len == len && c.bits == value) {
+        if let Some(i) = VERTICAL
+            .iter()
+            .position(|c| c.len == len && c.bits == value)
+        {
             return Ok(Mode::Vertical(i as Position - 3));
         }
     }
@@ -289,7 +322,11 @@ mod tests {
         let bits = out.to_bits();
         let mut reader = t4::Reader::new(&bits);
         let line = read_line(&mut reader, reference).expect("it did not read back");
-        assert_eq!(reader.position(), bits.len(), "not every bit written was read");
+        assert_eq!(
+            reader.position(),
+            bits.len(),
+            "not every bit written was read"
+        );
         line
     }
 
@@ -418,7 +455,12 @@ mod tests {
         // zeros. Table 4's words are the new ones here: none may end in so
         // many zeros that the start of any other word completes an EOL.
         let trailing = |c: &t4::Code| (0..c.len).take_while(|i| c.bits >> i & 1 == 0).count();
-        let leading = |c: &t4::Code| (0..c.len).rev().take_while(|i| c.bits >> i & 1 == 0).count();
+        let leading = |c: &t4::Code| {
+            (0..c.len)
+                .rev()
+                .take_while(|i| c.bits >> i & 1 == 0)
+                .count()
+        };
         let mut words: Vec<t4::Code> = VERTICAL.to_vec();
         words.push(PASS);
         words.push(HORIZONTAL);
@@ -434,7 +476,6 @@ mod tests {
             "{worst_end} trailing and {worst_start} leading zeros make an EOL"
         );
     }
-
 
     fn page(rows: usize, width: usize) -> Vec<Vec<bool>> {
         (0..rows)
@@ -538,7 +579,11 @@ mod tests {
             decoder.lines().len(),
             lines.len()
         );
-        assert_eq!(decoder.lines().last(), lines.last(), "the end of the page was lost");
+        assert_eq!(
+            decoder.lines().last(),
+            lines.last(),
+            "the end of the page was lost"
+        );
     }
 
     #[test]
@@ -559,7 +604,10 @@ mod tests {
             zeros = if bits[i] { 0 } else { zeros + 1 };
             i += 1;
         }
-        let want: Vec<bool> = (0..9).map(|y: usize| y.is_multiple_of(4)).chain([true; 6]).collect();
+        let want: Vec<bool> = (0..9)
+            .map(|y: usize| y.is_multiple_of(4))
+            .chain([true; 6])
+            .collect();
         assert_eq!(tags, want, "EOL + 1 before every fourth line and RTC");
     }
 }

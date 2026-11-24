@@ -17,8 +17,8 @@
 //! rather than this one; the replay is faithful up to the first point where
 //! the two would differ, and that point is what is being looked for.
 
-use datapump::v32::startup::{Rates, Modem, Role, Status, rate_signal};
 use datapump::v32::Coding;
+use datapump::v32::startup::{Modem, Rates, Role, Status, rate_signal};
 use datapump::v32::trellis::{AT_7200, AT_9600, AT_12000, AT_14400};
 
 const FS: f64 = 16_000.0;
@@ -27,10 +27,22 @@ const FS: f64 = 16_000.0;
 const FOUR: [(f64, f64); 4] = [(-3.0, -1.0), (1.0, -3.0), (3.0, 1.0), (-1.0, 3.0)];
 /// Figure 2/V.32: 9600's non-redundant alternative (2.4.1.1).
 const SIXTEEN: [(f64, f64); 16] = [
-    (-3.0, -3.0), (-3.0, -1.0), (-3.0, 1.0), (-3.0, 3.0),
-    (-1.0, -3.0), (-1.0, -1.0), (-1.0, 1.0), (-1.0, 3.0),
-    (1.0, -3.0), (1.0, -1.0), (1.0, 1.0), (1.0, 3.0),
-    (3.0, -3.0), (3.0, -1.0), (3.0, 1.0), (3.0, 3.0),
+    (-3.0, -3.0),
+    (-3.0, -1.0),
+    (-3.0, 1.0),
+    (-3.0, 3.0),
+    (-1.0, -3.0),
+    (-1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, 3.0),
+    (1.0, -3.0),
+    (1.0, -1.0),
+    (1.0, 1.0),
+    (1.0, 3.0),
+    (3.0, -3.0),
+    (3.0, -1.0),
+    (3.0, 1.0),
+    (3.0, 3.0),
 ];
 
 fn nearest_of(points: &[(f64, f64)], (i, q): (f64, f64)) -> (f64, f64) {
@@ -81,7 +93,11 @@ fn what_this_end_made_of_it() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let role = if channel == 0 { Role::Calling } else { Role::Answering };
+    let role = if channel == 0 {
+        Role::Calling
+    } else {
+        Role::Answering
+    };
     let arrived = wav.channel(channel);
 
     // Where in the recording to start the modem, which is not the beginning.
@@ -103,10 +119,20 @@ fn what_this_end_made_of_it() {
         .unwrap_or(0.0);
     let arrived = &arrived[((from * FS) as usize).min(arrived.len())..];
     let offer = match offer.as_deref() {
-        Some("4800") => rate_signal(Rates { at_4800: true, ..Rates::default() }),
-        Some("9600") => rate_signal(Rates { at_9600: true, ..Rates::default() }),
+        Some("4800") => rate_signal(Rates {
+            at_4800: true,
+            ..Rates::default()
+        }),
+        Some("9600") => rate_signal(Rates {
+            at_9600: true,
+            ..Rates::default()
+        }),
         Some("all") => rate_signal(Rates::between(4800, 14_400)),
-        _ => rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() }),
+        _ => rate_signal(Rates {
+            at_4800: true,
+            at_9600: true,
+            ..Rates::default()
+        }),
     };
     println!(
         "\n{path}: {:.1} s, channel {channel} as the {} end, offering {offer:016b}\n",
@@ -191,7 +217,13 @@ fn what_this_end_made_of_it() {
     let text: String = bytes
         .iter()
         .take(400)
-        .map(|&c| if (32..127).contains(&c) || c == 10 || c == 13 { c as char } else { '.' })
+        .map(|&c| {
+            if (32..127).contains(&c) || c == 10 || c == 13 {
+                c as char
+            } else {
+                '.'
+            }
+        })
         .collect();
     println!("{text}");
 
@@ -200,8 +232,10 @@ fn what_this_end_made_of_it() {
     // whose carrier is turning wanders the whole constellation and averages
     // out around the spacing itself.
     if !lock.is_empty() {
-        println!("
-  second  symbols  mean miss   error along vs across the radius");
+        println!(
+            "
+  second  symbols  mean miss   error along vs across the radius"
+        );
         let mut second = (lock[0].0 * 10.0).floor();
         let (mut n, mut sum) = (0usize, 0.0);
         let (mut radial, mut tangential) = (0.0f64, 0.0f64);
@@ -214,9 +248,7 @@ fn what_this_end_made_of_it() {
                     let miss = sum / n as f64;
                     let across = (tangential / n as f64).sqrt();
                     let along = (radial / n as f64).sqrt();
-                    let snr = 10.0
-                        * (10.0 / ((radial + tangential) / n as f64).max(1e-12))
-                            .log10();
+                    let snr = 10.0 * (10.0 / ((radial + tangential) / n as f64).max(1e-12)).log10();
                     // The miss on its own means nothing without the
                     // constellation it was measured in: 0.35 is a working
                     // receiver at 4800 and a dead one at 14 400, where the
@@ -255,9 +287,7 @@ fn what_this_end_made_of_it() {
             // decoding it.
             let (x, y) = match (rate_of(status), modem.coding()) {
                 (Some(7200), _) => AT_7200.point(AT_7200.nearest((i, q))),
-                (Some(9600), Coding::Trellis) => {
-                    AT_9600.point(AT_9600.nearest((i, q)))
-                }
+                (Some(9600), Coding::Trellis) => AT_9600.point(AT_9600.nearest((i, q))),
                 (Some(12_000), _) => AT_12000.point(AT_12000.nearest((i, q))),
                 (Some(14_400), _) => AT_14400.point(AT_14400.nearest((i, q))),
                 // 4800, and 9600's uncoded modulation, which 2.4.1.1 puts on
@@ -318,8 +348,10 @@ fn what_this_end_made_of_it() {
             .iter()
             .map(|&(_, p, _, _)| AT_9600.point(AT_9600.nearest(p)))
             .collect();
-        println!("
-  error against the symbol at each lag (0 is itself):");
+        println!(
+            "
+  error against the symbol at each lag (0 is itself):"
+        );
         for lag in -3i32..=3 {
             let (mut num, mut ee, mut dd) = (0.0f64, 0.0f64, 0.0f64);
             for n in 4..lock.len() - 4 {
@@ -344,25 +376,26 @@ fn what_this_end_made_of_it() {
     // thirty-two points and invisible at four, where every symbol has the same
     // amplitude.
     if lock.len() > 1000 {
-        println!("
-  ideal radius   symbols   measured   ratio");
+        println!(
+            "
+  ideal radius   symbols   measured   ratio"
+        );
         let mut rings: std::collections::BTreeMap<i64, (usize, f64)> =
             std::collections::BTreeMap::new();
         for &(_, p, _, _) in &lock {
             let (x, y) = AT_9600.point(AT_9600.nearest(p));
             let ideal = (x * x + y * y).sqrt();
             let got = (p.0 * p.0 + p.1 * p.1).sqrt();
-            let e = rings.entry((ideal * 1000.0).round() as i64).or_insert((0, 0.0));
+            let e = rings
+                .entry((ideal * 1000.0).round() as i64)
+                .or_insert((0, 0.0));
             e.0 += 1;
             e.1 += got;
         }
         for (k, (n, sum)) in rings {
             let ideal = k as f64 / 1000.0;
             let got = sum / n as f64;
-            println!(
-                "  {ideal:12.3}   {n:7}   {got:8.3}   {:5.3}",
-                got / ideal
-            );
+            println!("  {ideal:12.3}   {n:7}   {got:8.3}   {:5.3}", got / ideal);
         }
     }
 
@@ -378,8 +411,11 @@ fn what_this_end_made_of_it() {
                 hist[bin] += 1;
             }
         }
-        println!("
-radius, against the mean ({} symbols):", points.len());
+        println!(
+            "
+radius, against the mean ({} symbols):",
+            points.len()
+        );
         let peak = *hist.iter().max().unwrap_or(&1) as f64;
         for (bin, &n) in hist.iter().enumerate() {
             if n * 200 > points.len() {

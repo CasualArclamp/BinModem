@@ -108,7 +108,10 @@ mod tests {
     #[test]
     fn the_space_wraps_where_it_ends() {
         let last = Seq(u32::MAX);
-        assert!(last.before(Seq(0)), "the end of the space is not before zero");
+        assert!(
+            last.before(Seq(0)),
+            "the end of the space is not before zero"
+        );
         assert!(last.before(Seq(5)));
         assert!(Seq(0).after(last));
         assert_eq!(last.distance_to(Seq(5)), 6);
@@ -139,7 +142,10 @@ mod tests {
         let start = Seq(1000);
         assert!(start.within(start, 10), "the first octet is in the window");
         assert!(Seq(1009).within(start, 10));
-        assert!(!Seq(1010).within(start, 10), "one past the end is not in it");
+        assert!(
+            !Seq(1010).within(start, 10),
+            "one past the end is not in it"
+        );
         assert!(!Seq(999).within(start, 10), "one before it is not in it");
     }
 

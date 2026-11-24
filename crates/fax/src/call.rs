@@ -221,7 +221,10 @@ impl Phase {
             | Self::Confirming
             | Self::TurningAround => 'B',
             Self::Sending | Self::Receiving => 'C',
-            Self::EndingPage | Self::AwaitingReceipt | Self::AwaitingPostMessage | Self::Acknowledging => 'D',
+            Self::EndingPage
+            | Self::AwaitingReceipt
+            | Self::AwaitingPostMessage
+            | Self::Acknowledging => 'D',
             Self::AwaitingDisconnect | Self::Ending | Self::Done | Self::Failed => 'E',
         }
     }
@@ -554,7 +557,10 @@ impl Call {
     fn new(role: Role, fs: f64, identification: &str, pages: Vec<Page>) -> Self {
         let mut more: VecDeque<Page> = pages.into();
         let page = more.pop_front();
-        let fine = page.iter().chain(&more).any(|p| p.resolution == Resolution::Fine);
+        let fine = page
+            .iter()
+            .chain(&more)
+            .any(|p| p.resolution == Resolution::Fine);
         let sheet = usize::from(page.is_some());
         Self {
             role,
@@ -582,7 +588,11 @@ impl Call {
             offer: OUR_MODULATIONS.to_vec(),
             available: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
-            resolution: if fine { Resolution::Fine } else { Resolution::Standard },
+            resolution: if fine {
+                Resolution::Fine
+            } else {
+                Resolution::Standard
+            },
             coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
             ecm: false,
@@ -1011,17 +1021,14 @@ impl Call {
                     self.page_ended();
                 } else if self.fast_seen && self.fast_down > FAST_CARRIER_GONE {
                     self.fast_burst_heard();
-                } else if self.phase == Phase::CheckingTraining && self.check_is_long_enough()
-                {
+                } else if self.phase == Phase::CheckingTraining && self.check_is_long_enough() {
                     // A training check is a second and a half and no longer.
                     // Twice that much has arrived, so whatever is on the line
                     // is not going to stop being on it, and there is already
                     // more than enough to judge.
                     self.fast_burst_heard();
                 } else if self.timer <= 0.0 {
-                    if self.phase == Phase::Receiving
-                        && self.fast_carrier
-                        && self.held < T5_SECONDS
+                    if self.phase == Phase::Receiving && self.fast_carrier && self.held < T5_SECONDS
                     {
                         self.held += self.step;
                     } else {
@@ -1063,7 +1070,11 @@ impl Call {
     /// than finished, and whatever came in meanwhile was V.8 rather than
     /// frames. The clocks of phase B start from here.
     pub fn restart_identifying(&mut self) {
-        debug_assert_eq!(self.role, Role::Answerer, "only the answering end sends a DIS");
+        debug_assert_eq!(
+            self.role,
+            Role::Answerer,
+            "only the answering end sends a DIS"
+        );
         self.sender = Sender::new();
         self.reader = Reader::new();
         self.attempts = 0;
@@ -1363,7 +1374,8 @@ impl Call {
             Frame::Eor => {
                 let turning = self.phase == Phase::TurningAround && self.role == Role::Answerer;
                 if self.ecm
-                    && (turning || matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage))
+                    && (turning
+                        || matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage))
                 {
                     self.end_of_retransmission(&message.fif);
                 }
@@ -1404,7 +1416,8 @@ impl Call {
             // Any other says the far end gave up, which it does without a word
             // of why -- so this end at least says when.
             Frame::Dcn => {
-                let expected = self.role == Role::Answerer && self.phase == Phase::AwaitingDisconnect;
+                let expected =
+                    self.role == Role::Answerer && self.phase == Phase::AwaitingDisconnect;
                 if !expected && !self.phase.is_over() && self.trouble.is_none() {
                     self.trouble = Some(format!(
                         "the far end hung up while this end was {}",
@@ -1419,7 +1432,10 @@ impl Call {
                 }
             }
         }
-        self.exchange.push(Exchanged { frame: message.frame, ours: false });
+        self.exchange.push(Exchanged {
+            frame: message.frame,
+            ours: false,
+        });
         self.heard.push(message);
     }
 
@@ -1507,7 +1523,10 @@ impl Call {
                     .rates()
                     .iter()
                     .filter(move |r| **r <= ceiling)
-                    .map(move |&bits_per_second| Speed { modulation, bits_per_second })
+                    .map(move |&bits_per_second| Speed {
+                        modulation,
+                        bits_per_second,
+                    })
             })
             .collect();
         speeds.sort_by_key(|s| std::cmp::Reverse(s.bits_per_second));
@@ -1545,7 +1564,11 @@ impl Call {
         // if not. And the two-dimensional coding whenever the far end reads
         // it, since on anything with lines in it the page comes out smaller.
         if let Some(caps) = self.capabilities.as_ref() {
-            let wanted = self.page.iter().chain(&self.more).any(|p| p.resolution == Resolution::Fine);
+            let wanted = self
+                .page
+                .iter()
+                .chain(&self.more)
+                .any(|p| p.resolution == Resolution::Fine);
             self.resolution = if wanted && caps.fine_resolution {
                 Resolution::Fine
             } else {
@@ -1658,7 +1681,10 @@ impl Call {
     /// centimetres at standard resolution before its grain is found. The cost
     /// is a flush and an ESC SDNORM a stripe, a handful of bytes.
     fn jbig_stripe(&self) -> u32 {
-        let optional = self.capabilities.as_ref().is_some_and(|caps| caps.jbig_optional_l0);
+        let optional = self
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.jbig_optional_l0);
         match (optional, self.resolution) {
             (false, _) => jbig::BASIC_STRIPE,
             (true, Resolution::Standard) => 32,
@@ -1685,7 +1711,8 @@ impl Call {
         let min_bits = if self.ecm {
             0
         } else {
-            let code = t30::dcs_scan_line(self.scan_line_field, self.resolution == Resolution::Fine);
+            let code =
+                t30::dcs_scan_line(self.scan_line_field, self.resolution == Resolution::Fine);
             (t30::scan_line_ms(code) / 1000.0 * f64::from(self.rate)).ceil() as usize
         };
         // A fine page to a machine that only prints standard loses every
@@ -1700,7 +1727,11 @@ impl Call {
                 &resized
             }
             (Resolution::Standard, Resolution::Fine) => {
-                resized = page.lines.iter().flat_map(|line| [line.clone(), line.clone()]).collect();
+                resized = page
+                    .lines
+                    .iter()
+                    .flat_map(|line| [line.clone(), line.clone()])
+                    .collect();
                 &resized
             }
             _ => &page.lines,
@@ -1877,8 +1908,11 @@ impl Call {
         let fif = if self.v34 {
             t30::v34_capabilities(&self.offer, self.jbig_offered)
         } else {
-            let mut fif =
-                t30::our_capabilities(&self.offer, self.error_correction_offered, self.jbig_offered);
+            let mut fif = t30::our_capabilities(
+                &self.offer,
+                self.error_correction_offered,
+                self.jbig_offered,
+            );
             if self.v8_capable {
                 t30::say_v8_capable(&mut fif);
             }
@@ -1889,7 +1923,11 @@ impl Call {
     }
 
     fn send_confirmation(&mut self) {
-        let frame = if self.accepted { Frame::Cfr } else { Frame::Ftt };
+        let frame = if self.accepted {
+            Frame::Cfr
+        } else {
+            Frame::Ftt
+        };
         self.queue(&[Message::new(frame, false)]);
     }
 
@@ -2038,7 +2076,10 @@ impl Call {
             self.block_accepted(command, Frame::Mcf);
         } else {
             let fif = ecm::ppr_field(frames, |i| self.collector.has(i));
-            self.respond(Message::new(Frame::Ppr, false).with_fif(&fif), Phase::Receiving);
+            self.respond(
+                Message::new(Frame::Ppr, false).with_fif(&fif),
+                Phase::Receiving,
+            );
         }
     }
 
@@ -2091,7 +2132,8 @@ impl Call {
             if end > self.ecm_fed {
                 // Everything before `at` is in already, so this is where the
                 // decoder has got to.
-                self.decoder.feed_bits(&ecm::unpack(&chunk[self.ecm_fed - at..]));
+                self.decoder
+                    .feed_bits(&ecm::unpack(&chunk[self.ecm_fed - at..]));
                 self.ecm_fed = end;
             }
             at = end;
@@ -2135,8 +2177,10 @@ impl Call {
     /// Queue a burst of frames on the control channel: a second of flags
     /// ahead of it on V.21, and F.3.1.4's two, and a few, on V.34's.
     fn queue(&mut self, messages: &[Message]) {
-        self.exchange
-            .extend(messages.iter().map(|m| Exchanged { frame: m.frame, ours: true }));
+        self.exchange.extend(messages.iter().map(|m| Exchanged {
+            frame: m.frame,
+            ours: true,
+        }));
         if self.v34 {
             self.sender.send_flagged(messages, crate::frames::V34_FLAGS);
             self.burst = messages.to_vec();
@@ -2205,7 +2249,10 @@ mod tests {
         let middle = ecm_progress(frames, 1, 0.5);
         let want = 1.5 * full as f64 / frames as f64;
         assert!((middle - want).abs() < 1e-9, "{middle} against {want}");
-        assert!(middle > 0.7, "half way through the second block is most of the page");
+        assert!(
+            middle > 0.7,
+            "half way through the second block is most of the page"
+        );
         assert!((ecm_progress(frames, 2, 1.0) - 1.0).abs() < 1e-9);
         // One block alone is the burst itself.
         assert!((ecm_progress(40, 0, 0.25) - 0.25).abs() < 1e-9);
@@ -2213,8 +2260,8 @@ mod tests {
 
     use super::*;
     use crate::frames;
-    use crate::t30::Frame;
     use crate::t4;
+    use crate::t30::Frame;
 
     const FS: f64 = 16_000.0;
     /// A real machine's capability frame, off a recording of a public fax
@@ -2268,7 +2315,6 @@ mod tests {
         }
         call
     }
-
 
     /// A training check as it really arrives: training first, then zeros,
     /// with `errors` of them flipped, then the tail of the turn-off.
@@ -2420,11 +2466,7 @@ mod tests {
         );
         assert_eq!(call.rate(), 7200, "it never dropped a rate at all");
         assert_eq!(call.modulation(), Modulation::V29, "it skipped a rung");
-        let commands = call
-            .heard
-            .iter()
-            .filter(|m| m.frame == Frame::Dis)
-            .count();
+        let commands = call.heard.iter().filter(|m| m.frame == Frame::Dis).count();
         assert_eq!(commands, 1, "the far end only ever sent one DIS");
         assert!(
             call.seconds() > 3.0 * T4_SECONDS,
@@ -2453,7 +2495,6 @@ mod tests {
         assert_eq!(call.phase(), Phase::Done, "it did not hang up politely");
         assert!(call.trouble.is_some(), "it gave up without saying why");
     }
-
 
     #[test]
     fn a_timeout_waits_for_the_far_end_to_stop_talking() {
@@ -2493,7 +2534,6 @@ mod tests {
         }
         assert_ne!(call.phase(), Phase::AwaitingCommand, "it waited for ever");
     }
-
 
     fn fine_page(rows: usize) -> Page {
         Page {
@@ -2545,8 +2585,14 @@ mod tests {
             dis.expect("no DIS went out")
         };
         let (with, without) = (dis_of(true), dis_of(false));
-        assert!(t30::bit(&with, 6), "bit 6 clear in the DIS of an end that offers V.8");
-        assert!(!t30::bit(&without, 6), "bit 6 set in the DIS of an end that does not");
+        assert!(
+            t30::bit(&with, 6),
+            "bit 6 clear in the DIS of an end that offers V.8"
+        );
+        assert!(
+            !t30::bit(&without, 6),
+            "bit 6 set in the DIS of an end that does not"
+        );
         let mut cleared = with.clone();
         t30::set_bit(&mut cleared, 6, false);
         assert_eq!(cleared, without, "bit 6 was not the only difference");
@@ -2557,7 +2603,10 @@ mod tests {
         // It was not: the end that dialled never took its resolution from the
         // page, so every page went out saying standard, and a fine page arrived
         // at twice its height.
-        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true, true));
+        let dcs = command_for(
+            Some(fine_page(10)),
+            &t30::our_capabilities(&OUR_MODULATIONS, true, true),
+        );
         assert!(t30::bit(&dcs, 15), "a fine page was commanded as standard");
     }
 
@@ -2567,14 +2616,21 @@ mod tests {
         t30::set_bit(&mut fif, 15, false);
         let page = fine_page(10);
         let dcs = command_for(Some(page.clone()), &fif);
-        assert!(!t30::bit(&dcs, 15), "commanded fine to a machine without it");
+        assert!(
+            !t30::bit(&dcs, 15),
+            "commanded fine to a machine without it"
+        );
 
         let mut call = Call::originate(FS, "1", Some(page));
         call.capabilities = Some(t30::capabilities(&fif));
         assert!(call.choose_rate());
         let mut decoder = coding::Decoder::new(call.coding);
         decoder.feed_bits(&call.fast_out_page());
-        assert_eq!(decoder.lines().len(), 5, "ten fine lines are five standard ones");
+        assert_eq!(
+            decoder.lines().len(),
+            5,
+            "ten fine lines are five standard ones"
+        );
     }
 
     #[test]
@@ -2612,7 +2668,11 @@ mod tests {
     fn an_end_that_will_not_send_jbig_sends_mmr() {
         let mut call = Call::originate(FS, "1", Some(fine_page(10)));
         call.set_jbig(false);
-        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(
+            &OUR_MODULATIONS,
+            true,
+            true,
+        )));
         assert!(call.choose_rate());
         assert!(call.error_correction());
         assert_eq!(call.coding, Coding::Mmr);
@@ -2652,19 +2712,31 @@ mod tests {
         let mut basic = any.clone();
         t30::set_bit(&mut basic, 79, false);
         assert_eq!(stripe_of(&basic, fine_page(10)), (128, false));
-        assert_eq!(stripe_of(&any, fine_page(10)), (64, true), "eight millimetres at 7.7 lines/mm");
+        assert_eq!(
+            stripe_of(&any, fine_page(10)),
+            (64, true),
+            "eight millimetres at 7.7 lines/mm"
+        );
         let standard = Page {
             resolution: Resolution::Standard,
             ..fine_page(10)
         };
-        assert_eq!(stripe_of(&any, standard), (32, true), "eight millimetres at 3.85 lines/mm");
+        assert_eq!(
+            stripe_of(&any, standard),
+            (32, true),
+            "eight millimetres at 3.85 lines/mm"
+        );
     }
 
     #[test]
     fn an_end_that_will_not_use_error_correction_sends_neither_mmr_nor_jbig() {
         let mut call = Call::originate(FS, "1", Some(fine_page(10)));
         call.set_error_correction(false);
-        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(
+            &OUR_MODULATIONS,
+            true,
+            true,
+        )));
         assert!(call.choose_rate());
         assert!(!call.error_correction());
         assert_eq!(call.coding, Coding::ModifiedRead);
@@ -2686,7 +2758,10 @@ mod tests {
             (vec![24, 27, 32, 40, 48, 56, 64, 72, 78, 79], Coding::Jbig),
             (vec![24, 27, 31, 32, 40, 48, 56, 64, 72, 78], Coding::Jbig),
             // Without 27, or in an octet the field never reached, it is not.
-            (vec![16, 24, 32, 40, 48, 56, 64, 72, 78], Coding::ModifiedRead),
+            (
+                vec![16, 24, 32, 40, 48, 56, 64, 72, 78],
+                Coding::ModifiedRead,
+            ),
             (vec![24, 27, 31, 32, 40, 56, 64, 72, 78], Coding::Mmr),
         ] {
             let mut dcs = t30::command(Command {
@@ -2705,7 +2780,11 @@ mod tests {
             call.enter(Phase::AwaitingCommand);
             call.frame_arrived(Message::new(Frame::Dcs, true).with_fif(&dcs));
             assert_eq!(call.coding, want, "bits {bits:?}");
-            assert_eq!(call.decoder.coding(), Coding::ModifiedHuffman, "decoding before the page starts");
+            assert_eq!(
+                call.decoder.coding(),
+                Coding::ModifiedHuffman,
+                "decoding before the page starts"
+            );
         }
     }
 
@@ -2742,11 +2821,7 @@ mod tests {
         let caps = call.capabilities.clone().expect("it said what it can do");
         assert_eq!(
             caps.modulations,
-            vec![
-                Modulation::V27ter,
-                Modulation::V29,
-                Modulation::V17
-            ]
+            vec![Modulation::V27ter, Modulation::V29, Modulation::V17]
         );
         assert!(caps.receives);
         // V.17 is not built, so the fastest thing in common is V.29 at 9600.
@@ -2829,7 +2904,11 @@ mod tests {
             call.frame_arrived(Message::new(Frame::Dis, false).with_fif(&HALVING_DIS));
             assert_eq!(call.rate, 9600);
             assert_eq!(call.resolution, resolution);
-            assert_eq!(call.fast_out_page().len(), 10 * per_line + 72, "{resolution:?}");
+            assert_eq!(
+                call.fast_out_page().len(),
+                10 * per_line + 72,
+                "{resolution:?}"
+            );
         }
     }
 
@@ -2869,7 +2948,10 @@ mod tests {
         assert!(caps.two_dimensional, "T.4 4.2 is offered as well as 4.1");
         assert!(caps.error_correction, "T.30 Annex A is offered");
         assert!(caps.t6_coding, "T.6 is offered");
-        assert!(caps.jbig && caps.jbig_optional_l0, "T.85 is offered, in stripes of any length");
+        assert!(
+            caps.jbig && caps.jbig_optional_l0,
+            "T.85 is offered, in stripes of any length"
+        );
         assert_eq!(caps.widths_mm, vec![215]);
         assert_eq!(caps.length, "unlimited");
         assert_eq!(caps.scan_line_ms, 0.0);
@@ -2887,7 +2969,10 @@ mod tests {
         assert_eq!(plain.len(), 3);
         assert!(!t30::capabilities(&plain).error_correction);
         assert!(!t30::capabilities(&plain).jbig);
-        assert!(!t30::bit(&plain, 24), "an extension bit with nothing after it");
+        assert!(
+            !t30::bit(&plain, 24),
+            "an extension bit with nothing after it"
+        );
     }
 
     #[test]
@@ -2895,7 +2980,10 @@ mod tests {
         for (offer, want) in [
             (vec![Modulation::V27ter], vec![Modulation::V27ter]),
             (vec![Modulation::V29], vec![Modulation::V29]),
-            (vec![Modulation::V29, Modulation::V27ter], vec![Modulation::V27ter, Modulation::V29]),
+            (
+                vec![Modulation::V29, Modulation::V27ter],
+                vec![Modulation::V27ter, Modulation::V29],
+            ),
             // Nothing at all is V.27 ter, which every machine must have.
             (vec![], vec![Modulation::V27ter]),
         ] {
@@ -2934,7 +3022,11 @@ mod tests {
         let mut call = Call::originate(FS, "1", None);
         call.set_offer(&[Modulation::V27ter]);
         call.capabilities = Some(t30::capabilities(&DIS));
-        assert!(call.ladder().iter().all(|s| s.modulation == Modulation::V27ter));
+        assert!(
+            call.ladder()
+                .iter()
+                .all(|s| s.modulation == Modulation::V27ter)
+        );
         // And V.17, which the far end offers and this end has not got, is
         // never offered no matter what is asked for.
         call.set_offer(&[Modulation::V17]);
@@ -2961,7 +3053,10 @@ mod tests {
             ]
         );
         call.step_down();
-        assert!(call.trouble.is_some(), "ran off the bottom without saying so");
+        assert!(
+            call.trouble.is_some(),
+            "ran off the bottom without saying so"
+        );
     }
 
     /// live-1789455660: a real wired fax machine that offers up to 9600,
@@ -3005,7 +3100,10 @@ mod tests {
             }
         }
         assert_eq!(commanded, vec![9600, 7200, 4800, 2400], "{commanded:?}");
-        assert!(call.phase().is_over(), "it never gave up below the slowest rate");
+        assert!(
+            call.phase().is_over(),
+            "it never gave up below the slowest rate"
+        );
         assert!(call.trouble.is_some(), "it failed without saying why");
     }
 
@@ -3100,7 +3198,11 @@ mod tests {
     /// A page of `rows` lines with `mark` in it, coded as it goes on the line.
     fn page_bits(rows: usize, mark: usize) -> (Vec<Vec<bool>>, Vec<bool>) {
         let lines: Vec<Vec<bool>> = (0..rows)
-            .map(|y| (0..crate::page::WIDTH).map(|x| (x / 100 == mark) != (y % 2 == 0)).collect())
+            .map(|y| {
+                (0..crate::page::WIDTH)
+                    .map(|x| (x / 100 == mark) != (y % 2 == 0))
+                    .collect()
+            })
             .collect();
         let bits = Coding::ModifiedHuffman.encode(&lines, Resolution::Standard, 0);
         (lines, bits)
@@ -3112,31 +3214,47 @@ mod tests {
         let mut said = Vec::new();
         let (first, bits) = page_bits(12, 1);
         call.fast_bits(&bits);
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingPostMessage
+        });
         assert_eq!(call.phase(), Phase::AwaitingPostMessage);
 
         call.frame_arrived(Message::new(Frame::Mps, true));
-        carry_on(&mut call, &mut said, |c| matches!(c.line(), Line::FastListen(_)));
+        carry_on(&mut call, &mut said, |c| {
+            matches!(c.line(), Line::FastListen(_))
+        });
         assert_eq!(said, vec![Frame::Mcf]);
-        assert_eq!(call.phase(), Phase::Receiving, "not back on the page carrier");
+        assert_eq!(
+            call.phase(),
+            Phase::Receiving,
+            "not back on the page carrier"
+        );
 
         // The MCF was lost, so the sender asks again.
         call.frame_arrived(Message::new(Frame::Mps, true));
-        carry_on(&mut call, &mut said, |c| matches!(c.line(), Line::FastListen(_)));
+        carry_on(&mut call, &mut said, |c| {
+            matches!(c.line(), Line::FastListen(_))
+        });
         assert_eq!(said, vec![Frame::Mcf, Frame::Mcf], "not answered again");
         assert_eq!(call.phase(), Phase::Receiving);
 
         let (second, bits) = page_bits(16, 3);
         call.fast_bits(&bits);
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingPostMessage
+        });
         call.frame_arrived(Message::new(Frame::Eop, true));
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingDisconnect);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingDisconnect
+        });
         assert_eq!(said, vec![Frame::Mcf, Frame::Mcf, Frame::Mcf]);
         assert_eq!(call.phase(), Phase::AwaitingDisconnect);
 
         // The EOP's MCF is lost too.
         call.frame_arrived(Message::new(Frame::Eop, true));
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingDisconnect);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingDisconnect
+        });
         assert_eq!(said.len(), 4, "the EOP was not answered again: {said:?}");
 
         assert_eq!(call.pages_received(), 2);
@@ -3156,14 +3274,27 @@ mod tests {
         let mut said = Vec::new();
         let (_, bits) = page_bits(8, 2);
         call.fast_bits(&bits);
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingPostMessage
+        });
         call.frame_arrived(Message::new(Frame::Eom, true));
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingCommand
+        });
         assert_eq!(said, vec![Frame::Mcf]);
         carry_on(&mut call, &mut said, |c| c.phase() == Phase::Identifying);
-        assert!(call.seconds() - 3.0 * T1_SECONDS > T2_SECONDS, "DIS before T2 ran out");
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
-        assert_eq!(said, vec![Frame::Mcf, Frame::Csi, Frame::Dis], "no DIS once T2 ran out");
+        assert!(
+            call.seconds() - 3.0 * T1_SECONDS > T2_SECONDS,
+            "DIS before T2 ran out"
+        );
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingCommand
+        });
+        assert_eq!(
+            said,
+            vec![Frame::Mcf, Frame::Csi, Frame::Dis],
+            "no DIS once T2 ran out"
+        );
         assert_eq!(call.phase(), Phase::AwaitingCommand, "{:?}", call.trouble);
     }
 
@@ -3185,7 +3316,11 @@ mod tests {
             call.enter(Phase::AwaitingReceipt);
             call.frame_arrived(Message::new(Frame::Rtn, false));
             assert_eq!(call.phase(), Phase::Commanding, "{:?}", call.trouble);
-            seen.push((call.sheet(), call.rate(), call.page.as_ref().map(|p| p.lines.len())));
+            seen.push((
+                call.sheet(),
+                call.rate(),
+                call.page.as_ref().map(|p| p.lines.len()),
+            ));
         }
         assert_eq!(
             seen,
@@ -3199,7 +3334,10 @@ mod tests {
                 (2, 2400, Some(20)),
             ]
         );
-        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
+        assert_eq!(
+            call.trouble.as_deref(),
+            Some("the far end could not read page 1")
+        );
 
         // What goes out after it is the command, which is where training
         // starts again.
@@ -3223,7 +3361,10 @@ mod tests {
         call.enter(Phase::AwaitingReceipt);
         call.frame_arrived(Message::new(Frame::Rtn, false));
         assert_eq!(call.phase(), Phase::Ending);
-        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
+        assert_eq!(
+            call.trouble.as_deref(),
+            Some("the far end could not read page 1")
+        );
     }
 
     #[test]
@@ -3237,12 +3378,26 @@ mod tests {
             *bit = !*bit;
         }
         call.fast_bits(&bits);
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
-        assert_eq!(call.phase(), Phase::AwaitingPostMessage, "{} lines, {} damaged", call.decoder.lines().len(), call.decoder.damaged());
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingPostMessage
+        });
+        assert_eq!(
+            call.phase(),
+            Phase::AwaitingPostMessage,
+            "{} lines, {} damaged",
+            call.decoder.lines().len(),
+            call.decoder.damaged()
+        );
         call.frame_arrived(Message::new(Frame::Mps, true));
-        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
+        carry_on(&mut call, &mut said, |c| {
+            c.phase() == Phase::AwaitingCommand
+        });
         assert_eq!(said, vec![Frame::Rtn]);
-        assert_eq!(call.phase(), Phase::AwaitingCommand, "a page it refused is not followed by the next");
+        assert_eq!(
+            call.phase(),
+            Phase::AwaitingCommand,
+            "a page it refused is not followed by the next"
+        );
     }
 
     #[test]
@@ -3261,7 +3416,13 @@ mod tests {
         let mut call = Call::answer(FS, "61399990000");
         call.frame_arrived(Message::new(Frame::Mps, true));
         let exchange = call.take_exchange();
-        assert_eq!(exchange.first(), Some(&Exchanged { frame: Frame::Mps, ours: false }));
+        assert_eq!(
+            exchange.first(),
+            Some(&Exchanged {
+                frame: Frame::Mps,
+                ours: false
+            })
+        );
         assert!(call.take_exchange().is_empty(), "handed over twice");
     }
 }

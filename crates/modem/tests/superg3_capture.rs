@@ -25,12 +25,18 @@ use fax::frames;
 fn describe(heard: &Heard, fs: f64) -> String {
     let t = |at: u64| at as f64 / fs;
     match *heard {
-        Heard::Carrier { on, at } => format!("{:7.3}s carrier {}", t(at), if on { "on" } else { "off" }),
+        Heard::Carrier { on, at } => {
+            format!("{:7.3}s carrier {}", t(at), if on { "on" } else { "off" })
+        }
         Heard::Tone { at } => format!("{:7.3}s tone", t(at)),
         Heard::Ac { at } => format!("{:7.3}s AC", t(at)),
         Heard::Sh { at } => format!("{:7.3}s Sh", t(at)),
         Heard::Reversal { at } => format!("{:7.3}s Sh -> S-bar-h", t(at)),
-        Heard::Pph { reading, began, ended } => {
+        Heard::Pph {
+            reading,
+            began,
+            ended,
+        } => {
             format!("{:7.3}s PPh, {reading:?}, to {:.3}s", t(began), t(ended))
         }
         Heard::Trained { on, snr_db } => format!("        trained on {on:?}, {snr_db:.1} dB"),
@@ -101,7 +107,11 @@ fn read_a_super_g3_capture() {
     let wav = line::wav::read(&path).expect("could not read the recording");
     let fs = f64::from(wav.sample_rate);
     let sent_is_call = std::env::var("SUPERG3_SENT_IS_CALL").map_or(true, |v| v != "0");
-    let (sent, arrived) = if sent_is_call { (Side::Call, Side::Answer) } else { (Side::Answer, Side::Call) };
+    let (sent, arrived) = if sent_is_call {
+        (Side::Call, Side::Answer)
+    } else {
+        (Side::Answer, Side::Call)
+    };
     println!("== what arrived: the {arrived:?} modem");
     read_direction(&wav.channel(0), fs, arrived);
     println!("== what was sent: the {sent:?} modem");
@@ -142,13 +152,21 @@ impl Deframer {
             if data.len() >= 32 && data.len().is_multiple_of(8) {
                 let octets: Vec<u8> = data
                     .chunks(8)
-                    .map(|c| c.iter().enumerate().fold(0u8, |o, (i, &b)| o | (u8::from(b) << i)))
+                    .map(|c| {
+                        c.iter()
+                            .enumerate()
+                            .fold(0u8, |o, (i, &b)| o | (u8::from(b) << i))
+                    })
                     .collect();
                 let mut crc = 0xffffu16;
                 for &o in &octets {
                     crc ^= u16::from(o);
                     for _ in 0..8 {
-                        crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
+                        crc = if crc & 1 != 0 {
+                            (crc >> 1) ^ 0x8408
+                        } else {
+                            crc >> 1
+                        };
                     }
                 }
                 return Some((octets, crc == 0xf0b8));
@@ -197,7 +215,11 @@ fn every_frame_of_a_super_g3_capture() {
     let wav = line::wav::read(&path).expect("could not read the recording");
     let fs = f64::from(wav.sample_rate);
     let sent_is_call = std::env::var("SUPERG3_SENT_IS_CALL").map_or(true, |v| v != "0");
-    let (sent, arrived) = if sent_is_call { (Side::Call, Side::Answer) } else { (Side::Answer, Side::Call) };
+    let (sent, arrived) = if sent_is_call {
+        (Side::Call, Side::Answer)
+    } else {
+        (Side::Answer, Side::Call)
+    };
     println!("== what arrived: the {arrived:?} modem");
     raw_frames(&wav.channel(0), fs, arrived);
     println!("== what was sent: the {sent:?} modem");

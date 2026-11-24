@@ -93,7 +93,10 @@ impl Speedometer {
     /// Seconds left of a `total`-byte file at the recent rate, or the
     /// average's where there is no recent one.
     pub fn remaining(&self, total: u64) -> Option<f64> {
-        let rate = self.recent().or_else(|| self.average()).filter(|r| *r > 0.0)?;
+        let rate = self
+            .recent()
+            .or_else(|| self.average())
+            .filter(|r| *r > 0.0)?;
         Some(total.saturating_sub(self.furthest) as f64 / rate)
     }
 }
@@ -112,7 +115,11 @@ pub fn bytes(n: f64) -> String {
 /// Seconds as minutes and seconds, or hours when it comes to that.
 pub fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0).round() as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +181,10 @@ mod tests {
     fn nothing_is_said_before_there_is_anything_to_say() {
         let mut meter = Speedometer::new();
         meter.update(0.0, 0);
-        assert_eq!((meter.average(), meter.recent(), meter.remaining(1000)), (None, None, None));
+        assert_eq!(
+            (meter.average(), meter.recent(), meter.remaining(1000)),
+            (None, None, None)
+        );
         meter.update(0.1, 50);
         assert_eq!(meter.average(), None);
     }

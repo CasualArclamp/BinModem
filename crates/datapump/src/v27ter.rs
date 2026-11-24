@@ -590,8 +590,8 @@ mod tests {
         let mut out = Vec::new();
         // Long enough for the training, the data, the turn-off and the delay
         // through both filters.
-        let samples = (FS * 3.0) as usize
-            + (data.len() * 8) * (FS / rate.bits_per_second() as f64) as usize;
+        let samples =
+            (FS * 3.0) as usize + (data.len() * 8) * (FS / rate.bits_per_second() as f64) as usize;
         for _ in 0..samples {
             if tx.trained() && tx.pending_bits() == 0 {
                 tx.stop();
@@ -620,7 +620,6 @@ mod tests {
         }
         bits
     }
-
 
     #[test]
     fn the_training_sequence_is_the_length_table_3_gives() {
@@ -816,10 +815,16 @@ mod tests {
         );
     }
 
-
     /// One burst from a transmitter `hz` off, into a receiver started `skew`
     /// samples early, down a line `scale` times as loud.
-    fn survives(rate: Rate, training: Training, echo: bool, hz: f64, skew: usize, scale: f64) -> bool {
+    fn survives(
+        rate: Rate,
+        training: Training,
+        echo: bool,
+        hz: f64,
+        skew: usize,
+        scale: f64,
+    ) -> bool {
         let data: Vec<u8> = (0..120u32).map(|i| (i * 37 + 11) as u8).collect();
         let mut tx = Transmitter::new(FS);
         tx.nco = Nco::new(CARRIER + hz, FS);
@@ -849,7 +854,11 @@ mod tests {
         // seven hertz defeated a loop that steered by its own decisions in
         // every one of forty tries.
         for rate in [Rate::R4800, Rate::R2400] {
-            for (training, echo) in [(Training::Long, false), (Training::Short, false), (Training::Long, true)] {
+            for (training, echo) in [
+                (Training::Long, false),
+                (Training::Short, false),
+                (Training::Long, true),
+            ] {
                 for (hz, skew) in [(0.0, 0), (7.0, 5), (-7.0, 7)] {
                     for scale in [1.0, 0.0316] {
                         assert!(
@@ -868,7 +877,11 @@ mod tests {
     fn the_carrier_is_found_wherever_it_starts_every_way() {
         let mut failed = Vec::new();
         for rate in [Rate::R4800, Rate::R2400] {
-            for (training, echo) in [(Training::Long, false), (Training::Short, false), (Training::Long, true)] {
+            for (training, echo) in [
+                (Training::Long, false),
+                (Training::Short, false),
+                (Training::Long, true),
+            ] {
                 for hz in [0.0, 3.0, -3.0, 7.0, -7.0] {
                     for skew in 0..10 {
                         for scale in [1.0, 0.0316] {

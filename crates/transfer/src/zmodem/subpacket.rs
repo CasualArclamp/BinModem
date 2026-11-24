@@ -10,9 +10,9 @@
 //! is checked, so a line hit that turns one kind of ending into another does
 //! not pass.
 
+use super::ZDLE;
 use super::crc::{Crc16, Crc32};
 use super::escape;
-use super::ZDLE;
 
 /// How a subpacket ends, and what the sender expects to happen next.
 ///
@@ -270,7 +270,10 @@ mod tests {
         // should not have is a transfer that hangs.
         let data = b"whatever".to_vec();
         let mut bytes = encode(&data, Ending::Go, false, 0);
-        let at = bytes.iter().rposition(|&b| b == Ending::Go.to_byte()).expect("an ending");
+        let at = bytes
+            .iter()
+            .rposition(|&b| b == Ending::Go.to_byte())
+            .expect("an ending");
         bytes[at] = Ending::Wait.to_byte();
         assert_eq!(decode(&bytes, false), Err(SubpacketError::BadCrc));
     }
@@ -284,7 +287,10 @@ mod tests {
                 let mut bad = bytes.clone();
                 bad[i] ^= 0x01;
                 if let Ok((got, _)) = decode(&bad, wide) {
-                    assert_ne!(got.data, data, "a flipped bit at {i} passed as the same data");
+                    assert_ne!(
+                        got.data, data,
+                        "a flipped bit at {i} passed as the same data"
+                    );
                 }
             }
         }

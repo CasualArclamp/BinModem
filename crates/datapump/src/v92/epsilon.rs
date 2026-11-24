@@ -206,7 +206,10 @@ mod tests {
             let lag = lag(window).unwrap_or_else(|| panic!("no phase at {delay}"));
             let want = delay.rem_euclid(1.0);
             let error = ((lag - want + 0.5).rem_euclid(1.0) - 0.5).abs();
-            assert!(error < 0.03, "delay {delay}: lag {lag:.3} (error {error:.3})");
+            assert!(
+                error < 0.03,
+                "delay {delay}: lag {lag:.3} (error {error:.3})"
+            );
         }
     }
 
@@ -228,7 +231,10 @@ mod tests {
             let epsilon = f64::from(before_half(lag(&line[48..48 + 96]).unwrap())) / 65536.0;
             let rest = (d + step * (0.5 + epsilon)).rem_euclid(1.0);
             let error = (rest + 0.5).rem_euclid(1.0) - 0.5;
-            assert!(error.abs() < 0.03, "lag {d}: epsilon {epsilon:.3} leaves {error:.3}");
+            assert!(
+                error.abs() < 0.03,
+                "lag {d}: epsilon {epsilon:.3} leaves {error:.3}"
+            );
         }
         // And the same read after the half symbol -- the run the digital modem
         // actually measures -- asks for the same thing.
@@ -240,7 +246,10 @@ mod tests {
             let after = f64::from(after_half(lag(&line[48..48 + 96]).unwrap())) / 65536.0;
             let rest = (d + step * 0.5 + step * after).rem_euclid(1.0);
             let error = (rest + 0.5).rem_euclid(1.0) - 0.5;
-            assert!(error.abs() < 0.03, "lag {d}: epsilon {after:.3} leaves {error:.3}");
+            assert!(
+                error.abs() < 0.03,
+                "lag {d}: epsilon {after:.3} leaves {error:.3}"
+            );
         }
     }
 
@@ -253,7 +262,10 @@ mod tests {
         let line = delayed(&source, 0.3);
         let a = lag(&line[24..24 + 96]).unwrap();
         let b = lag(&line[90..90 + 96]).unwrap();
-        assert!(((a - b + 0.5).rem_euclid(1.0) - 0.5).abs() < 0.01, "{a} against {b}");
+        assert!(
+            ((a - b + 0.5).rem_euclid(1.0) - 0.5).abs() < 0.01,
+            "{a} against {b}"
+        );
     }
 
     /// Anything that is not Su has no fundamental to be measured on. A
@@ -265,7 +277,11 @@ mod tests {
         let mut bits = Vec::with_capacity(96);
         for _ in 0..96 {
             state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            bits.push(if state & 0x8000 != 0 { su_level() } else { -su_level() });
+            bits.push(if state & 0x8000 != 0 {
+                su_level()
+            } else {
+                -su_level()
+            });
         }
         assert_eq!(lag(&bits), None);
         assert_eq!(measure(&bits), None);
@@ -277,7 +293,10 @@ mod tests {
         for fraction in [0.0, 0.25, 0.5, 0.75, 0.999] {
             let field = to_field(fraction);
             let back = f64::from(field) / f64::from(u16::MAX);
-            assert!((back - fraction).abs() < 1.0 / 1024.0, "{fraction} -> {field:#06x} -> {back}");
+            assert!(
+                (back - fraction).abs() < 1.0 / 1024.0,
+                "{fraction} -> {field:#06x} -> {back}"
+            );
         }
         assert_eq!(to_field(0.5), 0x8000);
         assert_eq!(to_field(0.25), 0x4000);
@@ -289,7 +308,11 @@ mod tests {
     #[test]
     fn the_run_before_the_half_symbol_agrees_with_the_one_after_it() {
         for lag in [0.0, 0.2, 0.5, 0.8] {
-            assert_eq!(before_half(lag), after_half((lag + 0.5).rem_euclid(1.0)), "lag {lag}");
+            assert_eq!(
+                before_half(lag),
+                after_half((lag + 0.5).rem_euclid(1.0)),
+                "lag {lag}"
+            );
         }
     }
 }

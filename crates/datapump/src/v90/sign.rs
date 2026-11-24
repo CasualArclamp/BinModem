@@ -275,7 +275,11 @@ pub enum Rule {
 impl Rule {
     /// The two rules allowed from a state (Figure 2).
     pub fn allowed(state: bool) -> [Self; 2] {
-        if state { [Self::C, Self::D] } else { [Self::A, Self::B] }
+        if state {
+            [Self::C, Self::D]
+        } else {
+            [Self::A, Self::B]
+        }
     }
 
     /// The state after this rule: B and D arrive at state 1, A and C at 0.
@@ -400,7 +404,10 @@ impl Shaper {
         let width = self.redundancy.frames().1;
         t.into_iter()
             .enumerate()
-            .map(|(j, t)| ShapingFrame { magnitudes: levels[j * width..(j + 1) * width].to_vec(), t })
+            .map(|(j, t)| ShapingFrame {
+                magnitudes: levels[j * width..(j + 1) * width].to_vec(),
+                t,
+            })
             .collect()
     }
 
@@ -437,7 +444,11 @@ impl Shaper {
 
     /// Send `frame` with `rule`, whatever the metric says: for a test.
     pub fn apply(&mut self, frame: &ShapingFrame, rule: Rule) -> Vec<bool> {
-        debug_assert!(Rule::allowed(self.state).contains(&rule), "{rule:?} from state {}", self.state);
+        debug_assert!(
+            Rule::allowed(self.state).contains(&rule),
+            "{rule:?} from state {}",
+            self.state
+        );
         self.state = rule.next();
         frame
             .magnitudes
@@ -482,7 +493,10 @@ pub struct SignDecoder {
 
 impl SignDecoder {
     pub fn new(redundancy: Redundancy) -> Self {
-        Self { redundancy, ..Self::default() }
+        Self {
+            redundancy,
+            ..Self::default()
+        }
     }
 
     /// The S sign bits a data frame's six received signs carry.
@@ -515,7 +529,11 @@ impl SignDecoder {
             }
             // The last odd bit of this frame is what the next frame's first
             // odd bit was chained to.
-            self.last_odd = p[if width.is_multiple_of(2) { width - 1 } else { width - 2 }];
+            self.last_odd = p[if width.is_multiple_of(2) {
+                width - 1
+            } else {
+                width - 2
+            }];
         }
         out
     }
@@ -528,7 +546,12 @@ mod tests {
     /// 5.4.1: "S + Sr = 6", and Table 3's frames tile the data frame exactly.
     #[test]
     fn the_shaping_frames_fill_the_data_frame() {
-        for sr in [Redundancy::None, Redundancy::One, Redundancy::Two, Redundancy::Three] {
+        for sr in [
+            Redundancy::None,
+            Redundancy::One,
+            Redundancy::Two,
+            Redundancy::Three,
+        ] {
             assert_eq!(sr.spent() + sr.data_bits(), INTERVALS);
             let (count, width) = sr.frames();
             if sr != Redundancy::None {
@@ -554,7 +577,10 @@ mod tests {
         let out = d.encode([true, false, false, false, false, false]);
         assert_eq!(out, [true; 6]);
         let next = d.encode([false; 6]);
-        assert_eq!(next, [true; 6], "the chain did not carry into the next frame");
+        assert_eq!(
+            next, [true; 6],
+            "the chain did not carry into the next frame"
+        );
     }
 
     /// Every frame comes back, including across the frame boundary.
@@ -582,7 +608,10 @@ mod tests {
         // Sr = 2: two frames of three, the second starting again with zero.
         let s = [true, false, true, true];
         let frames = parse_to_frames(Redundancy::Two, &s);
-        assert_eq!(frames, vec![vec![false, true, false], vec![false, true, true]]);
+        assert_eq!(
+            frames,
+            vec![vec![false, true, false], vec![false, true, true]]
+        );
 
         // Sr = 3: three frames of two.
         let s = [true, false, true];
@@ -614,10 +643,7 @@ mod tests {
         let mut chain = OddChain::new();
         let coded = chain.encode(&[vec![false, true], vec![false, true], vec![false, true]]);
         // 1, then 1^1 = 0, then 0^1 = 1.
-        assert_eq!(
-            [coded[0][1], coded[1][1], coded[2][1]],
-            [true, false, true]
-        );
+        assert_eq!([coded[0][1], coded[1][1], coded[2][1]], [true, false, true]);
     }
 
     /// Both chains undo themselves, which is what a receiver relies on.
@@ -726,7 +752,8 @@ mod tests {
             let mut decoder = SignDecoder::new(sr);
             let mut seed = 0x1234_5678u64;
             let mut out = Vec::new();
-            let mut queue: std::collections::VecDeque<ShapingFrame> = std::collections::VecDeque::new();
+            let mut queue: std::collections::VecDeque<ShapingFrame> =
+                std::collections::VecDeque::new();
             let mut sent: Vec<Vec<bool>> = Vec::new();
             let mut decoded: Vec<Vec<bool>> = Vec::new();
             for _ in 0..3000 {
@@ -755,7 +782,11 @@ mod tests {
                 assert_eq!(d, s);
             }
             let mean = out.iter().sum::<f64>() / out.len() as f64;
-            let low: f64 = out.windows(8).map(|w| w.iter().sum::<f64>().powi(2)).sum::<f64>() / out.len() as f64;
+            let low: f64 = out
+                .windows(8)
+                .map(|w| w.iter().sum::<f64>().powi(2))
+                .sum::<f64>()
+                / out.len() as f64;
             let power: f64 = out.iter().map(|x| x * x).sum::<f64>() / out.len() as f64;
             let _ = mean;
             low / power / 8.0
@@ -764,8 +795,13 @@ mod tests {
             let flat = dc_share(sr, 0, false);
             let shaped = dc_share(sr, 0, true);
             let deeper = dc_share(sr, 2, true);
-            println!("{sr:?}: low-band share {flat:.3} unshaped, {shaped:.3} shaped, {deeper:.3} with look-ahead 2");
-            assert!(shaped < 0.85 * flat, "{sr:?} did not shape: {shaped:.3} against {flat:.3}");
+            println!(
+                "{sr:?}: low-band share {flat:.3} unshaped, {shaped:.3} shaped, {deeper:.3} with look-ahead 2"
+            );
+            assert!(
+                shaped < 0.85 * flat,
+                "{sr:?} did not shape: {shaped:.3} against {flat:.3}"
+            );
             assert!(deeper <= shaped + 0.01, "{sr:?}: look-ahead made it worse");
         }
     }

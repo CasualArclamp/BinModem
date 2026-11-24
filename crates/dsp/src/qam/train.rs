@@ -90,8 +90,16 @@ impl Training {
         Self {
             targets,
             start,
-            first: Window { align: (16, 256), solve: (16, 384), search: SEARCH },
-            retry: Some(Window { align: (320, 512), solve: (320, 512), search: WIDE_SEARCH }),
+            first: Window {
+                align: (16, 256),
+                solve: (16, 384),
+                search: SEARCH,
+            },
+            retry: Some(Window {
+                align: (320, 512),
+                solve: (320, 512),
+                search: WIDE_SEARCH,
+            }),
             turn: None,
             drift: None,
             accept_db: 12.0,
@@ -115,7 +123,9 @@ impl Rows {
     }
 
     fn at(&self, index: u64) -> Option<Complex> {
-        self.halves.get(index.checked_sub(self.first)? as usize).copied()
+        self.halves
+            .get(index.checked_sub(self.first)? as usize)
+            .copied()
     }
 }
 
@@ -165,22 +175,34 @@ impl Core {
     /// Train on `training`, once enough of it has come.
     pub fn train(&mut self, training: Training) {
         self.slicer = training.slicer.clone();
-        self.mode = Mode::Training(Box::new(Collecting { training, second: false }));
+        self.mode = Mode::Training(Box::new(Collecting {
+            training,
+            second: false,
+        }));
         self.pending = None;
     }
 
     /// As `v34/receiver.rs:741-783`, less V.34's `reacquire`.
     pub(super) fn finish_training(&mut self) {
-        let Mode::Training(collecting) = std::mem::replace(&mut self.mode, Mode::Idle) else { return };
+        let Mode::Training(collecting) = std::mem::replace(&mut self.mode, Mode::Idle) else {
+            return;
+        };
         let Collecting { training, second } = *collecting;
-        let window = if second { training.retry.unwrap_or(training.first) } else { training.first };
+        let window = if second {
+            training.retry.unwrap_or(training.first)
+        } else {
+            training.first
+        };
         let solution = self.solve_known(&training, window);
         let enough = |s: &Solution| db(s.mse) >= training.accept_db;
         if !second && training.retry.is_some() && solution.as_ref().is_none_or(|s| !enough(s)) {
             // Nothing fitted where S-bar said. A slip in the middle of the
             // window spoils a fit that way; so try again further in,
             // searching wide for where it went.
-            self.mode = Mode::Training(Box::new(Collecting { training, second: true }));
+            self.mode = Mode::Training(Box::new(Collecting {
+                training,
+                second: true,
+            }));
             return;
         }
         if training.fallback && self.ever_trained && solution.as_ref().is_none_or(|s| !enough(s)) {
@@ -208,7 +230,10 @@ impl Core {
             // The taps were solved on a grid that follows the far clock, so
             // everything from the sequence's start on is read again on it,
             // and the timing loop starts from its drift.
-            self.front.regrid(training.start.max(self.front.first), self.front.half * (1.0 + drift));
+            self.front.regrid(
+                training.start.max(self.front.first),
+                self.front.half * (1.0 + drift),
+            );
             self.front.drift = drift;
         }
         self.ever_trained = true;
@@ -225,7 +250,10 @@ impl Core {
         }
         self.mode = Mode::Tracking;
         let via = if second { Via::Retry } else { Via::First };
-        self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, via });
+        self.heard.push_back(Heard::Trained {
+            snr_db: self.trained_snr,
+            via,
+        });
     }
 
     /// The equaliser solved for from the known sequence
@@ -240,9 +268,11 @@ impl Core {
         let rows = self.training_rows(training, window);
         // The targets turned as the carrier is known to turn, if it is.
         let known: Vec<Complex> = match training.turn {
-            Some(turn) => {
-                training.targets[..length].iter().enumerate().map(|(k, t)| *t * Complex::from_polar(1.0, turn * k as f64)).collect()
-            }
+            Some(turn) => training.targets[..length]
+                .iter()
+                .enumerate()
+                .map(|(k, t)| *t * Complex::from_polar(1.0, turn * k as f64))
+                .collect(),
             None => training.targets[..length].to_vec(),
         };
         let deltas: Vec<i64> = if window.search > PRESCORED_BEYOND {
@@ -269,11 +299,17 @@ impl Core {
         // Each alignment either side of where the sequence was said to be.
         let mut fits: Vec<(f64, i64, Vec<Complex>)> = Vec::new();
         for delta in deltas {
-            let Some(origin) = start.checked_add_signed(delta) else { continue };
-            let refs: Option<Vec<&[Complex]>> = (search_from..search_to).map(|k| rows.row(origin + 2 * k as u64)).collect();
+            let Some(origin) = start.checked_add_signed(delta) else {
+                continue;
+            };
+            let refs: Option<Vec<&[Complex]>> = (search_from..search_to)
+                .map(|k| rows.row(origin + 2 * k as u64))
+                .collect();
             let Some(refs) = refs else { continue };
             let wanted = &known[search_from..search_to];
-            let Some(taps) = least_squares(&refs, wanted, ridge(&refs)) else { continue };
+            let Some(taps) = least_squares(&refs, wanted, ridge(&refs)) else {
+                continue;
+            };
             let mse = residual(&refs, wanted, &taps);
             fits.push((mse, delta, taps));
         }
@@ -301,10 +337,14 @@ impl Core {
         // How fast the constellation turns, from the rough fit's residual
         // phase early and late in its window: all of the turn, or what is
         // left of it once the known turn is out.
-        let refs: Vec<&[Complex]> = (search_from..search_to).filter_map(|k| rows.row(origin + 2 * k as u64)).collect();
+        let refs: Vec<&[Complex]> = (search_from..search_to)
+            .filter_map(|k| rows.row(origin + 2 * k as u64))
+            .collect();
         let middle = refs.len() / 2;
         let lean = |range: std::ops::Range<usize>| {
-            range.fold(Complex::ZERO, |sum, i| sum + apply(&taps, refs[i]) * known[search_from + i].conj())
+            range.fold(Complex::ZERO, |sum, i| {
+                sum + apply(&taps, refs[i]) * known[search_from + i].conj()
+            })
         };
         let (early, late) = (lean(0..middle), lean(middle..refs.len()));
         let left = (late * early.conj()).arg() / middle.max(1) as f64;
@@ -314,13 +354,23 @@ impl Core {
         };
         // The whole window, with the turn put into the targets for the
         // equaliser to follow and the carrier loop to take back out.
-        let refs: Option<Vec<&[Complex]>> = (from..to).map(|k| rows.row(origin + 2 * k as u64)).collect();
+        let refs: Option<Vec<&[Complex]>> = (from..to)
+            .map(|k| rows.row(origin + 2 * k as u64))
+            .collect();
         let refs = refs?;
-        let turned: Vec<Complex> =
-            (from..to).map(|k| training.targets[k] * Complex::from_polar(1.0, turn * k as f64)).collect();
+        let turned: Vec<Complex> = (from..to)
+            .map(|k| training.targets[k] * Complex::from_polar(1.0, turn * k as f64))
+            .collect();
         let taps = least_squares(&refs, &turned, ridge(&refs))?;
         let mse = residual(&refs, &turned, &taps);
-        Some(Solution { taps, turn, rotation: turn * to as f64, origin, end: to, mse })
+        Some(Solution {
+            taps,
+            turn,
+            rotation: turn * to as f64,
+            origin,
+            end: to,
+            mse,
+        })
     }
 
     /// Every half-symbol sample a try at `window` can read: as they were
@@ -329,17 +379,25 @@ impl Core {
     fn training_rows(&self, training: &Training, window: Window) -> Rows {
         let reach = window.search.max(0) as u64 + REACH as u64 + 1;
         let first = training.start.saturating_sub(reach).max(self.front.first);
-        let last = (training.start + 2 * window.solve.1.max(window.align.1) as u64 + reach).min(self.front.made);
+        let last = (training.start + 2 * window.solve.1.max(window.align.1) as u64 + reach)
+            .min(self.front.made);
         let halves = match training.drift {
             None => {
-                let (a, b) = ((first - self.front.first) as usize, (last.max(first) - self.front.first) as usize);
+                let (a, b) = (
+                    (first - self.front.first) as usize,
+                    (last.max(first) - self.front.first) as usize,
+                );
                 self.front.halves.range(a..b).copied().collect()
             }
             Some(drift) => {
                 let step = self.front.half * (1.0 + drift);
                 let anchor = training.start.max(self.front.first);
                 (first..last)
-                    .map_while(|h| self.front.regridded(anchor, step, h).and_then(|time| self.front.interpolate(time)))
+                    .map_while(|h| {
+                        self.front
+                            .regridded(anchor, step, h)
+                            .and_then(|time| self.front.interpolate(time))
+                    })
                     .collect()
             }
         };
@@ -354,7 +412,11 @@ impl Core {
         self.next_symbol = self.front.made.saturating_sub(REACH as u64 + 2);
         self.lost = None;
         let dense = self.slicer.density() == super::Density::Dense;
-        let found = if dense { self.search_dense(self.turn) } else { self.search_sparse(self.turn) };
+        let found = if dense {
+            self.search_dense(self.turn)
+        } else {
+            self.search_sparse(self.turn)
+        };
         let Some(found) = found else { return false };
         if found.mse > self.slicer.found_level(self.settled) || found.mse > 0.6 * found.median {
             return false;
@@ -365,18 +427,29 @@ impl Core {
         self.residual = found.mse.sqrt();
         self.trained_snr = db(found.mse);
         self.mode = Mode::Tracking;
-        self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, via: Via::Fallback });
+        self.heard.push_back(Heard::Trained {
+            snr_db: self.trained_snr,
+            via: Via::Fallback,
+        });
         true
     }
 }
 
 fn residual(rows: &[&[Complex]], targets: &[Complex], taps: &[Complex]) -> f64 {
-    rows.iter().zip(targets).map(|(row, &d)| (apply(taps, row) - d).norm_sqr()).sum::<f64>() / rows.len().max(1) as f64
+    rows.iter()
+        .zip(targets)
+        .map(|(row, &d)| (apply(taps, row) - d).norm_sqr())
+        .sum::<f64>()
+        / rows.len().max(1) as f64
 }
 
 /// A ridge a thousandth of the signal's own weight on the diagonal
 /// (`v34/receiver.rs:1280-1283`).
 fn ridge(rows: &[&[Complex]]) -> f64 {
-    let energy: f64 = rows.iter().flat_map(|row| row.iter()).map(|x| x.norm_sqr()).sum();
+    let energy: f64 = rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(|x| x.norm_sqr())
+        .sum();
     1e-3 * energy / (2 * REACH + 1) as f64
 }

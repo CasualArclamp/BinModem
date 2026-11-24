@@ -183,7 +183,11 @@ impl Default for Modulation {
         // modulation means selected" -- so this is the widest range there is,
         // and `fit` turns it into the chosen modulation's own the moment the
         // window opens.
-        Self { automode: true, min_rate: 0, max_rate: 0 }
+        Self {
+            automode: true,
+            min_rate: 0,
+            max_rate: 0,
+        }
     }
 }
 
@@ -278,9 +282,14 @@ fn follow(
     if seen == Some(now) {
         return None;
     }
-    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier)?;
-    let modulation =
-        Modulation { automode: now.automode, min_rate: now.min_rate, max_rate: now.max_rate };
+    let index = ScopeApp::CARRIERS
+        .iter()
+        .position(|(name, _)| *name == now.carrier)?;
+    let modulation = Modulation {
+        automode: now.automode,
+        min_rate: now.min_rate,
+        max_rate: now.max_rate,
+    };
     (index != carrier || modulation != held).then_some((index, modulation))
 }
 
@@ -590,10 +599,15 @@ impl Calm {
         let share = 1.0 - (-dt / Self::SECONDS).exp();
         // A different spectrum altogether, another rate or another span, is
         // not averaged with the last one.
-        let fresh = self.spectrum_db.len() != f.spectrum_db.len() || self.hz_per_bin != f.hz_per_bin;
+        let fresh =
+            self.spectrum_db.len() != f.spectrum_db.len() || self.hz_per_bin != f.hz_per_bin;
         let follow = |was: &mut f32, now: f32, fresh: bool| {
             // Ten decibels at once is a change and not noise.
-            *was = if fresh || (now - *was).abs() > 10.0 { now } else { *was + (now - *was) * share };
+            *was = if fresh || (now - *was).abs() > 10.0 {
+                now
+            } else {
+                *was + (now - *was) * share
+            };
         };
         follow(&mut self.level_db, f.rx_level_db, fresh);
         if let Some(wave) = scopes::wave(&f.waveform) {
@@ -606,7 +620,11 @@ impl Calm {
             self.peak_hz = 0.0;
         } else {
             for (was, &now) in self.spectrum_db.iter_mut().zip(&f.spectrum_db) {
-                *was = if (now - *was).abs() > 20.0 { now } else { *was + (now - *was) * share };
+                *was = if (now - *was).abs() > 20.0 {
+                    now
+                } else {
+                    *was + (now - *was) * share
+                };
             }
         }
         let mut measured = scopes::measure(&self.spectrum_db, f.hz_per_bin, f.display_hz)?;
@@ -614,7 +632,11 @@ impl Calm {
         // half above it.
         let held = (self.peak_hz / f.hz_per_bin).round() as usize;
         match self.spectrum_db.get(held) {
-            Some(&db) if self.peak_hz > 0.0 && db > measured.peak_db - 1.5 && self.peak_hz <= f.display_hz => {
+            Some(&db)
+                if self.peak_hz > 0.0
+                    && db > measured.peak_db - 1.5
+                    && self.peak_hz <= f.display_hz =>
+            {
                 measured.peak_hz = self.peak_hz;
                 measured.peak_db = db;
             }
@@ -807,9 +829,7 @@ impl ScopeApp {
     /// of step, and all that is left is keeping the choice inside the list.
     fn refresh_account_names(&mut self) {
         self.sip_accounts = self.sip_edit.iter().map(|a| a.name.clone()).collect();
-        self.sip_chosen = self
-            .sip_chosen
-            .min(self.sip_edit.len().saturating_sub(1));
+        self.sip_chosen = self.sip_chosen.min(self.sip_edit.len().saturating_sub(1));
     }
 
     /// Carry out what the AT layer asked for.
@@ -824,10 +844,13 @@ impl ScopeApp {
                     self.control.restart.store(true, Ordering::Relaxed);
                     self.control.running.store(true, Ordering::Relaxed);
                     self.console.connect("300");
-                    self.console
-                        .term
-                        .feed_bytes(format!("[replaying capture for {number}]
-").as_bytes());
+                    self.console.term.feed_bytes(
+                        format!(
+                            "[replaying capture for {number}]
+"
+                        )
+                        .as_bytes(),
+                    );
                 }
                 at::Action::Answer => {
                     self.control.restart.store(true, Ordering::Relaxed);
@@ -970,7 +993,10 @@ impl ScopeApp {
             "V90",
             "V.90 - up to 56000 from an ISP's server and 33600 back. A far end that is no V.90 server gets V.34",
         ),
-        ("V21", "V.21 - 300 bit/s, Bell 103's counterpart outside North America"),
+        (
+            "V21",
+            "V.21 - 300 bit/s, Bell 103's counterpart outside North America",
+        ),
         (
             "V92",
             "V.92 - V.90's 56000 with V.92's own start-up. A server that is no V.92 server gets V.90",
@@ -979,8 +1005,14 @@ impl ScopeApp {
             "VARC",
             "V.ARC - our own, for a sound card wired to another of these by a stereo lead and not for a telephone line. Hundreds of carriers, each loaded for what the lead measures",
         ),
-        ("VARCQ", "V.ARC/QAM - the same lead with one carrier at 16000 baud"),
-        ("VARCP", "V.ARC/PCM - the same lead with levels at baseband, 16000 baud"),
+        (
+            "VARCQ",
+            "V.ARC/QAM - the same lead with one carrier at 16000 baud",
+        ),
+        (
+            "VARCP",
+            "V.ARC/PCM - the same lead with levels at baseband, 16000 baud",
+        ),
         (
             "VARC2W",
             "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
@@ -989,7 +1021,10 @@ impl ScopeApp {
             "VARCQ2W",
             "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
         ),
-        ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
+        (
+            "VARCP2W",
+            "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone",
+        ),
         (
             "B212",
             "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",
@@ -1019,7 +1054,9 @@ impl ScopeApp {
 
     /// Choosing a board, and connecting to it.
     fn net_controls(&mut self, ui: &mut egui::Ui) {
-        let Source::Telnet(session) = &self.source else { return };
+        let Source::Telnet(session) = &self.source else {
+            return;
+        };
         let session = Arc::clone(session);
         let state = session.state();
         let dim = Color32::from_rgb(140, 150, 165);
@@ -1036,9 +1073,8 @@ impl ScopeApp {
             // Enter connects, because a box you have just typed an address
             // into and then have to go and find a button for is a box that
             // gets typed into twice.
-            let entered = editable
-                && entry.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let entered =
+                editable && entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             egui::ComboBox::from_id_salt("boards")
                 .selected_text("...")
@@ -1055,9 +1091,7 @@ impl ScopeApp {
                 if ui.button("Disconnect").clicked() {
                     session.disconnect();
                 }
-            } else if (ui.button("Connect").clicked() || entered)
-                && !self.host.trim().is_empty()
-            {
+            } else if (ui.button("Connect").clicked() || entered) && !self.host.trim().is_empty() {
                 // A board draws its opening screen over whatever was there,
                 // so start it on a clean one rather than on the last one.
                 self.console.term.reset();
@@ -1088,7 +1122,11 @@ impl ScopeApp {
                 ui.label(flag(state.binary, "8-bit", "7-bit!"));
                 ui.label(flag(state.echo, "remote echo", "local echo"));
             } else if let Some(e) = &state.error {
-                ui.label(RichText::new(e).monospace().color(Color32::from_rgb(240, 120, 120)));
+                ui.label(
+                    RichText::new(e)
+                        .monospace()
+                        .color(Color32::from_rgb(240, 120, 120)),
+                );
             } else {
                 ui.label(RichText::new("not connected").monospace().color(dim));
             }
@@ -1118,7 +1156,9 @@ impl ScopeApp {
     /// things a terminal could not, and would drift from what the terminal
     /// sees the moment either changed.
     fn line_controls(&mut self, ui: &mut egui::Ui) {
-        let Source::Live(session) = &self.source else { return };
+        let Source::Live(session) = &self.source else {
+            return;
+        };
         let session = Arc::clone(session);
         let state = session.state();
 
@@ -1189,8 +1229,12 @@ impl ScopeApp {
         if state.open
             && self.line_was_open
             && let Some(now) = &state.selected
-            && let Some((carrier, modulation)) =
-                follow(self.selected_seen.as_ref(), now, self.carrier, self.modulation)
+            && let Some((carrier, modulation)) = follow(
+                self.selected_seen.as_ref(),
+                now,
+                self.carrier,
+                self.modulation,
+            )
         {
             self.carrier = carrier;
             self.modulation = modulation;
@@ -1203,7 +1247,7 @@ impl ScopeApp {
         // where both are dealt with: hiding it then would hide the way out.
         let show_setup = self.setup_open || !state.open || state.error.is_some();
         if show_setup {
-        ui.horizontal_wrapped(|ui| {
+            ui.horizontal_wrapped(|ui| {
             let dim = Color32::from_rgb(140, 150, 165);
             ui.label(RichText::new("line").monospace().color(dim));
 
@@ -1619,7 +1663,7 @@ impl ScopeApp {
             }
         });
 
-        self.monitor_row(ui);
+            self.monitor_row(ui);
         }
 
         ui.add_space(4.0);
@@ -1942,7 +1986,9 @@ impl ScopeApp {
             }
             _ => {}
         }
-        let Some((who, since)) = self.prompt.ringing() else { return };
+        let Some((who, since)) = self.prompt.ringing() else {
+            return;
+        };
         let who = who.to_owned();
         if let Some(ringer) = self.ringer.as_mut() {
             let mut ring = Vec::new();
@@ -1976,7 +2022,9 @@ impl ScopeApp {
             Choice::Fax if on_hook => {
                 self.fax.dialled.clear();
                 self.arm_fax(session);
-                session.type_bytes(crate::faxwin::Fax::commands(&crate::faxwin::Start::Answer).as_bytes());
+                session.type_bytes(
+                    crate::faxwin::Fax::commands(&crate::faxwin::Start::Answer).as_bytes(),
+                );
                 self.tab = Tab::Fax;
             }
             Choice::Fax => {
@@ -2028,12 +2076,16 @@ impl ScopeApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("waterfall").strong());
                     ui.label(
-                        RichText::new(format!("0 - {:.0} Hz · newest at the top", self.frame.display_hz))
-                            .small()
-                            .color(DIM),
+                        RichText::new(format!(
+                            "0 - {:.0} Hz · newest at the top",
+                            self.frame.display_hz
+                        ))
+                        .small()
+                        .color(DIM),
                     );
                 });
-                self.waterfall.paint(ui, WATERFALL, self.frame.modulation, self.row_secs);
+                self.waterfall
+                    .paint(ui, WATERFALL, self.frame.modulation, self.row_secs);
             });
             ui.separator();
             ui.vertical(|ui| {
@@ -2043,7 +2095,8 @@ impl ScopeApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_width(SIDE_W - 14.0);
-                        if let Some(start) = self.fax.side_panel(ui, on_hook, &mut self.dial_number) {
+                        if let Some(start) = self.fax.side_panel(ui, on_hook, &mut self.dial_number)
+                        {
                             self.fax_start = Some(start);
                         }
                     });
@@ -2491,8 +2544,7 @@ impl ScopeApp {
                 // Return dials, because a box somebody has just typed a
                 // number into and then has to go and find a button for is a
                 // box that gets typed into twice.
-                let entered =
-                    entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 ui.add_space(4.0);
                 for row in Self::KEYPAD {
@@ -2571,14 +2623,12 @@ impl ScopeApp {
                         session.hang_up();
                     }
                 } else {
-                    let ready = line.is_some()
-                        && !self.dial_number.trim().is_empty()
-                        && missing.is_empty();
+                    let ready =
+                        line.is_some() && !self.dial_number.trim().is_empty() && missing.is_empty();
                     // A greyed-out button that does not say why is a fault
                     // report with the fault left out.
                     let why_not = if line.is_none() {
-                        "There is no SIP line open. Press Connect, below"
-                            .to_owned()
+                        "There is no SIP line open. Press Connect, below".to_owned()
                     } else if !missing.is_empty() {
                         format!(
                             "{} still needs {}",
@@ -2672,7 +2722,7 @@ impl ScopeApp {
                         let why_not = match &account {
                             None => "There are no accounts. Open Credentials and add \
                                      one"
-                                .to_owned(),
+                            .to_owned(),
                             Some(name) => {
                                 format!("{name} still needs {}", missing.join(", "))
                             }
@@ -2695,9 +2745,7 @@ impl ScopeApp {
                             // it is on is this picker, so point it at the one
                             // the call is going out on.
                             self.chosen_line = 1;
-                            if let Some(i) =
-                                self.sip_edit.iter().position(|a| a.name == *name)
-                            {
+                            if let Some(i) = self.sip_edit.iter().position(|a| a.name == *name) {
                                 self.sip_chosen = i;
                             }
                         }
@@ -2797,23 +2845,20 @@ impl ScopeApp {
                         .clicked()
                     {
                         let gone = self.sip_edit.remove(self.sip_chosen);
-                        self.sip_chosen = self
-                            .sip_chosen
-                            .min(self.sip_edit.len().saturating_sub(1));
+                        self.sip_chosen =
+                            self.sip_chosen.min(self.sip_edit.len().saturating_sub(1));
                         // A line open on the account that has just gone is the
                         // case worth saying something about: nothing changes
                         // on the line now, and everything changes when the
                         // file is written, at which point the account it is
                         // running on has stopped existing.
-                        self.sip_note = line
-                            .filter(|p| p.account == gone.name)
-                            .map(|p| {
-                                Ok(format!(
-                                    "{} is out of the list; the line open on it goes \
+                        self.sip_note = line.filter(|p| p.account == gone.name).map(|p| {
+                            Ok(format!(
+                                "{} is out of the list; the line open on it goes \
                                      down when this is saved",
-                                    p.account
-                                ))
-                            });
+                                p.account
+                            ))
+                        });
                     }
                 });
 
@@ -2869,19 +2914,16 @@ impl ScopeApp {
                             Err(why) => Err(why),
                             Ok(()) => {
                                 self.refresh_account_names();
-                                let file = sip::Account::default_path()
-                                    .map_or_else(
-                                        || "the account file".to_owned(),
-                                        |p| p.display().to_string(),
-                                    );
+                                let file = sip::Account::default_path().map_or_else(
+                                    || "the account file".to_owned(),
+                                    |p| p.display().to_string(),
+                                );
                                 match line.map(|p| p.account.as_str()) {
                                     // The line is running on an account that
                                     // has just stopped existing. Leaving it up
                                     // would leave a call on credentials
                                     // nothing in the window shows any more.
-                                    Some(on)
-                                        if !self.sip_accounts.iter().any(|n| n == on) =>
-                                    {
+                                    Some(on) if !self.sip_accounts.iter().any(|n| n == on) => {
                                         session.close();
                                         Ok(format!(
                                             "written to {file}; the line was open on \
@@ -2916,9 +2958,7 @@ impl ScopeApp {
                         Ok(said) => (said, good),
                         Err(why) => (why, bad),
                     };
-                    ui.add(
-                        egui::Label::new(RichText::new(said).small().color(colour)).wrap(),
-                    );
+                    ui.add(egui::Label::new(RichText::new(said).small().color(colour)).wrap());
                 }
             });
         self.sip_open = open;
@@ -2935,75 +2975,141 @@ impl ScopeApp {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         let warn = Color32::from_rgb(240, 200, 120);
-        egui::CollapsingHeader::new("link and IP").id_salt("ppp link monitor").show(ui, |ui| {
-            egui::Grid::new("ppp link").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
-                let mut row = |k: &str, v: String, trouble: bool| {
-                    ui.label(RichText::new(k).monospace().small().color(dim));
-                    ui.label(RichText::new(v).monospace().small().color(if trouble { warn } else { bright }));
-                    ui.end_row();
-                };
-                let l = view.lcp;
-                row("MRU", format!("{} in, {} out", l.mru_in, l.mru_out), false);
-                row("char map", format!("{:08x} in, {:08x} out", l.accm_in, l.accm_out), false);
-                row(
-                    "fields",
-                    format!(
-                        "{}, {} protocol",
-                        if l.acfc { "no address or control" } else { "address and control" },
-                        if l.pfc { "short" } else { "full" }
-                    ),
-                    false,
-                );
-                if !view.headers.is_empty() {
-                    row("headers", view.headers.clone(), false);
-                }
-                let n = view.counters;
-                row("frames", format!("{} in, {} out, {} bad", n.frames_in, n.frames_out, n.bad_frames), n.bad_frames > 0);
-                row("datagrams", format!("{} in, {} out", n.datagrams_in, n.datagrams_out), false);
-                row("IP octets", format!("{} in, {} out", n.octets_in, n.octets_out), false);
-                row(
-                    "not taken",
-                    format!("{} dropped, {} too large to send", n.dropped_in, n.too_large),
-                    n.dropped_in > 0 || n.too_large > 0,
-                );
-                row("ICMP errors", n.problems.to_string(), n.problems > 0);
-                if let Some(c) = client {
-                    row("TCP MSS", format!("asks for {}, sends at most {}", c.mss.0, c.mss.1), false);
-                    row(
-                        "names",
-                        format!("{} looked up, {} not found", c.lookups, c.lookup_failures),
-                        c.lookup_failures > 0,
-                    );
-                    row("browser", format!("{} octets to it, {} from it", c.to_browsers, c.from_browsers), false);
-                }
+        egui::CollapsingHeader::new("link and IP")
+            .id_salt("ppp link monitor")
+            .show(ui, |ui| {
+                egui::Grid::new("ppp link")
+                    .num_columns(2)
+                    .spacing([10.0, 2.0])
+                    .show(ui, |ui| {
+                        let mut row = |k: &str, v: String, trouble: bool| {
+                            ui.label(RichText::new(k).monospace().small().color(dim));
+                            ui.label(RichText::new(v).monospace().small().color(if trouble {
+                                warn
+                            } else {
+                                bright
+                            }));
+                            ui.end_row();
+                        };
+                        let l = view.lcp;
+                        row("MRU", format!("{} in, {} out", l.mru_in, l.mru_out), false);
+                        row(
+                            "char map",
+                            format!("{:08x} in, {:08x} out", l.accm_in, l.accm_out),
+                            false,
+                        );
+                        row(
+                            "fields",
+                            format!(
+                                "{}, {} protocol",
+                                if l.acfc {
+                                    "no address or control"
+                                } else {
+                                    "address and control"
+                                },
+                                if l.pfc { "short" } else { "full" }
+                            ),
+                            false,
+                        );
+                        if !view.headers.is_empty() {
+                            row("headers", view.headers.clone(), false);
+                        }
+                        let n = view.counters;
+                        row(
+                            "frames",
+                            format!(
+                                "{} in, {} out, {} bad",
+                                n.frames_in, n.frames_out, n.bad_frames
+                            ),
+                            n.bad_frames > 0,
+                        );
+                        row(
+                            "datagrams",
+                            format!("{} in, {} out", n.datagrams_in, n.datagrams_out),
+                            false,
+                        );
+                        row(
+                            "IP octets",
+                            format!("{} in, {} out", n.octets_in, n.octets_out),
+                            false,
+                        );
+                        row(
+                            "not taken",
+                            format!(
+                                "{} dropped, {} too large to send",
+                                n.dropped_in, n.too_large
+                            ),
+                            n.dropped_in > 0 || n.too_large > 0,
+                        );
+                        row("ICMP errors", n.problems.to_string(), n.problems > 0);
+                        if let Some(c) = client {
+                            row(
+                                "TCP MSS",
+                                format!("asks for {}, sends at most {}", c.mss.0, c.mss.1),
+                                false,
+                            );
+                            row(
+                                "names",
+                                format!("{} looked up, {} not found", c.lookups, c.lookup_failures),
+                                c.lookup_failures > 0,
+                            );
+                            row(
+                                "browser",
+                                format!(
+                                    "{} octets to it, {} from it",
+                                    c.to_browsers, c.from_browsers
+                                ),
+                                false,
+                            );
+                        }
+                    });
             });
-        });
-        let Some(c) = client.filter(|c| !c.carried.is_empty()) else { return };
+        let Some(c) = client.filter(|c| !c.carried.is_empty()) else {
+            return;
+        };
         egui::CollapsingHeader::new(format!("connections ({})", c.carried.len()))
             .id_salt("ppp connections")
             .default_open(true)
             .show(ui, |ui| {
                 egui::ScrollArea::horizontal().show(ui, |ui| {
-                    egui::Grid::new("tcp connections").striped(true).num_columns(8).spacing([10.0, 2.0]).show(ui, |ui| {
-                        for heading in ["for", "to", "state", "rtt", "rto", "resent", "window", "out / in"] {
-                            ui.label(RichText::new(heading).small().color(dim));
-                        }
-                        ui.end_row();
-                        for t in &c.carried {
-                            let cell = |ui: &mut egui::Ui, text: String, colour: Color32| {
-                                ui.label(RichText::new(text).monospace().small().color(colour));
-                            };
-                            cell(ui, t.name.clone(), bright);
-                            cell(ui, t.address.clone(), dim);
-                            cell(ui, t.state.to_owned(), bright);
-                            cell(ui, if t.srtt_ms == 0 { "-".to_owned() } else { format!("{} ms", t.srtt_ms) }, dim);
-                            cell(ui, format!("{} ms", t.rto_ms), dim);
-                            cell(ui, t.resent.to_string(), if t.resent > 0 { warn } else { dim });
-                            cell(ui, format!("{} / {}", t.cwnd, t.send_mss), dim);
-                            cell(ui, format!("{} / {}", t.sent, t.received), bright);
+                    egui::Grid::new("tcp connections")
+                        .striped(true)
+                        .num_columns(8)
+                        .spacing([10.0, 2.0])
+                        .show(ui, |ui| {
+                            for heading in [
+                                "for", "to", "state", "rtt", "rto", "resent", "window", "out / in",
+                            ] {
+                                ui.label(RichText::new(heading).small().color(dim));
+                            }
                             ui.end_row();
-                        }
-                    });
+                            for t in &c.carried {
+                                let cell = |ui: &mut egui::Ui, text: String, colour: Color32| {
+                                    ui.label(RichText::new(text).monospace().small().color(colour));
+                                };
+                                cell(ui, t.name.clone(), bright);
+                                cell(ui, t.address.clone(), dim);
+                                cell(ui, t.state.to_owned(), bright);
+                                cell(
+                                    ui,
+                                    if t.srtt_ms == 0 {
+                                        "-".to_owned()
+                                    } else {
+                                        format!("{} ms", t.srtt_ms)
+                                    },
+                                    dim,
+                                );
+                                cell(ui, format!("{} ms", t.rto_ms), dim);
+                                cell(
+                                    ui,
+                                    t.resent.to_string(),
+                                    if t.resent > 0 { warn } else { dim },
+                                );
+                                cell(ui, format!("{} / {}", t.cwnd, t.send_mss), dim);
+                                cell(ui, format!("{} / {}", t.sent, t.received), bright);
+                                ui.end_row();
+                            }
+                        });
                 });
             });
     }
@@ -3279,14 +3385,19 @@ impl ScopeApp {
         if let Some(coding) = loaded.text("easysip_coding") {
             self.easy_coding = live::easy_sip_coding(&live::easy_sip_name("x", 0, coding, false));
         }
-        self.remembered = self.settings().join("\n")
-            + &self.dialin.fingerprint()
-            + &self.line_fingerprint();
+        self.remembered =
+            self.settings().join("\n") + &self.dialin.fingerprint() + &self.line_fingerprint();
     }
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
+        format!(
+            "\u{1}{}\u{1}{}\u{1}{}",
+            self.sip_line.as_deref().unwrap_or(""),
+            self.easy_peer,
+            self.easy_port
+        ) + self.easy_coding
+            + if self.easy_upnp { "u" } else { "" }
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3307,9 +3418,8 @@ impl ScopeApp {
         {
             self.sip_line = session.state().sip.map(|progress| progress.account);
         }
-        let now = self.settings().join("\n")
-            + &self.dialin.fingerprint()
-            + &self.line_fingerprint();
+        let now =
+            self.settings().join("\n") + &self.dialin.fingerprint() + &self.line_fingerprint();
         if now != self.remembered {
             self.remembered = now;
             let mut r = to_remember(self.carrier, self.modulation, self.protection);
@@ -3340,7 +3450,9 @@ impl ScopeApp {
     /// wanted, and a line the thread chose for itself is a guess that a
     /// remembered account beats.
     fn restore_line(&mut self, session: &Arc<live::Session>, state: &live::LineState) {
-        let Some(name) = self.sip_restore.clone() else { return };
+        let Some(name) = self.sip_restore.clone() else {
+            return;
+        };
         // Once, whatever comes of it. A restore that found nothing to do is
         // not one to try again next frame, and the frame after that, for ever.
         self.sip_restore = None;
@@ -3393,9 +3505,17 @@ impl ScopeApp {
         out.push(format!("AT+A8E=,,,{}", u8::from(self.v8bis)));
         // Only for the modes it means anything to: under any other it is
         // put back to the modem's own choice.
-        let (baud, code, bits) = if self.single_carrier().is_some() { self.varc_asks } else { (0, 0, 0) };
+        let (baud, code, bits) = if self.single_carrier().is_some() {
+            self.varc_asks
+        } else {
+            (0, 0, 0)
+        };
         out.push(format!("AT+VARC={baud},{code},{bits}"));
-        let (mode, two_wire) = if self.v8bis { self.varc_bis } else { (0, false) };
+        let (mode, two_wire) = if self.v8bis {
+            self.varc_bis
+        } else {
+            (0, false)
+        };
         out.push(format!("AT+VARCBIS={mode},{}", u8::from(two_wire)));
         out.extend(self.protection.commands());
         out
@@ -3450,7 +3570,9 @@ impl ScopeApp {
                             {
                                 self.send_path = chosen.display().to_string();
                             }
-                            if ui.add_enabled(online, egui::Button::new("Send")).clicked() && !self.send_path.trim().is_empty() {
+                            if ui.add_enabled(online, egui::Button::new("Send")).clicked()
+                                && !self.send_path.trim().is_empty()
+                            {
                                 session.send_file(self.send_path.trim().into());
                             }
                             ui.end_row();
@@ -3505,7 +3627,11 @@ impl ScopeApp {
                             .color(bright),
                     );
                     if let Some(total) = t.total.filter(|n| *n > 0) {
-                        ui.label(RichText::new(speed::bytes(total as f64)).monospace().color(dim));
+                        ui.label(
+                            RichText::new(speed::bytes(total as f64))
+                                .monospace()
+                                .color(dim),
+                        );
                     }
                 });
                 ui.add_space(4.0);
@@ -3541,23 +3667,30 @@ impl ScopeApp {
                 // the whole file, which is what the transfer will come to.
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let big = |ui: &mut egui::Ui, label: &str, rate: Option<f64>| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(label).small().color(dim));
-                            ui.label(
-                                RichText::new(rate.map_or("-".to_owned(), |r| format!("{}/s", speed::bytes(r))))
+                    let big =
+                        |ui: &mut egui::Ui, label: &str, rate: Option<f64>| {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(label).small().color(dim));
+                                ui.label(
+                                    RichText::new(rate.map_or("-".to_owned(), |r| {
+                                        format!("{}/s", speed::bytes(r))
+                                    }))
                                     .monospace()
                                     .size(18.0)
                                     .color(bright),
-                            );
-                        });
-                    };
+                                );
+                            });
+                        };
                     big(ui, "now", if t.finished { None } else { t.recent });
                     ui.add_space(18.0);
                     big(ui, "average", t.average);
                     ui.add_space(18.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(if t.finished { "took" } else { "left" }).small().color(dim));
+                        ui.label(
+                            RichText::new(if t.finished { "took" } else { "left" })
+                                .small()
+                                .color(dim),
+                        );
                         let time = if t.finished {
                             speed::clock(t.elapsed)
                         } else {
@@ -3568,15 +3701,20 @@ impl ScopeApp {
                     // What share of the line's bits the file is getting: eight
                     // a byte, so async framing's ten and V.42's overhead show
                     // as less than all of it, and V.42bis as more.
-                    if let (Some(rate), Some(line)) = (t.recent.or(t.average), t.line_bps.filter(|l| *l > 0)) {
+                    if let (Some(rate), Some(line)) =
+                        (t.recent.or(t.average), t.line_bps.filter(|l| *l > 0))
+                    {
                         ui.add_space(18.0);
                         ui.vertical(|ui| {
                             ui.label(RichText::new(format!("of {line} bit/s")).small().color(dim));
                             ui.label(
-                                RichText::new(format!("{:.0}%", rate * 8.0 / f64::from(line) * 100.0))
-                                    .monospace()
-                                    .size(18.0)
-                                    .color(bright),
+                                RichText::new(format!(
+                                    "{:.0}%",
+                                    rate * 8.0 / f64::from(line) * 100.0
+                                ))
+                                .monospace()
+                                .size(18.0)
+                                .color(bright),
                             );
                         });
                     }
@@ -3608,17 +3746,15 @@ impl ScopeApp {
 
                 if !t.outcome.is_empty() {
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(&t.outcome)
-                            .monospace()
-                            .color(if t.finished && t.outcome == "done" {
-                                Color32::from_rgb(90, 220, 130)
-                            } else if t.finished {
-                                Color32::from_rgb(235, 100, 90)
-                            } else {
-                                dim
-                            }),
-                    );
+                    ui.label(RichText::new(&t.outcome).monospace().color(
+                        if t.finished && t.outcome == "done" {
+                            Color32::from_rgb(90, 220, 130)
+                        } else if t.finished {
+                            Color32::from_rgb(235, 100, 90)
+                        } else {
+                            dim
+                        },
+                    ));
                 }
                 if let Some(where_to) = &t.written_to {
                     ui.label(RichText::new(where_to).monospace().small().color(dim));
@@ -3671,12 +3807,11 @@ impl ScopeApp {
                                      once V.8 has settled it. Against a far end that does \
                                      not, the fallback below is what happens instead",
                                 );
-                            ui.radio_value(&mut p.request, 0, "none")
-                                .on_hover_text(
-                                    "Direct mode: the line carries start-stop characters \
+                            ui.radio_value(&mut p.request, 0, "none").on_hover_text(
+                                "Direct mode: the line carries start-stop characters \
                                      and nothing checks them. Which is how every modem \
                                      worked before 1989, and how Bell 103 still works here",
-                                );
+                            );
                         });
                         ui.end_row();
 
@@ -3689,12 +3824,11 @@ impl ScopeApp {
                                          a perfectly ordinary far end -- V.42 7.2.1 exists \
                                          to find that out rather than to fail on it",
                                     );
-                                ui.radio_value(&mut p.fallback, 2, "hang up")
-                                    .on_hover_text(
-                                        "Error control required; if not established, \
+                                ui.radio_value(&mut p.fallback, 2, "hang up").on_hover_text(
+                                    "Error control required; if not established, \
                                          disconnect. For a call whose whole point is that \
                                          what arrives is what was sent",
-                                    );
+                                );
                             });
                         });
                         ui.end_row();
@@ -3790,13 +3924,11 @@ impl ScopeApp {
                         });
                     }
                     if p.report_compression {
-                        shown.push_str(
-                            if p.wants_error_control() && p.compress {
-                                "+DR: V42B   "
-                            } else {
-                                "+DR: NONE   "
-                            },
-                        );
+                        shown.push_str(if p.wants_error_control() && p.compress {
+                            "+DR: V42B   "
+                        } else {
+                            "+DR: NONE   "
+                        });
                     }
                     shown.push_str("CONNECT 9600");
                     ui.label(
@@ -3818,11 +3950,15 @@ impl ScopeApp {
                     "The lower of the two ends is what runs, so asking for more than the \
                      far end has costs nothing and asking for less decides it for both."
                 };
-                ui.label(RichText::new(note).small().color(if p.wants_error_control() {
-                    dim
-                } else {
-                    Color32::from_rgb(240, 200, 120)
-                }));
+                ui.label(
+                    RichText::new(note)
+                        .small()
+                        .color(if p.wants_error_control() {
+                            dim
+                        } else {
+                            Color32::from_rgb(240, 200, 120)
+                        }),
+                );
 
                 ui.separator();
                 for command in p.commands() {
@@ -3882,15 +4018,26 @@ impl ScopeApp {
     /// brings the rest back.
     fn masthead(&mut self, ui: &mut egui::Ui, state: Option<&live::LineState>) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(BRIGHT));
+            ui.label(
+                RichText::new("BINMODEM")
+                    .monospace()
+                    .size(16.0)
+                    .strong()
+                    .color(BRIGHT),
+            );
             ui.label(RichText::new("56K softmodem").monospace().color(DIM));
             // Which build: two windows that will not talk are often two
             // builds, one of them left open from before a change.
-            ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(DIM))
-                .on_hover_text(
-                    "The commit this program was built from and when that commit was made. \
+            ui.label(
+                RichText::new(concat!("build ", env!("BINMODEM_BUILD")))
+                    .monospace()
+                    .size(11.0)
+                    .color(DIM),
+            )
+            .on_hover_text(
+                "The commit this program was built from and when that commit was made. \
                      Both ends of a V.ARC call have to be the same build.",
-                );
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(state) = state else {
                     ui.label(RichText::new("a capture, replayed").monospace().color(DIM));
@@ -3912,7 +4059,8 @@ impl ScopeApp {
                     (Some(progress), true) if progress.account.starts_with(live::EASY_SIP) => (
                         format!(
                             "EasySip to {}{}",
-                            live::easy_sip_parts(&progress.account).map_or_else(String::new, |(peer, _)| peer),
+                            live::easy_sip_parts(&progress.account)
+                                .map_or_else(String::new, |(peer, _)| peer),
                             coding_of(progress)
                         ),
                         "direct",
@@ -3920,7 +4068,11 @@ impl ScopeApp {
                     ),
                     (Some(progress), true) => (
                         format!("SIP {}{}", progress.account, coding_of(progress)),
-                        if progress.registered { "registered" } else { "not registered" },
+                        if progress.registered {
+                            "registered"
+                        } else {
+                            "not registered"
+                        },
                         if progress.registered { GOOD } else { BAD },
                     ),
                     (None, true) => ("sound card".to_owned(), "open", GOOD),
@@ -3957,7 +4109,12 @@ impl ScopeApp {
                             ui.set_height(FACE_H - 22.0);
                             scopes::faceplate(ui, &self.frame.leds);
                             ui.add_space(6.0);
-                            ui.label(RichText::new("receive level").monospace().small().color(DIM));
+                            ui.label(
+                                RichText::new("receive level")
+                                    .monospace()
+                                    .small()
+                                    .color(DIM),
+                            );
                             scopes::level_meter(ui, self.frame.rx_level_db);
                         });
                 },
@@ -3987,7 +4144,11 @@ impl ScopeApp {
         );
         let left = rect.left() + 14.0;
 
-        let state = if connected { "CONNECT".to_owned() } else { f.state.label().to_uppercase() };
+        let state = if connected {
+            "CONNECT".to_owned()
+        } else {
+            f.state.label().to_uppercase()
+        };
         painter.text(
             egui::pos2(left, rect.top() + 9.0),
             egui::Align2::LEFT_TOP,
@@ -4035,7 +4196,11 @@ impl ScopeApp {
             egui::Align2::LEFT_BOTTOM,
             under,
             FontId::monospace(12.0),
-            if on_hook { READOUT_UNLIT } else { Color32::from_rgb(90, 168, 115) },
+            if on_hook {
+                READOUT_UNLIT
+            } else {
+                Color32::from_rgb(90, 168, 115)
+            },
         );
     }
 
@@ -4065,7 +4230,11 @@ impl ScopeApp {
 
     /// The Scopes key: to the scopes, and from them back to the terminal.
     fn toggle_scopes(&mut self) {
-        self.tab = if self.tab == Tab::Scopes { Tab::Terminal } else { Tab::Scopes };
+        self.tab = if self.tab == Tab::Scopes {
+            Tab::Terminal
+        } else {
+            Tab::Scopes
+        };
     }
 
     /// The scopes and the receiver's own numbers, as a tab beside the
@@ -4311,7 +4480,9 @@ impl ScopeApp {
     /// half after the line opens, and one a second after that, which is
     /// longer than the modem takes to answer any command but a dial.
     fn run_script(&mut self) {
-        let Source::Live(session) = &self.source else { return };
+        let Source::Live(session) = &self.source else {
+            return;
+        };
         let session = Arc::clone(session);
         if !session.state().open {
             return;
@@ -4329,15 +4500,22 @@ impl ScopeApp {
             }
             return;
         }
-        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
+        let due = *self
+            .script_due
+            .get_or_insert(now + std::time::Duration::from_millis(1500));
         if now < due {
             return;
         }
-        let Some(line) = self.script.front().cloned() else { return };
+        let Some(line) = self.script.front().cloned() else {
+            return;
+        };
         match script_step(&line) {
             Step::Until(text) => {
                 let looked = &self.heard[self.heard_from.min(self.heard.len())..];
-                if let Some(at) = looked.windows(text.len().max(1)).position(|w| w == text.as_bytes()) {
+                if let Some(at) = looked
+                    .windows(text.len().max(1))
+                    .position(|w| w == text.as_bytes())
+                {
                     self.heard_from += at + text.len();
                     self.script.pop_front();
                 }
@@ -4407,7 +4585,11 @@ impl ScopeApp {
         let step = self.step();
         let grey = Color32::from_rgb(110, 115, 130);
         let now = std::time::Instant::now();
-        let phase = if f.line_phase == "-" { "" } else { f.line_phase };
+        let phase = if f.line_phase == "-" {
+            ""
+        } else {
+            f.line_phase
+        };
 
         let line = match f.state {
             S::Idle => "on hook".to_owned(),
@@ -4470,8 +4652,18 @@ impl ScopeApp {
             // The rule to the next step, lit once this one is behind.
             if i + 1 < steps.len() {
                 painter.line_segment(
-                    [egui::pos2(dot_x(i) + 9.0, y), egui::pos2(dot_x(i + 1) - 9.0, y)],
-                    egui::Stroke::new(2.0, if step > k { GOOD.gamma_multiply(0.6) } else { BEZEL }),
+                    [
+                        egui::pos2(dot_x(i) + 9.0, y),
+                        egui::pos2(dot_x(i + 1) - 9.0, y),
+                    ],
+                    egui::Stroke::new(
+                        2.0,
+                        if step > k {
+                            GOOD.gamma_multiply(0.6)
+                        } else {
+                            BEZEL
+                        },
+                    ),
                 );
             }
             let centre = egui::pos2(dot_x(i), y);
@@ -4518,7 +4710,11 @@ impl ScopeApp {
                 egui::Align2::LEFT_TOP,
                 about,
                 FontId::proportional(11.5),
-                if done || current { DIM } else { grey.gamma_multiply(0.7) },
+                if done || current {
+                    DIM
+                } else {
+                    grey.gamma_multiply(0.7)
+                },
             );
         }
     }
@@ -4548,10 +4744,18 @@ impl ScopeApp {
         if self.marks.back().is_some_and(|m| rx < m.1 || tx < m.2) {
             self.marks.clear();
         }
-        if self.marks.back().is_none_or(|m| (now - m.0).as_secs_f32() >= 0.25) {
+        if self
+            .marks
+            .back()
+            .is_none_or(|m| (now - m.0).as_secs_f32() >= 0.25)
+        {
             self.marks.push_back((now, rx, tx));
         }
-        while self.marks.front().is_some_and(|m| (now - m.0).as_secs_f32() > 3.0) {
+        while self
+            .marks
+            .front()
+            .is_some_and(|m| (now - m.0).as_secs_f32() > 3.0)
+        {
             self.marks.pop_front();
         }
     }
@@ -4588,8 +4792,11 @@ impl ScopeApp {
     fn poll(&mut self) {
         if self.rx.read(&mut self.frame) && self.frame.seq != self.last_seq {
             self.last_seq = self.frame.seq;
-            self.waterfall
-                .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin, self.frame.display_hz);
+            self.waterfall.push_row(
+                &self.frame.spectrum_db,
+                self.frame.hz_per_bin,
+                self.frame.display_hz,
+            );
             // A row's length, smoothed; a gap of a second is a pause, not a
             // slow row.
             let now = std::time::Instant::now();
@@ -4682,7 +4889,8 @@ impl ScopeApp {
         let dt = self.last_repaint.elapsed().as_millis().min(1000) as u32;
         self.last_repaint = std::time::Instant::now();
         if self.console.idle(dt) {
-            self.console.notice("[escaped to command state; ATO to resume]");
+            self.console
+                .notice("[escaped to command state; ATO to resume]");
         }
     }
 
@@ -4783,7 +4991,9 @@ impl ScopeApp {
     /// there for the rest of them. What is new is that the common answer does
     /// not need a window opened to give it.
     fn call_settings(&mut self, ui: &mut egui::Ui) {
-        let Source::Live(session) = &self.source else { return };
+        let Source::Live(session) = &self.source else {
+            return;
+        };
         let session = Arc::clone(session);
         let dim = Color32::from_rgb(140, 150, 165);
 
@@ -4950,11 +5160,22 @@ impl ScopeApp {
         };
         let bar = egui::Frame::new()
             .fill(colour.gamma_multiply(0.15))
-            .inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 3 })
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 3,
+                bottom: 3,
+            })
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(title).monospace().size(14.0).strong().color(colour));
+                    ui.label(
+                        RichText::new(title)
+                            .monospace()
+                            .size(14.0)
+                            .strong()
+                            .color(colour),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new("bit/s").size(11.0).color(DIM));
                         ui.label(
@@ -4967,15 +5188,21 @@ impl ScopeApp {
                             ui.add_space(10.0);
                             ui.label(RichText::new("Bd").size(11.0).color(DIM));
                             ui.label(
-                                RichText::new(baud.to_string()).monospace().size(16.0).color(BRIGHT),
+                                RichText::new(baud.to_string())
+                                    .monospace()
+                                    .size(16.0)
+                                    .color(BRIGHT),
                             );
                         }
                     });
                 });
             })
             .response;
-        ui.painter()
-            .hline(bar.rect.x_range(), bar.rect.bottom(), egui::Stroke::new(2.0, colour));
+        ui.painter().hline(
+            bar.rect.x_range(),
+            bar.rect.bottom(),
+            egui::Stroke::new(2.0, colour),
+        );
         if !about.is_empty() {
             bar.on_hover_text(about);
         }
@@ -5004,7 +5231,11 @@ impl ScopeApp {
             let carried = |o: &Outlook| matches!(o, Outlook::Good | Outlook::Bad);
             let slowest = menu.rates.iter().find(|r| carried(&r.2))?.1;
             let fastest = menu.rates.iter().rfind(|r| carried(&r.2))?.1;
-            let clean = menu.rates.iter().rfind(|r| r.2 == Outlook::Good).map(|r| r.1);
+            let clean = menu
+                .rates
+                .iter()
+                .rfind(|r| r.2 == Outlook::Good)
+                .map(|r| r.1);
             Some((rate(now)?, menu.outlook(now)?, slowest, fastest, clean))
         });
         // V.92 has no rate menu's predictions, and no DIL to make them from:
@@ -5012,7 +5243,8 @@ impl ScopeApp {
         // be sent at, the downstream's ladder for a caller and the upstream's
         // for a server.
         let v92 = f.pcm.filter(|_| f.modulation == "V.92").zip(f.bit_rate);
-        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality())
+        {
             _ if v92.is_some() => {
                 let (levels, rate) = v92.unwrap_or_default();
                 let along = (rate.saturating_sub(levels.slowest) as f32
@@ -5025,14 +5257,20 @@ impl ScopeApp {
                     along,
                     None,
                     format!("{rate} of {} - {} bit/s", levels.slowest, levels.fastest),
-                    if levels.sending { "PCM coming up" } else { "PCM coming down" },
+                    if levels.sending {
+                        "PCM coming up"
+                    } else {
+                        "PCM coming down"
+                    },
                 )
             }
             _ if pcm.is_some() => {
                 use datapump::v90::analogue::Outlook;
-                let (rate, outlook, slowest, fastest, clean) = pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
+                let (rate, outlook, slowest, fastest, clean) =
+                    pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
                 let along = |r: u32| {
-                    (r.saturating_sub(slowest) as f32 / fastest.saturating_sub(slowest).max(1) as f32)
+                    (r.saturating_sub(slowest) as f32
+                        / fastest.saturating_sub(slowest).max(1) as f32)
                         .clamp(0.0, 1.0)
                 };
                 let (word, c) = match (outlook, clean) {
@@ -5160,11 +5398,19 @@ impl ScopeApp {
             // octets over octets a codeword.
             // As a decimal: 227/243 says nothing at a glance and 0.93 does.
             // The line under "Error control" has the code itself.
-            let code = f.code.filter(|c| c.0 > 0).map(|(n, k)| format!("code {:.2}", f64::from(k) / f64::from(n)));
+            let code = f
+                .code
+                .filter(|c| c.0 > 0)
+                .map(|(n, k)| format!("code {:.2}", f64::from(k) / f64::from(n)));
             if merit.is_some() || code.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(merit) = &merit {
-                        ui.label(RichText::new(merit).monospace().size(18.0).color(merit_colour));
+                        ui.label(
+                            RichText::new(merit)
+                                .monospace()
+                                .size(18.0)
+                                .color(merit_colour),
+                        );
                     }
                     if let Some(code) = &code {
                         ui.label(RichText::new(code).monospace().size(18.0).color(colour));
@@ -5504,7 +5750,8 @@ impl ScopeApp {
             });
         });
         let r = chain.response.rect;
-        ui.painter().vline(r.left() + 2.0, r.y_range(), egui::Stroke::new(2.0, BEZEL));
+        ui.painter()
+            .vline(r.left() + 2.0, r.y_range(), egui::Stroke::new(2.0, BEZEL));
 
         // V.90's rate by hand: every rate, green where the DIL -- and data
         // mode since -- predict it reads cleanly and red where they predict
@@ -5534,7 +5781,10 @@ impl ScopeApp {
                     }
                 }
                 if ui
-                    .add_enabled(connected && f.modulation == "V.34", egui::Button::new("Retrain"))
+                    .add_enabled(
+                        connected && f.modulation == "V.34",
+                        egui::Button::new("Retrain"),
+                    )
                     .on_hover_text(
                         "V.34 11.5: send the retrain tone and go back through \
                          phase 2, measuring the line again and training on \
@@ -5565,12 +5815,21 @@ impl ScopeApp {
             .width(120.0)
             .height(420.0)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(pinned.is_none(), RichText::new("auto: the server chooses").monospace()).clicked() {
+                if ui
+                    .selectable_label(
+                        pinned.is_none(),
+                        RichText::new("auto: the server chooses").monospace(),
+                    )
+                    .clicked()
+                {
                     chosen = Some(None);
                 }
                 for drn in (1..=UP_RATES as u8).rev() {
                     let text = format!("{:>5}", up_rate(drn));
-                    if ui.selectable_label(pinned == Some(drn), RichText::new(text).monospace()).clicked() {
+                    if ui
+                        .selectable_label(pinned == Some(drn), RichText::new(text).monospace())
+                        .clicked()
+                    {
                         chosen = Some(Some(drn));
                     }
                 }
@@ -5826,10 +6085,8 @@ impl ScopeApp {
                     // Wrapped, because a list of modulations is longer than the
                     // panel and truncating it would hide the interesting end.
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(value).monospace().small().color(bright),
-                        )
-                        .wrap(),
+                        egui::Label::new(RichText::new(value).monospace().small().color(bright))
+                            .wrap(),
                     );
                     ui.end_row();
                 }
@@ -5908,9 +6165,7 @@ fn to_remember(
 /// Anything missing or unreadable keeps its default, so a file written by an
 /// older version -- or no file at all -- leaves the window exactly where it
 /// would have been.
-fn from_remembered(
-    r: &crate::remembered::Remembered,
-) -> (usize, Modulation, Protection) {
+fn from_remembered(r: &crate::remembered::Remembered) -> (usize, Modulation, Protection) {
     let mut carrier = 1;
     let mut m = Modulation::default();
     let mut p = Protection::default();
@@ -5983,24 +6238,52 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
     // "V.34 (no receiver)" is V.34 for this.
     let name = modulation.split(" (").next().unwrap_or(modulation);
     match name {
-        "Bell 103" | "V.21" => (FSK, Some(300), "Frequency-shift keying: a pair of tones each way, 300 bit/s."),
-        "V.22bis" => (QAM, Some(600), "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering."),
-        "Bell 212A" => (QAM, Some(600), "Four-phase DPSK at 600 baud, 1200 Hz calling and 2400 Hz answering: V.22's modulation."),
-        "Bell 202" => (FSK, Some(1200), "Frequency-shift keying, 1200 Hz mark and 2200 Hz space, one direction at a time."),
+        "Bell 103" | "V.21" => (
+            FSK,
+            Some(300),
+            "Frequency-shift keying: a pair of tones each way, 300 bit/s.",
+        ),
+        "V.22bis" => (
+            QAM,
+            Some(600),
+            "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering.",
+        ),
+        "Bell 212A" => (
+            QAM,
+            Some(600),
+            "Four-phase DPSK at 600 baud, 1200 Hz calling and 2400 Hz answering: V.22's modulation.",
+        ),
+        "Bell 202" => (
+            FSK,
+            Some(1200),
+            "Frequency-shift keying, 1200 Hz mark and 2200 Hz space, one direction at a time.",
+        ),
         "V.32" | "V.32bis" => (
             QAM,
             Some(2400),
             "Trellis-coded QAM at 2400 baud, both ways on the one 1800 Hz carrier, told apart by echo cancelling.",
         ),
-        "V.34" => (V34, None, "V.34: the symbol rate and carrier are chosen by probing the line, each way separately."),
-        "V.90" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.34" => (
+            V34,
+            None,
+            "V.34: the symbol rate and carrier are chosen by probing the line, each way separately.",
+        ),
+        "V.90" => (
+            PCM,
+            Some(8000),
+            "PCM downstream, a codeword a network sample; V.34 upstream.",
+        ),
         "V.92" => (
             PCM,
             Some(8000),
             "PCM both ways: a codeword a network sample down, and up a level on each of the server's A/D instants.",
         ),
         "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
-        "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
+        "V.27ter" => (
+            FAX,
+            None,
+            "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400.",
+        ),
         _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
         _ => (BRIGHT, None, ""),
     }
@@ -6151,9 +6434,7 @@ fn should_restore(state: &live::LineState, asked: bool) -> bool {
 fn key(ui: &mut egui::Ui, digit: char, letters: &str) -> egui::Response {
     // A real button underneath, so a key is lit and pressed the way every
     // other control in the window is, with nothing of that reimplemented here.
-    let response = ui.add(
-        egui::Button::new("").min_size(egui::vec2(KEY_W, KEY_H)),
-    );
+    let response = ui.add(egui::Button::new("").min_size(egui::vec2(KEY_W, KEY_H)));
     if !ui.is_rect_visible(response.rect) {
         return response;
     }
@@ -6253,7 +6534,11 @@ fn face_key(text: &str) -> egui::Button<'static> {
 }
 
 fn small_key(ui: &mut egui::Ui, lit: bool, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(text.to_owned()).selected(lit).min_size(SMALL_KEY))
+    ui.add(
+        egui::Button::new(text.to_owned())
+            .selected(lit)
+            .min_size(SMALL_KEY),
+    )
 }
 
 fn dot(ui: &mut egui::Ui, colour: Color32) {
@@ -6263,7 +6548,11 @@ fn dot(ui: &mut egui::Ui, colour: Color32) {
 
 /// One labelled box in the credentials form.
 fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, hover: &str) {
-    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    ui.label(
+        RichText::new(label)
+            .monospace()
+            .color(Color32::from_rgb(140, 150, 165)),
+    );
     ui.add(
         egui::TextEdit::singleline(value)
             .desired_width(FIELD_W)
@@ -6282,7 +6571,11 @@ fn optional_row(
     hover: &str,
 ) {
     let mut text = optional_shown(value);
-    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    ui.label(
+        RichText::new(label)
+            .monospace()
+            .color(Color32::from_rgb(140, 150, 165)),
+    );
     if ui
         .add(
             egui::TextEdit::singleline(&mut text)
@@ -6355,10 +6648,9 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
             ui.end_row();
             ui.label(RichText::new("transport").monospace().color(dim));
             ui.horizontal(|ui| {
-                for (transport, label) in [
-                    (sip::Transport::Udp, "UDP"),
-                    (sip::Transport::Tcp, "TCP"),
-                ] {
+                for (transport, label) in
+                    [(sip::Transport::Udp, "UDP"), (sip::Transport::Tcp, "TCP")]
+                {
                     ui.radio_value(&mut account.transport, transport, label);
                 }
             })
@@ -6521,15 +6813,9 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
                     ui.label(RichText::new("ports").monospace().color(dim));
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("SIP").small().color(dim));
-                        ui.add(
-                            egui::DragValue::new(&mut account.local_port)
-                                .range(0..=65535),
-                        );
+                        ui.add(egui::DragValue::new(&mut account.local_port).range(0..=65535));
                         ui.label(RichText::new("RTP").small().color(dim));
-                        ui.add(
-                            egui::DragValue::new(&mut account.rtp_port)
-                                .range(0..=65535),
-                        );
+                        ui.add(egui::DragValue::new(&mut account.rtp_port).range(0..=65535));
                     })
                     .response
                     .on_hover_text(
@@ -6544,7 +6830,9 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
 
 /// A small folder button, true when clicked.
 fn browse_button(ui: &mut egui::Ui, hover: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0))).on_hover_text(hover).clicked()
+    ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0)))
+        .on_hover_text(hover)
+        .clicked()
 }
 
 /// One line-rate box, offering only the rates the modulation has.
@@ -6606,10 +6894,21 @@ mod modulation_tests {
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W"), (12, "VARCQ2W"), (13, "VARCP2W")] {
+        for (i, name) in [
+            (8, "VARC"),
+            (9, "VARCQ"),
+            (10, "VARCP"),
+            (11, "VARC2W"),
+            (12, "VARCQ2W"),
+            (13, "VARCP2W"),
+        ] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
-            let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
+            let mut m = Modulation {
+                min_rate: 9600,
+                max_rate: 33_600,
+                ..Modulation::default()
+            };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
@@ -6653,7 +6952,14 @@ mod modulation_tests {
         let capped = ms("V22B", false, 1200, 1200);
         assert_eq!(
             follow(Some(&v22b), &capped, 1, held),
-            Some((1, Modulation { automode: false, min_rate: 1200, max_rate: 1200 }))
+            Some((
+                1,
+                Modulation {
+                    automode: false,
+                    min_rate: 1200,
+                    max_rate: 1200
+                }
+            ))
         );
         // Nothing changed at the modem, so whatever the window is composing
         // is left alone.
@@ -6683,7 +6989,11 @@ mod modulation_tests {
         m.fit(1);
         assert_eq!((m.min_rate, m.max_rate), (1200, 2400), "V.22bis");
         m.fit(0);
-        assert_eq!((m.min_rate, m.max_rate), (300, 300), "Bell 103 has one rate");
+        assert_eq!(
+            (m.min_rate, m.max_rate),
+            (300, 300),
+            "Bell 103 has one rate"
+        );
         m.fit(2);
         assert_eq!((m.min_rate, m.max_rate), (4800, 9600), "V.32");
     }
@@ -6692,7 +7002,11 @@ mod modulation_tests {
     fn a_ceiling_survives_a_modulation_that_still_has_it() {
         // Someone who held V.22bis to 1200 and looked at another modulation
         // and came back should find their ceiling still there.
-        let mut m = Modulation { automode: true, min_rate: 1200, max_rate: 1200 };
+        let mut m = Modulation {
+            automode: true,
+            min_rate: 1200,
+            max_rate: 1200,
+        };
         m.fit(1);
         assert_eq!((m.min_rate, m.max_rate), (1200, 1200));
     }
@@ -6701,10 +7015,18 @@ mod modulation_tests {
     fn a_minimum_above_the_maximum_is_never_composed() {
         // V.250 5.4.2 makes it an error, so the window should not be able to
         // build one to be refused.
-        let mut m = Modulation { automode: false, min_rate: 9600, max_rate: 1200 };
+        let mut m = Modulation {
+            automode: false,
+            min_rate: 9600,
+            max_rate: 1200,
+        };
         m.fit(2);
         assert!(m.min_rate <= m.max_rate, "{m:?}");
-        let mut m = Modulation { automode: false, min_rate: 2400, max_rate: 1200 };
+        let mut m = Modulation {
+            automode: false,
+            min_rate: 2400,
+            max_rate: 1200,
+        };
         m.fit(1);
         assert!(m.min_rate <= m.max_rate, "{m:?}");
     }
@@ -6712,9 +7034,17 @@ mod modulation_tests {
     #[test]
     fn the_command_is_the_one_the_interpreter_parses() {
         // Carrier, automode, minimum, maximum -- V.250 6.4.1, in that order.
-        let m = Modulation { automode: true, min_rate: 1200, max_rate: 1200 };
+        let m = Modulation {
+            automode: true,
+            min_rate: 1200,
+            max_rate: 1200,
+        };
         assert_eq!(m.command("V22B"), "AT+MS=V22B,1,1200,1200");
-        let m = Modulation { automode: false, min_rate: 4800, max_rate: 9600 };
+        let m = Modulation {
+            automode: false,
+            min_rate: 4800,
+            max_rate: 9600,
+        };
         assert_eq!(m.command("V32"), "AT+MS=V32,0,4800,9600");
         // With no range chosen, none is sent: an omitted rate is unspecified,
         // and sending the modulation's own range instead would be a ceiling
@@ -6732,7 +7062,10 @@ mod tests {
         assert_eq!(script_step("@type rory"), Step::Type(b"rory\r".to_vec()));
         assert_eq!(script_step("@key c"), Step::Type(b"c".to_vec()));
         assert_eq!(script_step("@wait 2.5"), Step::Wait(2.5));
-        assert_eq!(script_step("@until login: "), Step::Until("login: ".to_owned()));
+        assert_eq!(
+            script_step("@until login: "),
+            Step::Until("login: ".to_owned())
+        );
         assert_eq!(script_step("@tab scopes"), Step::Tab("scopes".to_owned()));
         assert_eq!(script_step("@receive"), Step::Receive);
         assert_eq!(script_step("@files off"), Step::Files(false));
@@ -6779,7 +7112,11 @@ mod tests {
         // back to V.22bis with V.8 on and compression, having been told
         // nothing.
         let carrier = 2; // V.32
-        let modulation = Modulation { automode: false, min_rate: 4800, max_rate: 4800 };
+        let modulation = Modulation {
+            automode: false,
+            min_rate: 4800,
+            max_rate: 4800,
+        };
         let protection = Protection {
             request: 2,
             fallback: 2,
@@ -6800,7 +7137,8 @@ mod tests {
         // And what the modem is told is the same either way round, which is
         // the only comparison that matters.
         assert_eq!(
-            ScopeApp::CARRIERS[c].0, "V32",
+            ScopeApp::CARRIERS[c].0,
+            "V32",
             "stored by name, so the list may be added to"
         );
     }
@@ -6820,7 +7158,11 @@ mod tests {
     fn a_rate_from_another_modulation_is_fitted_to_this_one() {
         let mut r = to_remember(
             2,
-            Modulation { automode: false, min_rate: 9600, max_rate: 9600 },
+            Modulation {
+                automode: false,
+                min_rate: 9600,
+                max_rate: 9600,
+            },
             Protection::default(),
         );
         // The same file, with the modulation changed under it to one that has
@@ -6843,7 +7185,11 @@ mod tests {
         // default to, which drifted from the window the moment anything was
         // typed at the terminal.
         let app_carrier = 2; // V.32, so it is not the modem's own default
-        let modulation = Modulation { automode: false, min_rate: 4800, max_rate: 4800 };
+        let modulation = Modulation {
+            automode: false,
+            min_rate: 4800,
+            max_rate: 4800,
+        };
         let protection = Protection {
             request: 2,
             fallback: 2,
@@ -6902,18 +7248,40 @@ mod tests {
         // setting the interpreter refuses is worse than one without it.
         for p in [
             Protection::default(),
-            Protection { request: 2, fallback: 2, ..Protection::default() },
-            Protection { request: 0, ..Protection::default() },
+            Protection {
+                request: 2,
+                fallback: 2,
+                ..Protection::default()
+            },
+            Protection {
+                request: 0,
+                ..Protection::default()
+            },
             Protection {
                 compress: false,
                 report_error_control: true,
                 report_compression: true,
                 ..Protection::default()
             },
-            Protection { max_dict: 512, max_string: 6, ..Protection::default() },
-            Protection { v44: false, ..Protection::default() },
-            Protection { v44_required: true, compress: false, ..Protection::default() },
-            Protection { max_dict: 32768, max_string: 250, ..Protection::default() },
+            Protection {
+                max_dict: 512,
+                max_string: 6,
+                ..Protection::default()
+            },
+            Protection {
+                v44: false,
+                ..Protection::default()
+            },
+            Protection {
+                v44_required: true,
+                compress: false,
+                ..Protection::default()
+            },
+            Protection {
+                max_dict: 32768,
+                max_string: 250,
+                ..Protection::default()
+            },
         ] {
             for command in p.commands() {
                 let (_, out) = interpreted(&command);
@@ -6963,7 +7331,10 @@ mod tests {
         // V.42bis rides on LAPM and there is nowhere else for it to be. The
         // window disables the compression controls, and the command it sends
         // has to say the same thing -- so the order matters: +ES first.
-        let p = Protection { request: 0, ..Protection::default() };
+        let p = Protection {
+            request: 0,
+            ..Protection::default()
+        };
         let commands = p.commands();
         assert!(commands[0].starts_with("AT+ES=0"), "{:?}", commands[0]);
         let (it, _) = interpreted(&commands[0]);
@@ -7012,9 +7383,7 @@ mod tests {
             ..sip::Account::default()
         };
         let command = dial_command("  (03) 9876-5432 ");
-        let dialled = command
-            .trim_start_matches("ATD")
-            .trim_end_matches('\r');
+        let dialled = command.trim_start_matches("ATD").trim_end_matches('\r');
         assert_eq!(
             account.dial_uri(dialled).to_string(),
             "sip:0398765432@sip.example.net"
@@ -7034,10 +7403,7 @@ mod tests {
         assert_eq!(optional_shown(&Some("BinModem".to_owned())), "BinModem");
         assert_eq!(optional_stored(""), None);
         assert_eq!(optional_stored("   "), None);
-        assert_eq!(
-            optional_stored("BinModem"),
-            Some("BinModem".to_owned())
-        );
+        assert_eq!(optional_stored("BinModem"), Some("BinModem".to_owned()));
         // Mid-typing, with the space that is about to have a word after it.
         // This runs on every keystroke, so a value trimmed here is a space
         // that cannot be typed.
@@ -7115,7 +7481,10 @@ mod tests {
         for expected in ["new account", "new account 2", "new account 3"] {
             let name = unused_name(&accounts);
             assert_eq!(name, expected);
-            accounts.push(sip::Account { name, ..sip::Account::default() });
+            accounts.push(sip::Account {
+                name,
+                ..sip::Account::default()
+            });
         }
         // And around whatever is already in the file.
         accounts[1].name = "trunk".to_owned();
@@ -7162,7 +7531,11 @@ mod tests {
         let mut both = outputs();
         both.push("CABLE Input (VB-Audio Virtual Cable)".to_owned());
         let i = live::named(&both, live::LINE_OUT).expect("B is in there");
-        assert!(both[i].starts_with("CABLE-B Input"), "matched {:?}", both[i]);
+        assert!(
+            both[i].starts_with("CABLE-B Input"),
+            "matched {:?}",
+            both[i]
+        );
     }
 
     #[test]
@@ -7183,5 +7556,8 @@ mod tests {
 /// window: PCMU, PCMA, or which of the linear codings, as `L16/48000`.
 /// Nothing while there is no call, since nothing has been agreed.
 fn coding_of(progress: &sip::Progress) -> String {
-    progress.law.as_ref().map_or_else(String::new, |law| format!(" · {law}"))
+    progress
+        .law
+        .as_ref()
+        .map_or_else(String::new, |law| format!(" · {law}"))
 }

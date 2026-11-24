@@ -53,18 +53,26 @@ impl Mode {
     /// One line's two halves: a transmitter using the known points
     /// numbered `sends`, and a receiver listening for those numbered
     /// `hears`.
-    fn pair(&self, sends: u8, hears: u8, level: Option<f64>, gap: Option<f64>) -> (Box<dyn Sender>, Box<dyn Receiver>) {
+    fn pair(
+        &self,
+        sends: u8,
+        hears: u8,
+        level: Option<f64>,
+        gap: Option<f64>,
+    ) -> (Box<dyn Sender>, Box<dyn Receiver>) {
         match self {
             Mode::Dmt(plan) => {
                 let mut rx = dmt::Rx::new(plan.clone().coloured(hears));
                 rx.set_gap_db(gap.unwrap_or(dmt::GAP_DB));
-                let tx = dmt::Tx::at_level(plan.clone().coloured(sends), level.unwrap_or(dmt::LEVEL));
+                let tx =
+                    dmt::Tx::at_level(plan.clone().coloured(sends), level.unwrap_or(dmt::LEVEL));
                 (Box::new(tx), Box::new(rx))
             }
             Mode::Single(shape) => {
                 let mut rx = sc::Rx::new(shape.clone().coloured(hears));
                 rx.set_gap_db(gap.unwrap_or(sc::GAP_DB));
-                let tx = sc::Tx::at_level(shape.clone().coloured(sends), level.unwrap_or(sc::LEVEL));
+                let tx =
+                    sc::Tx::at_level(shape.clone().coloured(sends), level.unwrap_or(sc::LEVEL));
                 (Box::new(tx), Box::new(rx))
             }
         }
@@ -77,7 +85,10 @@ struct Pattern(u64);
 
 impl Pattern {
     fn next(&mut self) -> u8 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 56) as u8
     }
 }
@@ -95,7 +106,14 @@ struct Flow {
 
 impl Flow {
     fn new(name: &'static str, seed: u64) -> Self {
-        Self { name, source: Pattern(seed), check: Pattern(seed), arrived: 0, wrong: 0, last: 0 }
+        Self {
+            name,
+            source: Pattern(seed),
+            check: Pattern(seed),
+            arrived: 0,
+            wrong: 0,
+            last: 0,
+        }
     }
 
     /// Keep the sending end with plenty to send.
@@ -119,8 +137,21 @@ impl Flow {
 /// An end whose channels send with known points numbered from `sends` and
 /// listen for ones numbered from `hears`, so that every line in the lead has
 /// its own and each receiver is told its transmitter's.
-fn end(mode: &Mode, fs: f64, channels: u8, sends: u8, hears: u8, level: Option<f64>, gap: Option<f64>) -> End {
-    Station::new(fs, (0..channels).map(|c| mode.pair(sends + c, hears + c, level, gap)).collect())
+fn end(
+    mode: &Mode,
+    fs: f64,
+    channels: u8,
+    sends: u8,
+    hears: u8,
+    level: Option<f64>,
+    gap: Option<f64>,
+) -> End {
+    Station::new(
+        fs,
+        (0..channels)
+            .map(|c| mode.pair(sends + c, hears + c, level, gap))
+            .collect(),
+    )
 }
 
 fn describe(name: &str, end: &End) -> String {
@@ -165,7 +196,11 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
     };
     println!(
         "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz, AT+MS={carrier}, {dial}",
-        audio.input_device, audio.input_channels, audio.output_device, audio.output_channels, audio.rate
+        audio.input_device,
+        audio.input_channels,
+        audio.output_device,
+        audio.output_channels,
+        audio.rate
     );
     let fs = f64::from(audio.rate);
     let mut modem = Modem::new(16_000.0);
@@ -198,7 +233,11 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
             peak = peak.max(frame[0].abs()).max(frame[1].abs());
             let mut out = [0.0f64; 2];
             if apart {
-                modem.varc_hear(fs, f64::from(audio.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+                modem.varc_hear(
+                    fs,
+                    f64::from(audio.output_rate),
+                    &[f64::from(frame[0]), f64::from(frame[1])],
+                );
             } else {
                 modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
                 send.push(out[0] as f32);
@@ -224,8 +263,15 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
             // checked with the rest. (A far end that connected first has
             // been sending for a second or two by now.)
             let line = said.windows(7).position(|w| w == b"CONNECT").unwrap_or(0);
-            let end = said[line..].iter().position(|&b| b == b'\n').map_or(said.len(), |i| line + i + 1);
-            println!("{:6.2}s  {}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&said[..end]).trim());
+            let end = said[line..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(said.len(), |i| line + i + 1);
+            println!(
+                "{:6.2}s  {}",
+                started.elapsed().as_secs_f64(),
+                String::from_utf8_lossy(&said[..end]).trim()
+            );
             said.drain(..end);
         }
         if modem.state() == State::Data {
@@ -242,7 +288,11 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
                 offered += 1;
             }
         } else if !said.is_empty() {
-            println!("{:6.2}s  {}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&said).trim());
+            println!(
+                "{:6.2}s  {}",
+                started.elapsed().as_secs_f64(),
+                String::from_utf8_lossy(&said).trim()
+            );
         }
         if modem.state() == State::Command && was != State::Command {
             println!("{:6.2}s  the call ended", started.elapsed().as_secs_f64());
@@ -269,7 +319,11 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
         }
     }
     println!("{arrived} octets came back, {wrong} wrong");
-    if arrived > 0 && wrong == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if arrived > 0 && wrong == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn usage() -> ExitCode {
@@ -363,7 +417,11 @@ fn main() -> ExitCode {
     let oneway = oneway.unwrap_or(false);
     println!(
         "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz",
-        audio.input_device, audio.input_channels, audio.output_device, audio.output_channels, audio.rate
+        audio.input_device,
+        audio.input_channels,
+        audio.output_device,
+        audio.output_channels,
+        audio.rate
     );
     let fs = f64::from(audio.rate);
     let mode = match mode.as_str() {
@@ -378,9 +436,15 @@ fn main() -> ExitCode {
             Mode::Dmt(plan)
         }
         "qam" | "pcm" => {
-            let shape = if mode == "qam" { Shape::qam(fs) } else { Shape::pcm(fs) };
+            let shape = if mode == "qam" {
+                Shape::qam(fs)
+            } else {
+                Shape::pcm(fs)
+            };
             let Some(shape) = shape else {
-                eprintln!("the 16 000 baud modes want a sample rate that is a multiple of 48 kHz, not {fs} Hz");
+                eprintln!(
+                    "the 16 000 baud modes want a sample rate that is a multiple of 48 kHz, not {fs} Hz"
+                );
                 return ExitCode::FAILURE;
             };
             println!(
@@ -445,7 +509,11 @@ fn main() -> ExitCode {
         if reported.elapsed() >= Duration::from_secs(1) {
             let span = reported.elapsed().as_secs_f64();
             reported = Instant::now();
-            println!("{:5.1}s  input peak {:.3}", started.elapsed().as_secs_f64(), peak);
+            println!(
+                "{:5.1}s  input peak {:.3}",
+                started.elapsed().as_secs_f64(),
+                peak
+            );
             peak = 0.0;
             println!("  {}", describe("A", &a));
             println!("  {}", describe("B", &b));
@@ -473,7 +541,10 @@ fn main() -> ExitCode {
     );
     println!("  {}", describe("A", &a));
     println!("  {}", describe("B", &b));
-    println!("  A resent {} frames, B resent {}", a.arq.resent, b.arq.resent);
+    println!(
+        "  A resent {} frames, B resent {}",
+        a.arq.resent, b.arq.resent
+    );
     let mut good = true;
     for flow in [&a_to_b, &b_to_a] {
         if flow.name == "B to A" && oneway {
@@ -501,5 +572,9 @@ fn main() -> ExitCode {
             eprintln!("could not write {path}: {e}");
         }
     }
-    if good { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if good {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

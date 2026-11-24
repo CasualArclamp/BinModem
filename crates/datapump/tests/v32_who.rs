@@ -178,8 +178,7 @@ fn probe_who_is_talking() {
     let mut i = 0;
     while i + window <= q.len() {
         let slice = &q[i..i + window];
-        let energy: f64 =
-            slice.iter().map(|p| p.0 * p.0 + p.1 * p.1).sum::<f64>() / window as f64;
+        let energy: f64 = slice.iter().map(|p| p.0 * p.0 + p.1 * p.1).sum::<f64>() / window as f64;
         if energy > 1.0e-18 {
             // Four times the offset, because the fourth power put it there.
             let c = line_at(slice, 4.0 * (calling - CARRIER));

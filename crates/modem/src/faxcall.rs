@@ -22,10 +22,10 @@
 //! this join does there is map the one onto the other (`plan.md` 10.1), and
 //! keep to the rule that the modem is never given a bit it will not send.
 
+use datapump::v8 as v8line;
 use datapump::v34::halfduplex::{self, Event, State};
 use datapump::v34::phase2::{Role as V34Role, Status as Phase2Status};
 use datapump::v34::{control, data, signals::Size};
-use datapump::v8 as v8line;
 use datapump::{v17, v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
 use fax::coding::Coding;
@@ -414,9 +414,14 @@ impl FaxCall {
                 Some(v8line::Modem::overhearing(function, self.v8_offer, self.fs))
             }
             (Role::Answerer, true) => Some(
-                v8line::Modem::new(v8line::Role::Answering, function, self.super_g3_offer(), self.fs)
-                    .with_ansam_seconds(ANSAM_SECONDS)
-                    .answering_only_its_function(),
+                v8line::Modem::new(
+                    v8line::Role::Answering,
+                    function,
+                    self.super_g3_offer(),
+                    self.fs,
+                )
+                .with_ansam_seconds(ANSAM_SECONDS)
+                .answering_only_its_function(),
             ),
             (Role::Caller, true) => Some(v8line::Modem::new(
                 v8line::Role::Calling,
@@ -605,8 +610,13 @@ impl FaxCall {
         }
         if let Some(baud) = facts.symbol_rate {
             let carrier = if facts.high_carrier { "high" } else { "low" };
-            let rate = facts.primary_rate.map_or("no rate yet".to_owned(), |r| format!("{r} bit/s"));
-            rows.push(("primary channel", format!("{rate} on {baud} baud, {carrier} carrier")));
+            let rate = facts
+                .primary_rate
+                .map_or("no rate yet".to_owned(), |r| format!("{r} bit/s"));
+            rows.push((
+                "primary channel",
+                format!("{rate} on {baud} baud, {carrier} carrier"),
+            ));
         }
         if let Some((transmit, receive)) = facts.control_rates {
             let mut what = if transmit == receive {
@@ -615,14 +625,22 @@ impl FaxCall {
                 format!("{transmit} bit/s out, {receive} in")
             };
             if facts.retrains > 0 {
-                what.push_str(&format!(", {} retrain{}", facts.retrains, if facts.retrains == 1 { "" } else { "s" }));
+                what.push_str(&format!(
+                    ", {} retrain{}",
+                    facts.retrains,
+                    if facts.retrains == 1 { "" } else { "s" }
+                ));
             }
             rows.push(("control channel", what));
         }
         if let Some(snr) = facts.trained_snr_db {
             let mut what = format!("{snr:.1} dB");
             if facts.recoveries > 0 {
-                what.push_str(&format!(", phase 3 gone back to {} time{}", facts.recoveries, if facts.recoveries == 1 { "" } else { "s" }));
+                what.push_str(&format!(
+                    ", phase 3 gone back to {} time{}",
+                    facts.recoveries,
+                    if facts.recoveries == 1 { "" } else { "s" }
+                ));
             }
             rows.push(("page trained to", what));
         }
@@ -754,10 +772,15 @@ impl FaxCall {
     /// on the half-duplex modem: the primary channel from the moment this end
     /// turns to it until the page is over, the control channel otherwise.
     fn v34_channel(&self) -> Option<V34Channel> {
-        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else {
+            return None;
+        };
         // Phase 2 -- the first, or a 12.7 retrain's -- is neither channel:
         // INFO sequences in binary DPSK, and tones, with nothing to decide.
-        if modem.phase2().is_some_and(|phase2| phase2.status() == Phase2Status::Running) {
+        if modem
+            .phase2()
+            .is_some_and(|phase2| phase2.status() == Phase2Status::Running)
+        {
             return None;
         }
         Some(match modem.state() {
@@ -765,7 +788,9 @@ impl FaxCall {
                 let data = modem.data_mode()?;
                 // Which scrambler the source has does not move a point of the
                 // constellation; the source is the call modem here anyway.
-                V34Channel::Primary(data.params(modem.channel()?.band.rate, datapump::v32::Mode::Call)?)
+                V34Channel::Primary(
+                    data.params(modem.channel()?.band.rate, datapump::v32::Mode::Call)?,
+                )
             }
             State::Failed => return None,
             _ => V34Channel::Control(modem.control().receiver.rate().size()),
@@ -778,11 +803,17 @@ impl FaxCall {
     /// has nothing to draw while its page goes out -- the primary channel is
     /// one way, and its transmitter keeps no reading of what it sends.
     fn v34_point(&self) -> Option<(f64, f64)> {
-        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else {
+            return None;
+        };
         match self.v34_channel()? {
             V34Channel::Primary(_) => {
                 let recipient = modem.primary_recipient()?;
-                recipient.carrier().then(|| recipient.last_point()).flatten().map(Into::into)
+                recipient
+                    .carrier()
+                    .then(|| recipient.last_point())
+                    .flatten()
+                    .map(Into::into)
             }
             V34Channel::Control(_) => {
                 let receiver = &modem.control().receiver;
@@ -794,7 +825,9 @@ impl FaxCall {
     /// Signal to noise of the V.34 receiver that is deciding, in decibels,
     /// while one is.
     fn v34_snr(&self) -> Option<f64> {
-        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else {
+            return None;
+        };
         match self.v34_channel()? {
             V34Channel::Primary(_) => {
                 let recipient = modem.primary_recipient()?;
@@ -932,12 +965,12 @@ impl FaxCall {
     pub fn reception(&self) -> Option<f64> {
         if self.v34.is_some() {
             let channel = self.v34_channel()?;
-            return self.residual_error().map(|error| error / Self::v34_point_spacing(channel));
+            return self
+                .residual_error()
+                .map(|error| error / Self::v34_point_spacing(channel));
         }
         Some(match self.page_carrier()? {
-            Carrier::V27ter(_) => {
-                self.v27ter_rx.residual_error() / self.v27ter_rx.point_spacing()
-            }
+            Carrier::V27ter(_) => self.v27ter_rx.residual_error() / self.v27ter_rx.point_spacing(),
             Carrier::V29(_) => self.v29_rx.residual_error() / self.v29_rx.point_spacing(),
             Carrier::V17(_) => self.v17_rx.residual_error() / self.v17_rx.point_spacing(),
         })
@@ -1072,7 +1105,10 @@ impl FaxCall {
                         // Phase 2 failing, or anything after it: the modem's
                         // reason is the call's.
                         Event::Failed(why) => failed = Some(format!("V.34: {why}")),
-                        Event::Phase2Over | Event::Phase3Over { .. } | Event::PageStarted { .. } | Event::PageEnded => {}
+                        Event::Phase2Over
+                        | Event::Phase3Over { .. }
+                        | Event::PageStarted { .. }
+                        | Event::PageEnded => {}
                     }
                 }
                 // What INFOh chose, once phase 2 is over: the first time, or
@@ -1112,7 +1148,9 @@ impl FaxCall {
                 // page's end at the source is 105 dropping again, 12.5.3.1,
                 // and then 12.6.1 -- or 12.4.1.1 when a new rate is wanted.
                 let want = self.call.line();
-                let change_wanted = self.v34_cap.is_some_and(|cap| modem.primary_rate().is_some_and(|rate| cap < rate));
+                let change_wanted = self
+                    .v34_cap
+                    .is_some_and(|cap| modem.primary_rate().is_some_and(|rate| cap < rate));
                 if want != self.line {
                     match (self.line, want) {
                         // A turn asked for, made below once the modem can.
@@ -1145,7 +1183,9 @@ impl FaxCall {
                     && matches!(want, Line::V34Primary | Line::V34PrimaryListen)
                     && modem.state() == State::Control
                 {
-                    let ready = !source || modem.far_silent() || self.v34_held as f64 >= V34_TURN_HOLD * self.fs;
+                    let ready = !source
+                        || modem.far_silent()
+                        || self.v34_held as f64 >= V34_TURN_HOLD * self.fs;
                     if ready {
                         self.v34_turned = modem.to_primary();
                     } else {
@@ -1158,14 +1198,20 @@ impl FaxCall {
                 // a DCN queued for a channel the modem is still listening for
                 // the page over. 12.8.1's retrain brings the channel back for
                 // it, or fails the call trying (`wp-h2.md`, "For G and H3").
-                if !source && want == Line::V34Control && modem.state() == State::Primary && !modem.page_carrier() {
+                if !source
+                    && want == Line::V34Control
+                    && modem.state() == State::Primary
+                    && !modem.page_carrier()
+                {
                     modem.retrain_control();
                 }
 
                 // What T.30 has to say, taken only as fast as the modem will
                 // send it: control bits -- frames, flags, the source's ones --
                 // while the channel is up, page bits while the page is going.
-                if matches!(want, Line::V34Control | Line::V34Listen | Line::V34Ones) && modem.state() == State::Control {
+                if matches!(want, Line::V34Control | Line::V34Listen | Line::V34Ones)
+                    && modem.state() == State::Control
+                {
                     while modem.pending_control_bits() < V34_CONTROL_AHEAD {
                         match self.call.next_control_bit() {
                             Some(bit) => {
@@ -1198,7 +1244,8 @@ impl FaxCall {
                 } else {
                     self.v34_drained = 0;
                 }
-                let flushed = self.v34_drained as f64 >= V34_FLUSH_SYMBOLS as f64 * self.fs / control::BAUD;
+                let flushed =
+                    self.v34_drained as f64 >= V34_FLUSH_SYMBOLS as f64 * self.fs / control::BAUD;
                 let idle = if want == Line::V34Primary {
                     modem.pending_page_bits() == 0
                 } else {
@@ -1344,7 +1391,11 @@ impl FaxCall {
             // first (8.2.2/V.8; Figures F.5-8 and F.5-9 have 75 +/- 20 ms),
             // which is the pause the restart sits out.
             v8line::Status::NoNegotiation => {
-                debug_assert_eq!(role, Role::Answerer, "the calling end's plain tone never gets here");
+                debug_assert_eq!(
+                    role,
+                    Role::Answerer,
+                    "the calling end's plain tone never gets here"
+                );
                 self.call.set_v8_capable(true);
                 self.call.restart_identifying();
             }
@@ -1408,7 +1459,11 @@ impl FaxCall {
                     if long {
                         self.v17_long = Some(speed);
                     }
-                    let training = if long { v17::Training::Long } else { v17::Training::Resync };
+                    let training = if long {
+                        v17::Training::Long
+                    } else {
+                        v17::Training::Resync
+                    };
                     self.v17_tx.start(rate, training);
                 }
                 None => {}
@@ -1669,7 +1724,10 @@ mod tests {
         use datapump::framing::AsyncBits;
         use datapump::v8::{HIGH, LOW};
 
-        let vector = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/fax-v34-cm.wav");
+        let vector = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/vectors/fax-v34-cm.wav"
+        );
         let wav = line::wav::read(vector).expect("could not read the vector");
         let fs = f64::from(wav.sample_rate);
         let mut call = FaxCall::answer(fs, "61399990000").offering(&MODULATIONS);
@@ -1701,7 +1759,11 @@ mod tests {
             hear(&mut call, f64::from(s));
             v8_had_the_line |= call.phase_name().starts_with("V.8");
         }
-        assert!(v8_had_the_line, "the call menu went unanswered: {}", call.phase_name());
+        assert!(
+            v8_had_the_line,
+            "the call menu went unanswered: {}",
+            call.phase_name()
+        );
         // The caller has its JMs, so it ends the call menus with CJ on the
         // carrier that is already up (8.1.2).
         let framing = AsyncBits::new(8);
@@ -1719,13 +1781,27 @@ mod tests {
 
         let far = call.far_menu().expect("the call menu was not kept");
         assert_eq!(far.function, v8::CallFunction::TransmitFax);
-        assert!(far.modulations.contains(v8::Modulation::V34HalfDuplex), "{far:?}");
+        assert!(
+            far.modulations.contains(v8::Modulation::V34HalfDuplex),
+            "{far:?}"
+        );
         let joint = joint.expect("no joint menu went out");
-        assert!(!joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(
+            !joint.modulations.contains(v8::Modulation::V34HalfDuplex),
+            "{joint:?}"
+        );
         assert!(joint.modulations.contains(v8::Modulation::V17), "{joint:?}");
         let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
-        assert!(names.contains(&Frame::Dis), "no DIS after the V.8 exchange: {names:?}");
-        assert_eq!(call.phase(), Phase::AwaitingCommand, "{}", call.phase_name());
+        assert!(
+            names.contains(&Frame::Dis),
+            "no DIS after the V.8 exchange: {names:?}"
+        );
+        assert_eq!(
+            call.phase(),
+            Phase::AwaitingCommand,
+            "{}",
+            call.phase_name()
+        );
     }
 
     /// A fax that answers the ordinary way is not disturbed by listening for
@@ -1763,7 +1839,11 @@ mod tests {
     impl V8Ear {
         /// On the channel the calling end sends in, or the answering end's.
         fn new(calling: bool, fs: f64) -> Self {
-            let (space, mark) = if calling { datapump::v8::LOW } else { datapump::v8::HIGH };
+            let (space, mark) = if calling {
+                datapump::v8::LOW
+            } else {
+                datapump::v8::HIGH
+            };
             Self {
                 rx: datapump::bell103::Bell103Rx::with_tones(space, mark, fs),
                 decoder: v8::Decoder::new(),
@@ -1788,7 +1868,9 @@ mod tests {
         }
 
         fn cj(&self) -> Option<f64> {
-            self.heard.iter().find_map(|(t, h)| (*h == v8::Heard::Cj).then_some(*t))
+            self.heard
+                .iter()
+                .find_map(|(t, h)| (*h == v8::Heard::Cj).then_some(*t))
         }
     }
 
@@ -1906,15 +1988,19 @@ mod tests {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(8)))
             .offering(&MODULATIONS)
             .with_v34(true);
-        let mut answerer =
-            FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000")
+            .offering(&MODULATIONS)
+            .with_v34(true);
         let x = negotiate_v34(&mut caller, &mut answerer, 0.4, 10.0);
 
         let ansam = x.ansam.expect("no ANSam from the answering end");
         let (cm_at, cm) = x.cm.expect("no call menu from the calling end");
         let (jm_at, jm) = x.jm.expect("no joint menu from the answering end");
         let cj = x.cj.expect("no CJ from the calling end");
-        assert!(ansam < cm_at && cm_at < jm_at && jm_at < cj, "out of order: {x:?}");
+        assert!(
+            ansam < cm_at && cm_at < jm_at && jm_at < cj,
+            "out of order: {x:?}"
+        );
         assert_eq!(cm.function, v8::CallFunction::TransmitFax, "{cm:?}");
         assert_eq!(cm.modulations, super_g3_menu(), "{cm:?}");
         assert_eq!(jm.modulations, super_g3_menu(), "{jm:?}");
@@ -1923,33 +2009,69 @@ mod tests {
             "offered duplex, which 7.4/V.8 would pick over half-duplex"
         );
 
-        let caller_agreed = x.caller_agreed.expect("the calling end never went to Annex F");
-        let answerer_agreed = x.answerer_agreed.expect("the answering end never went to Annex F");
+        let caller_agreed = x
+            .caller_agreed
+            .expect("the calling end never went to Annex F");
+        let answerer_agreed = x
+            .answerer_agreed
+            .expect("the answering end never went to Annex F");
         assert!(caller_agreed < 7.0 && answerer_agreed < 7.0, "{x:?}");
-        assert!(caller_agreed > cj && answerer_agreed > cj, "in Annex F before CJ: {x:?}");
+        assert!(
+            caller_agreed > cj && answerer_agreed > cj,
+            "in Annex F before CJ: {x:?}"
+        );
         // A second after the hand-over both ends are in V.34's phase 2 --
         // INFO0, the tones, the probe -- and T.30 has not been asked for a
         // bit: the answerer still has its CSI and DIS queued, the caller is
         // still waiting for them.
         assert_eq!(caller.phase(), Phase::Listening, "{}", caller.phase_name());
-        assert_eq!(answerer.phase(), Phase::Identifying, "{}", answerer.phase_name());
-        assert!(x.loudest_after > 0.1, "nothing of phase 2 on the line after the hand-over: {x:?}");
-        assert!(caller.phase_name().starts_with("V.34"), "{}", caller.phase_name());
-        assert!(answerer.phase_name().starts_with("V.34"), "{}", answerer.phase_name());
+        assert_eq!(
+            answerer.phase(),
+            Phase::Identifying,
+            "{}",
+            answerer.phase_name()
+        );
+        assert!(
+            x.loudest_after > 0.1,
+            "nothing of phase 2 on the line after the hand-over: {x:?}"
+        );
+        assert!(
+            caller.phase_name().starts_with("V.34"),
+            "{}",
+            caller.phase_name()
+        );
+        assert!(
+            answerer.phase_name().starts_with("V.34"),
+            "{}",
+            answerer.phase_name()
+        );
         assert_eq!(caller.standard(), "V.34");
 
         // 8.1.1/V.8: "after detection of ANS or ANSam, the call signal shall
         // be stopped". The first burst of it went; none went after.
-        let took = x.caller_took_the_line.expect("the calling end's V.8 never took the line");
+        let took = x
+            .caller_took_the_line
+            .expect("the calling end's V.8 never took the line");
         assert!(took > ansam, "{x:?}");
-        assert!(x.cng_before > 0, "no calling tone before ANSam, so nothing was proved: {x:?}");
+        assert!(
+            x.cng_before > 0,
+            "no calling tone before ANSam, so nothing was proved: {x:?}"
+        );
         assert_eq!(x.cng_after, 0, "calling tone after ANSam: {x:?}");
 
         // Both ends keep what was agreed, for the far-end panel.
         assert_eq!(caller.joint_menu(), Some(jm));
         assert_eq!(answerer.joint_menu(), Some(jm));
-        assert_eq!(caller.far_menu(), Some(jm), "the caller's far menu is the JM");
-        assert_eq!(answerer.far_menu(), Some(cm), "the answerer's far menu is the CM");
+        assert_eq!(
+            caller.far_menu(),
+            Some(jm),
+            "the caller's far menu is the JM"
+        );
+        assert_eq!(
+            answerer.far_menu(),
+            Some(cm),
+            "the answerer's far menu is the CM"
+        );
     }
 
     /// The recorded V.34 fax's call menu, answered by an end that offers
@@ -1962,10 +2084,15 @@ mod tests {
         use datapump::framing::AsyncBits;
         use datapump::v8::LOW;
 
-        let vector = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/fax-v34-cm.wav");
+        let vector = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/vectors/fax-v34-cm.wav"
+        );
         let wav = line::wav::read(vector).expect("could not read the vector");
         let fs = f64::from(wav.sample_rate);
-        let mut call = FaxCall::answer(fs, "61399990000").offering(&MODULATIONS).with_v34(true);
+        let mut call = FaxCall::answer(fs, "61399990000")
+            .offering(&MODULATIONS)
+            .with_v34(true);
 
         let mut high = V8Ear::new(false, fs);
         let mut frames_ear = v21::Receiver::new(fs);
@@ -1973,7 +2100,8 @@ mod tests {
         let mut said: Vec<Message> = Vec::new();
         // The answer modem's INFO sequences, as the calling modem would read
         // them (10.1.2.3.1/V.34).
-        let mut info_ear = datapump::v34::dpsk::Receiver::half_duplex(datapump::v34::dpsk::Side::Answer, fs);
+        let mut info_ear =
+            datapump::v34::dpsk::Receiver::half_duplex(datapump::v34::dpsk::Side::Answer, fs);
         let mut info0 = None;
         let mut t = 0.0;
         let mut loudest_after_handover = 0.0f64;
@@ -2015,28 +2143,51 @@ mod tests {
             let agreed = call.v34_agreed();
             hear(&mut call, 0.0, agreed);
         }
-        assert!(call.v34_agreed(), "not in Annex F after CJ: {}", call.phase_name());
+        assert!(
+            call.v34_agreed(),
+            "not in Annex F after CJ: {}",
+            call.phase_name()
+        );
         for _ in 0..(fs * 3.0) as usize {
             hear(&mut call, 0.0, true);
         }
 
         let far = call.far_menu().expect("the call menu was not kept");
         assert_eq!(far.function, v8::CallFunction::TransmitFax);
-        assert!(far.modulations.contains(v8::Modulation::V34HalfDuplex), "{far:?}");
+        assert!(
+            far.modulations.contains(v8::Modulation::V34HalfDuplex),
+            "{far:?}"
+        );
         let (_, joint) = high.menu().expect("no joint menu went out");
-        assert!(joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(
+            joint.modulations.contains(v8::Modulation::V34HalfDuplex),
+            "{joint:?}"
+        );
         assert!(joint.modulations.contains(v8::Modulation::V17), "{joint:?}");
         assert_eq!(call.joint_menu(), Some(joint));
         // T.30 has its CSI and DIS queued for a control channel that is not
         // up yet; V.34's phase 2 has the line, and its INFO0a is what went
         // out, not a frame.
         assert_eq!(call.phase(), Phase::Identifying, "{}", call.phase_name());
-        assert!(call.phase_name().starts_with("V.34"), "{}", call.phase_name());
-        assert!(loudest_after_handover > 0.1, "nothing went out after the hand-over");
+        assert!(
+            call.phase_name().starts_with("V.34"),
+            "{}",
+            call.phase_name()
+        );
+        assert!(
+            loudest_after_handover > 0.1,
+            "nothing went out after the hand-over"
+        );
         let info0 = info0.expect("no INFO0a after CJ");
-        assert!(info0.rate_3429 && info0.constellation_1664, "not this end's capabilities: {info0:?}");
+        assert!(
+            info0.rate_3429 && info0.constellation_1664,
+            "not this end's capabilities: {info0:?}"
+        );
         let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
-        assert!(names.is_empty(), "frames on V.21 in an Annex F call: {names:?}");
+        assert!(
+            names.is_empty(),
+            "frames on V.21 in an Annex F call: {names:?}"
+        );
     }
 
     /// Two of these that both offer V.34 fax a page over it: V.8, phase 2,
@@ -2052,7 +2203,9 @@ mod tests {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()))
             .offering(&MODULATIONS)
             .with_v34(true);
-        let mut answerer = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000")
+            .offering(&MODULATIONS)
+            .with_v34(true);
         let trace = std::env::var("FAX_TRACE").is_ok();
         let (mut was_a, mut was_b) = ("", "");
         let (mut to_caller, mut to_answerer) = (0.0, 0.0);
@@ -2075,7 +2228,12 @@ mod tests {
                 scope = Some(answerer.constellation_peak());
             }
             if trace && (caller.phase_name() != was_a || answerer.phase_name() != was_b) {
-                eprintln!("{:6.2}s caller {:<40} answerer {}", i as f64 / FS, caller.phase_name(), answerer.phase_name());
+                eprintln!(
+                    "{:6.2}s caller {:<40} answerer {}",
+                    i as f64 / FS,
+                    caller.phase_name(),
+                    answerer.phase_name()
+                );
                 was_a = caller.phase_name();
                 was_b = answerer.phase_name();
             }
@@ -2084,14 +2242,27 @@ mod tests {
             }
         }
         assert!(caller.v34_agreed() && answerer.v34_agreed());
-        assert_eq!(caller.phase(), Phase::Done, "the caller: {:?}", caller.trouble());
-        assert_eq!(answerer.phase(), Phase::Done, "the answerer: {:?}", answerer.trouble());
+        assert_eq!(
+            caller.phase(),
+            Phase::Done,
+            "the caller: {:?}",
+            caller.trouble()
+        );
+        assert_eq!(
+            answerer.phase(),
+            Phase::Done,
+            "the answerer: {:?}",
+            answerer.trouble()
+        );
         let got = answerer.received().expect("no page arrived");
         assert_eq!(got.lines, page.lines, "the page came out different");
         assert_eq!(rate_while_sending, Some(33_600));
         assert_eq!(caller.symbol_rate(), Some(3429));
         assert_eq!(answerer.primary_rate(), Some(33_600));
-        assert!(caller.error_correction() && answerer.error_correction(), "F.3: ECM is mandatory");
+        assert!(
+            caller.error_correction() && answerer.error_correction(),
+            "F.3: ECM is mandatory"
+        );
         assert_eq!((caller.standard(), answerer.standard()), ("V.34", "V.34"));
         // Drawn to scale: the page's points fill the scope and stay inside it.
         // Sized in grid units, the range was tens against points of one and
@@ -2120,7 +2291,9 @@ mod tests {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()))
             .offering(&MODULATIONS)
             .with_v34(true);
-        let mut answerer = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000")
+            .offering(&MODULATIONS)
+            .with_v34(true);
         // The noise `a_page_gets_through_a_line_with_noise_on_it` has. On a
         // clean line T.30's flags-gone comes 10 ms after the modem has left
         // for the retrain, and there is no race to lose.
@@ -2146,7 +2319,11 @@ mod tests {
                 && caller.call.line() == Line::V34Ones
                 && let Some(HalfDuplex::Modem(modem)) = answerer.v34.as_mut()
             {
-                assert!(modem.retrain_primary(), "the recipient could not retrain: {}", modem.phase());
+                assert!(
+                    modem.retrain_primary(),
+                    "the recipient could not retrain: {}",
+                    modem.phase()
+                );
                 retrain_at = Some(t);
             }
             if asked.is_none()
@@ -2179,10 +2356,27 @@ mod tests {
         );
         // ...and the turn waited out the retrain -- phase 2, phase 3 and a
         // control channel start-up -- which is seconds, not a tenth of one.
-        assert!(turned - asked > 1.0, "turned {:.3} s after T.30 asked", turned - asked);
-        assert_eq!(caller.phase(), Phase::Done, "the caller: {:?}", caller.trouble());
-        assert_eq!(answerer.phase(), Phase::Done, "the answerer: {:?}", answerer.trouble());
-        assert_eq!(answerer.received().expect("no page arrived").lines, page.lines);
+        assert!(
+            turned - asked > 1.0,
+            "turned {:.3} s after T.30 asked",
+            turned - asked
+        );
+        assert_eq!(
+            caller.phase(),
+            Phase::Done,
+            "the caller: {:?}",
+            caller.trouble()
+        );
+        assert_eq!(
+            answerer.phase(),
+            Phase::Done,
+            "the answerer: {:?}",
+            answerer.trouble()
+        );
+        assert_eq!(
+            answerer.received().expect("no page arrived").lines,
+            page.lines
+        );
         assert_eq!(caller.v34_retrains(), (1, 0), "the caller");
         assert_eq!(answerer.v34_retrains(), (1, 0), "the answerer");
         assert_eq!(caller.primary_rate(), Some(33_600));
@@ -2201,14 +2395,28 @@ mod tests {
                 FaxCall::originate(FS, "61399990000", Some(page.clone())).with_v34(v34);
             let mut answerer = FaxCall::answer(FS, "61388880000");
             between(&mut caller, &mut answerer, 40.0);
-            assert_eq!(caller.phase(), Phase::Done, "v34 {v34}: {:?}", caller.trouble());
+            assert_eq!(
+                caller.phase(),
+                Phase::Done,
+                "v34 {v34}: {:?}",
+                caller.trouble()
+            );
             let got = answerer.received().expect("no page arrived");
             assert_eq!(got.lines, page.lines, "the page came out different");
-            assert!(!caller.v34_agreed() && caller.far_menu().is_none(), "V.8 with a plain fax");
-            assert!(answerer.far_menu().is_none(), "a call menu went to a plain fax");
+            assert!(
+                !caller.v34_agreed() && caller.far_menu().is_none(),
+                "V.8 with a plain fax"
+            );
+            assert!(
+                answerer.far_menu().is_none(),
+                "a call menu went to a plain fax"
+            );
             ended.push((caller.seconds(), answerer.seconds()));
         }
-        assert_eq!(ended[0], ended[1], "offering V.34 changed the timing of a plain call");
+        assert_eq!(
+            ended[0], ended[1],
+            "offering V.34 changed the timing of a plain call"
+        );
     }
 
     /// What one end's V.21 channel 2 carried, and its answering tone.
@@ -2252,7 +2460,11 @@ mod tests {
             if let Some((_, last)) = tap.ansam
                 && t > last + 0.5
             {
-                tap.plain_run = if tone.is_plain() { tap.plain_run + 1.0 / FS } else { 0.0 };
+                tap.plain_run = if tone.is_plain() {
+                    tap.plain_run + 1.0 / FS
+                } else {
+                    0.0
+                };
                 tap.plain_after = tap.plain_after.max(tap.plain_run);
                 if tap.carrier_after.is_none() && ear.carrier() {
                     tap.carrier_after = Some(t);
@@ -2276,11 +2488,22 @@ mod tests {
             (2.4..=4.0).contains(&ran_for),
             "ANSam read for {ran_for:.2} s, from {first:.2} to {last:.2}"
         );
-        assert!(tap.plain_after < 0.3, "a called tone after ANSam, {:.2} s of it", tap.plain_after);
+        assert!(
+            tap.plain_after < 0.3,
+            "a called tone after ANSam, {:.2} s of it",
+            tap.plain_after
+        );
         let carrier = tap.carrier_after.expect("no V.21 after ANSam");
-        assert!(carrier < last + 0.8, "V.21 up at {carrier:.2} s, {:.2} s after ANSam", carrier - last);
+        assert!(
+            carrier < last + 0.8,
+            "V.21 up at {carrier:.2} s, {:.2} s after ANSam",
+            carrier - last
+        );
         let (dis_at, fif) = tap.dis.expect("no DIS");
-        assert!(fax::t30::bit(&fif, 6), "bit 6 clear in the DIS after ANSam ran out: {fif:02x?}");
+        assert!(
+            fax::t30::bit(&fif, 6),
+            "bit 6 clear in the DIS after ANSam ran out: {fif:02x?}"
+        );
         assert!(dis_at > last, "a DIS during ANSam");
         assert_eq!(answerer.phase(), Phase::Done, "{:?}", answerer.trouble());
         let got = answerer.received().expect("no page arrived");
@@ -2340,7 +2563,9 @@ mod tests {
         use datapump::framing::AsyncBits;
         use datapump::v8::LOW;
 
-        let mut call = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let mut call = FaxCall::answer(FS, "61388880000")
+            .offering(&MODULATIONS)
+            .with_v34(true);
         let mut tap = CiTap::new();
 
         // Nothing from the caller: ANSam runs out and the DIS goes. Eight
@@ -2353,7 +2578,11 @@ mod tests {
         }
         assert_eq!(tap.ansam_spans.len(), 1, "{:?}", tap.ansam_spans);
         assert_eq!(tap.dis.len(), 1, "{} DISes in eight seconds", tap.dis.len());
-        assert!(fax::t30::bit(&tap.dis[0].1, 6), "bit 6 clear: {:02x?}", tap.dis[0].1);
+        assert!(
+            fax::t30::bit(&tap.dis[0].1, 6),
+            "bit 6 clear: {:02x?}",
+            tap.dis[0].1
+        );
         assert_eq!(call.phase(), Phase::AwaitingCommand);
 
         // The caller's CI: 7.1/V.8, at least three sequences.
@@ -2380,8 +2609,17 @@ mod tests {
         for _ in 0..(FS * 1.0) as usize {
             tap.hear(&mut call, 0.0);
         }
-        assert_eq!(tap.ansam_spans.len(), 2, "no ANSam after the CI: {:?}", tap.ansam_spans);
-        assert!(call.phase_name().starts_with("V.8"), "{}", call.phase_name());
+        assert_eq!(
+            tap.ansam_spans.len(),
+            2,
+            "no ANSam after the CI: {:?}",
+            tap.ansam_spans
+        );
+        assert!(
+            call.phase_name().starts_with("V.8"),
+            "{}",
+            call.phase_name()
+        );
 
         // And the menus, as in any V.8 exchange.
         for _ in 0..6 {
@@ -2404,7 +2642,10 @@ mod tests {
         assert_eq!(call.phase(), Phase::Identifying);
         assert_eq!(tap.dis.len(), 1, "a DIS on V.21 after V.8 agreed V.34");
         let joint = call.joint_menu().expect("no joint menu");
-        assert!(joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(
+            joint.modulations.contains(v8::Modulation::V34HalfDuplex),
+            "{joint:?}"
+        );
     }
 
     #[test]
@@ -2486,7 +2727,6 @@ mod tests {
         assert_eq!(got.lines, page.lines, "the page came out different");
     }
 
-
     /// A page over a line with noise on it.
     ///
     /// Not a real channel -- there is no filtering and no echo -- but enough
@@ -2529,7 +2769,6 @@ mod tests {
         let got = answerer.received().expect("no page arrived");
         assert_eq!(got.lines, page.lines, "the page came out different");
     }
-
 
     /// A fax call has something to put on the scope the whole way through.
     ///
@@ -2632,9 +2871,12 @@ mod tests {
             .received()
             .unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
         assert_eq!(got.lines, page.lines, "the page came out different");
-        assert_eq!(caller.rate(), 4800, "the far end had to drop a rate to get through");
+        assert_eq!(
+            caller.rate(),
+            4800,
+            "the far end had to drop a rate to get through"
+        );
     }
-
 
     /// The end that is sending draws what it sends.
     ///
@@ -2671,7 +2913,11 @@ mod tests {
             during_training.contains(&"16APM"),
             "the sending end never said it was sending V.29: {during_training:?}"
         );
-        assert!(radii.len() > 10_000, "only {} points while sending", radii.len());
+        assert!(
+            radii.len() > 10_000,
+            "only {} points while sending",
+            radii.len()
+        );
         // Every one of them exactly a point of Figure 1, since these are the
         // points that were sent rather than a receiver's guess at them.
         let rms = 13.5f64.sqrt();
@@ -2680,9 +2926,11 @@ mod tests {
             .iter()
             .filter(|r| figure.iter().all(|f| (*r - f).abs() > 1e-9))
             .count();
-        assert_eq!(off, 0, "{off} points sent were not points of the constellation");
+        assert_eq!(
+            off, 0,
+            "{off} points sent were not points of the constellation"
+        );
     }
-
 
     /// A fine page goes both ways as a fine page, coded two-dimensionally.
     ///
@@ -2703,7 +2951,10 @@ mod tests {
             assert_eq!(answerer.coding(), want, "read in the wrong coding");
             let got = answerer.received().expect("no page arrived");
             assert_eq!(got.resolution, Resolution::Fine, "it arrived as standard");
-            assert_eq!(got.lines, page.lines, "the page came out different in {want:?}");
+            assert_eq!(
+                got.lines, page.lines,
+                "the page came out different in {want:?}"
+            );
         }
     }
 
@@ -2779,9 +3030,19 @@ mod tests {
         }
         assert!(caller.error_correction(), "the caller did not choose it");
         assert!(answerer.error_correction(), "the answerer was not told");
-        assert_eq!(answerer.coding(), Coding::Jbig, "error correction and no JBIG");
-        assert!(sent.contains(&Frame::Pps), "no partial page signal: {sent:?}");
-        assert!(!sent.contains(&Frame::Eop), "a bare EOP under error correction");
+        assert_eq!(
+            answerer.coding(),
+            Coding::Jbig,
+            "error correction and no JBIG"
+        );
+        assert!(
+            sent.contains(&Frame::Pps),
+            "no partial page signal: {sent:?}"
+        );
+        assert!(
+            !sent.contains(&Frame::Eop),
+            "a bare EOP under error correction"
+        );
         assert_eq!(answerer.received().expect("no page").lines, page.lines);
     }
 
@@ -2829,16 +3090,26 @@ mod tests {
             assert_eq!(caller.error_correction(), error_correction);
             let got = answerer.received().expect("no page");
             assert_eq!(got.lines, page.lines, "error correction {error_correction}");
-            assert_eq!(answerer.lines(), &page.lines[..], "the lines are not the page");
+            assert_eq!(
+                answerer.lines(),
+                &page.lines[..],
+                "the lines are not the page"
+            );
             // A page drawn as it comes is one seen at many heights on the way:
             // at 9600 a frame of 256 octets is a fifth of a second, and this
             // page is ninety of them.
-            let partway = seen.iter().filter(|&&n| n > 0 && n < page.lines.len()).count();
+            let partway = seen
+                .iter()
+                .filter(|&&n| n > 0 && n < page.lines.len())
+                .count();
             assert!(
                 partway >= 10,
                 "error correction {error_correction}: seen at {partway} heights on the way ({seen:?})"
             );
-            assert!(seen.windows(2).all(|w| w[0] < w[1]), "lines went away: {seen:?}");
+            assert!(
+                seen.windows(2).all(|w| w[0] < w[1]),
+                "lines went away: {seen:?}"
+            );
         }
     }
 
@@ -2853,8 +3124,13 @@ mod tests {
         let heard = with_a_burst_of_noise(&mut caller, &mut answerer);
         let pps = heard.iter().filter(|f| **f == Frame::Pps).count();
         assert!(caller.error_correction());
-        assert!(pps >= 2, "the damaged block was never sent again: {heard:?}");
-        let got = answerer.received().unwrap_or_else(|| panic!("no page ({:?})", answerer.trouble()));
+        assert!(
+            pps >= 2,
+            "the damaged block was never sent again: {heard:?}"
+        );
+        let got = answerer
+            .received()
+            .unwrap_or_else(|| panic!("no page ({:?})", answerer.trouble()));
         assert_eq!(got.lines, page.lines, "the page was not put right");
     }
 
@@ -2866,9 +3142,18 @@ mod tests {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
         let mut answerer = FaxCall::answer(FS, "61388880000").with_error_correction(false);
         with_a_burst_of_noise(&mut caller, &mut answerer);
-        assert!(!caller.error_correction(), "used it with a far end that has not got it");
-        let got = answerer.received().map(|p| p.lines.clone()).unwrap_or_default();
-        assert_ne!(got, page.lines, "the noise missed the page, so this proves nothing");
+        assert!(
+            !caller.error_correction(),
+            "used it with a far end that has not got it"
+        );
+        let got = answerer
+            .received()
+            .map(|p| p.lines.clone())
+            .unwrap_or_default();
+        assert_ne!(
+            got, page.lines,
+            "the noise missed the page, so this proves nothing"
+        );
     }
 
     #[test]
@@ -2955,14 +3240,21 @@ mod tests {
                     call.phase().name(),
                     call.trouble()
                 );
-                assert_eq!(call.trouble(), None, "the {end}, ecm {error_correction}: {heard:?}");
+                assert_eq!(
+                    call.trouble(),
+                    None,
+                    "the {end}, ecm {error_correction}: {heard:?}"
+                );
             }
             assert_eq!((caller.sheet(), caller.sheets()), (3, 3));
             assert_eq!((answerer.sheet(), answerer.sheets()), (3, 3));
             let numbers: Vec<usize> = got.iter().map(|(n, _)| *n).collect();
             assert_eq!(numbers, [1, 2, 3], "ecm {error_correction}: {heard:?}");
             for ((n, page), want) in got.iter().zip(&sent) {
-                assert_eq!(page.lines, want.lines, "page {n} came out different, ecm {error_correction}");
+                assert_eq!(
+                    page.lines, want.lines,
+                    "page {n} came out different, ecm {error_correction}"
+                );
             }
             assert_eq!(answerer.pages_received(), 3);
             // What the user saw on a real call: the second page drawn as the

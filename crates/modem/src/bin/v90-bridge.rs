@@ -196,7 +196,9 @@ fn main() -> ExitCode {
         };
         let standard = modem.standard().to_owned();
         if (state, &phase, &standard) != (last_state.0, &last_state.1, &last_state.2) {
-            let rate = modem.rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
+            let rate = modem
+                .rate()
+                .map_or_else(|| "-".to_owned(), |r| r.to_string());
             let up = modem
                 .transmit_rate()
                 .map_or_else(|| "-".to_owned(), |r| r.to_string());

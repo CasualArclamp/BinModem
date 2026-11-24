@@ -49,13 +49,20 @@ impl Memos {
                 }
             }
         }
-        Self { path: Some(path), known }
+        Self {
+            path: Some(path),
+            known,
+        }
     }
 
     /// The dial string as a key: no white space, and never empty.
     fn key(number: &str) -> String {
         let key: String = number.chars().filter(|c| !c.is_whitespace()).collect();
-        if key.is_empty() { NO_NUMBER.to_owned() } else { key }
+        if key.is_empty() {
+            NO_NUMBER.to_owned()
+        } else {
+            key
+        }
     }
 
     /// What an earlier call to `number` taught, if one did.
@@ -80,7 +87,9 @@ impl Memos {
     /// Best effort, as the window's settings are: a memo that cannot be
     /// written is a full start-up next time, which always works.
     fn save(&self) {
-        let Some(path) = self.path.as_ref() else { return };
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -106,7 +115,12 @@ mod tests {
     fn what_is_put_is_there_after_the_file_is_read_again() {
         let path = std::env::temp_dir().join(format!("binmodem-memos-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let memo = Recognized { uqts: 70, a_law: false, round_trip_ms: 41, pcm_upstream: true };
+        let memo = Recognized {
+            uqts: 70,
+            a_law: false,
+            round_trip_ms: 41,
+            pcm_upstream: true,
+        };
         let mut memos = Memos::open(&path);
         assert_eq!(memos.get("sip:modem@127.0.0.1:5071"), None);
         memos.put("sip:modem@127.0.0.1:5071", memo);
@@ -115,8 +129,16 @@ mod tests {
 
         let mut again = Memos::open(&path);
         assert_eq!(again.get("sip:modem@127.0.0.1:5071"), Some(memo));
-        assert_eq!(again.get("5551234"), Some(Recognized::unmeasured()), "white space is not part of a number");
-        assert_eq!(again.get("  "), Some(memo), "a bare ATD has a slot of its own");
+        assert_eq!(
+            again.get("5551234"),
+            Some(Recognized::unmeasured()),
+            "white space is not part of a number"
+        );
+        assert_eq!(
+            again.get("  "),
+            Some(memo),
+            "a bare ATD has a slot of its own"
+        );
         again.forget("5551234");
         assert_eq!(Memos::open(&path).get("555 1234"), None);
         assert_eq!(Memos::open(&path).get(""), Some(memo));

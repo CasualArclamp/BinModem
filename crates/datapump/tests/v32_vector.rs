@@ -204,4 +204,3 @@ fn the_start_up_carries_the_tones_clause_5_4_names() {
         "the two sidebands are lopsided at {low:.4} and {high:.4}, which is not          a suppressed carrier"
     );
 }
-

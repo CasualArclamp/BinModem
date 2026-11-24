@@ -67,7 +67,11 @@ impl Crc32 {
     pub fn update(&mut self, byte: u8) {
         self.0 ^= u32::from(byte);
         for _ in 0..8 {
-            self.0 = if self.0 & 1 != 0 { (self.0 >> 1) ^ Self::POLY } else { self.0 >> 1 };
+            self.0 = if self.0 & 1 != 0 {
+                (self.0 >> 1) ^ Self::POLY
+            } else {
+                self.0 >> 1
+            };
         }
     }
 

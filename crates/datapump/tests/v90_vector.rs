@@ -15,7 +15,10 @@ use datapump::v34::dpsk::{Receiver, Side};
 use datapump::v34::info::{Info, SymbolRate};
 use v8::{Access, CallFunction, Decoder, Heard, Menu, Modulation, Pcm, PcmRole, Protocol};
 
-const VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v90-56k.wav");
+const VECTOR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/vectors/v90-56k.wav"
+);
 
 fn samples() -> (f64, Vec<f32>) {
     let wav = line::wav::read(VECTOR).expect("could not read the vector");
@@ -66,9 +69,25 @@ fn the_call_menu_offers_an_analogue_v90_modem_and_the_answer_a_digital_one() {
     assert_eq!(cm.protocol, Protocol::Lapm);
     assert!(cm.modulations.contains(Modulation::V34Duplex));
 
-    assert_eq!(jm.pcm, Some(Pcm { analogue: false, digital: true, v91: false }));
-    assert_eq!(jm.access, Some(Access { digital: true, ..Access::default() }));
-    assert_eq!(Pcm::pair(Pcm::ANALOGUE, jm.pcm.unwrap(), true), Some(PcmRole::Analogue));
+    assert_eq!(
+        jm.pcm,
+        Some(Pcm {
+            analogue: false,
+            digital: true,
+            v91: false
+        })
+    );
+    assert_eq!(
+        jm.access,
+        Some(Access {
+            digital: true,
+            ..Access::default()
+        })
+    );
+    assert_eq!(
+        Pcm::pair(Pcm::ANALOGUE, jm.pcm.unwrap(), true),
+        Some(PcmRole::Analogue)
+    );
 }
 
 #[test]
@@ -79,7 +98,13 @@ fn the_digital_modem_s_info0d_says_what_the_network_is() {
     }
     let info0d = found
         .iter()
-        .find_map(|(_, _, i)| if let Info::Info0d(x) = i { Some(*x) } else { None })
+        .find_map(|(_, _, i)| {
+            if let Info::Info0d(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
         .expect("no INFO0d");
     // A North American server: mu-law, at the codec, with a -12 dBm0
     // ceiling -- which is what Table 15/V.90 turns into a limit on the
@@ -116,25 +141,44 @@ fn the_analogue_modem_asks_for_v90_and_names_its_training_codeword() {
     // still finishing when it goes, and its 1850 Hz mark is in INFO0a's band.
     assert_eq!(
         kinds,
-        vec![(Side::Call, "INFO0d"), (Side::Call, "INFO1d"), (Side::Answer, "INFO1a (V.90)")]
+        vec![
+            (Side::Call, "INFO0d"),
+            (Side::Call, "INFO1d"),
+            (Side::Answer, "INFO1a (V.90)")
+        ]
     );
-    let Some((_, _, Info::Info1aPcm(asked))) = found.iter().find(|(_, _, i)| matches!(i, Info::Info1aPcm(_))) else {
+    let Some((_, _, Info::Info1aPcm(asked))) = found
+        .iter()
+        .find(|(_, _, i)| matches!(i, Info::Info1aPcm(_)))
+    else {
         panic!("no V.90 INFO1a");
     };
     // "UINFO shall be greater than 66."
     assert_eq!(asked.uinfo, 78);
     assert_eq!(asked.upstream, SymbolRate::S3200);
-    assert_eq!(asked.md_length, 20, "700 ms of MD, which is on the recording");
+    assert_eq!(
+        asked.md_length, 20,
+        "700 ms of MD, which is on the recording"
+    );
 
     // And INFO1d, as the server probed the upstream: every symbol rate usable,
     // climbing with the rate, on the low carrier.
     let info1d = found
         .iter()
-        .find_map(|(_, _, i)| if let Info::Info1c(x) = i { Some(*x) } else { None })
+        .find_map(|(_, _, i)| {
+            if let Info::Info1c(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
         .unwrap();
     let rates: Vec<u8> = info1d.probed.iter().map(|p| p.max_rate).collect();
     assert_eq!(rates, vec![5, 6, 6, 7, 8, 9]);
-    assert!(!info1d.probed[4].high_carrier, "3200 goes up on the low carrier");
+    assert!(
+        !info1d.probed[4].high_carrier,
+        "3200 goes up on the low carrier"
+    );
 }
 
 /// The analogue modem's DIL descriptor, as it went up in Ja: the upstream
@@ -178,7 +222,9 @@ fn ja() -> Option<datapump::v90::sequences::Descriptor> {
     }
     (0..bits.len().saturating_sub(18)).find_map(|s| {
         let fresh = s == 0 || !bits[s - 1];
-        (fresh && bits[s..s + 17].iter().all(|b| *b) && !bits[s + 17]).then(|| Descriptor::from_bits(&bits[s..])).flatten()
+        (fresh && bits[s..s + 17].iter().all(|b| *b) && !bits[s + 17])
+            .then(|| Descriptor::from_bits(&bits[s..]))
+            .flatten()
     })
 }
 
@@ -191,7 +237,14 @@ fn the_analogue_modem_s_ja_asks_for_a_dil_of_147_segments() {
     assert_eq!(d.h, [20, 20, 20, 20, 20, 20, 11, 11]);
     assert_eq!(d.refs, [78; 8], "every reference is UINFO");
     // Ucodes 0 to 117 in order, with UINFO after every fourth.
-    let training: Vec<u8> = d.ucodes.iter().copied().enumerate().filter(|(i, _)| i % 5 != 4).map(|(_, u)| u).collect();
+    let training: Vec<u8> = d
+        .ucodes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(i, _)| i % 5 != 4)
+        .map(|(_, u)| u)
+        .collect();
     assert_eq!(training, (0..118).collect::<Vec<u8>>());
     assert!(d.ucodes.iter().skip(4).step_by(5).all(|&u| u == 78));
     assert_eq!(d.len(), 17_334);
@@ -223,7 +276,13 @@ fn downstream() -> Downstream {
         .collect();
     let mut rx = Receiver::new(Law::Mu, fs);
     rx.hunt(78);
-    let mut out = Downstream { trained_db: 0.0, inverted: false, jd: None, dil_from: None, symbols: Vec::new() };
+    let mut out = Downstream {
+        trained_db: 0.0,
+        inverted: false,
+        jd: None,
+        dil_from: None,
+        symbols: Vec::new(),
+    };
     let mut descrambler = Scrambler::new(Mode::Call);
     let (mut differential, mut previous) = (false, false);
     let mut bits: Vec<bool> = Vec::new();
@@ -243,7 +302,8 @@ fn downstream() -> Downstream {
                     }
                     let sign = s.positive();
                     let before = descrambler.clone();
-                    let mut bit = descrambler.descramble(if differential { sign ^ previous } else { sign });
+                    let mut bit =
+                        descrambler.descramble(if differential { sign ^ previous } else { sign });
                     if !differential && !bit {
                         // TRN1d is over: Jd is differential, from this
                         // symbol on.
@@ -280,7 +340,11 @@ fn the_server_s_trn1d_trains_the_downstream_receiver_and_jd_checks() {
     let heard = downstream();
     // The line is noisy: 19 dB is what a least-squares fit over the whole of
     // TRN1d gets.
-    assert!(heard.trained_db > 14.0, "trained to {:.1} dB", heard.trained_db);
+    assert!(
+        heard.trained_db > 14.0,
+        "trained to {:.1} dB",
+        heard.trained_db
+    );
     assert!(heard.inverted, "this line turns the signal over");
     let (end, jd) = heard.jd.expect("no Jd checked");
     assert_eq!(jd.rates, datapump::v90::sequences::Jd::ALL_RATES);
@@ -304,7 +368,13 @@ fn the_dil_that_arrives_is_the_dil_the_analogue_modem_asked_for() {
         .symbols()
         .map(|(u, positive)| ucode::level(Law::Mu, u) * if positive { 1.0 } else { -1.0 })
         .collect();
-    let got: Vec<f64> = heard.symbols.iter().filter(|s| s.index >= start).map(|s| s.value).take(wanted.len()).collect();
+    let got: Vec<f64> = heard
+        .symbols
+        .iter()
+        .filter(|s| s.index >= start)
+        .map(|s| s.value)
+        .take(wanted.len())
+        .collect();
     assert_eq!(got.len(), wanted.len(), "the recording ends inside the DIL");
     let signal: f64 = wanted.iter().map(|w| w * w).sum();
     let error: f64 = got.iter().zip(&wanted).map(|(g, w)| (g - w).powi(2)).sum();
@@ -314,7 +384,14 @@ fn the_dil_that_arrives_is_the_dil_the_analogue_modem_asked_for() {
     assert!(snr > 14.0, "the DIL fits to {snr:.1} dB");
     // And shifted by a symbol either way it does not fit at all.
     for shift in [1usize, 6] {
-        let error: f64 = got[shift..].iter().zip(&wanted).map(|(g, w)| (g - w).powi(2)).sum();
-        assert!(10.0 * (signal / error).log10() < 3.0, "the DIL fits {shift} symbols off too");
+        let error: f64 = got[shift..]
+            .iter()
+            .zip(&wanted)
+            .map(|(g, w)| (g - w).powi(2))
+            .sum();
+        assert!(
+            10.0 * (signal / error).log10() < 3.0,
+            "the DIL fits {shift} symbols off too"
+        );
     }
 }

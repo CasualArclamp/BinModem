@@ -158,7 +158,6 @@ impl Bell103Rx {
     }
 }
 
-
 /// A streaming Bell 103 transmitter: bits in, line samples out.
 ///
 /// Continuous-phase frequency shift keying. The phase carries across every
@@ -513,10 +512,7 @@ impl Modem {
     /// determine each other -- and it keeps one interface for every pump.
     pub fn take_bits(&mut self) -> Vec<bool> {
         let bytes = std::mem::take(&mut self.received);
-        bytes
-            .iter()
-            .flat_map(|&b| self.framing.encode(b))
-            .collect()
+        bytes.iter().flat_map(|&b| self.framing.encode(b)).collect()
     }
 
     /// Queue bits for transmission.

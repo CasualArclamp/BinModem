@@ -138,7 +138,10 @@ impl Wanted {
         // 6.2's default is no authentication at all, so a demand is always
         // something that has to be said.
         if let Some(auth) = self.auth {
-            out.push(ConfigOption { kind: option::AUTHENTICATION, value: auth.to_value() });
+            out.push(ConfigOption {
+                kind: option::AUTHENTICATION,
+                value: auth.to_value(),
+            });
         }
         if self.magic != 0 {
             out.push(ConfigOption {
@@ -147,10 +150,16 @@ impl Wanted {
             });
         }
         if self.pfc {
-            out.push(ConfigOption { kind: option::PFC, value: Vec::new() });
+            out.push(ConfigOption {
+                kind: option::PFC,
+                value: Vec::new(),
+            });
         }
         if self.acfc {
-            out.push(ConfigOption { kind: option::ACFC, value: Vec::new() });
+            out.push(ConfigOption {
+                kind: option::ACFC,
+                value: Vec::new(),
+            });
         }
         out
     }
@@ -307,13 +316,19 @@ pub struct Lcp {
 
 impl Lcp {
     pub fn new(wanted: Wanted) -> Self {
-        Self { wanted, ..Self::default() }
+        Self {
+            wanted,
+            ..Self::default()
+        }
     }
 
     /// An end that asks the far end to say who it is, in one of `methods`.
     pub fn demanding(wanted: Wanted, methods: Vec<Auth>) -> Self {
         Self {
-            wanted: Wanted { auth: methods.first().copied(), ..wanted },
+            wanted: Wanted {
+                auth: methods.first().copied(),
+                ..wanted
+            },
             acceptable: methods,
             ..Self::default()
         }
@@ -328,7 +343,11 @@ pub fn describe_auth(value: &[u8]) -> String {
         [0xc2, 0x23, 0x80] => "MS-CHAP".to_owned(),
         [0xc2, 0x23, 0x81] => "MS-CHAPv2".to_owned(),
         [0xc2, 0x27, ..] => "EAP".to_owned(),
-        other => other.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+        other => other
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -381,7 +400,10 @@ impl crate::session::Protocol for Lcp {
                     // end is not going to say who it is.
                     let suggested = Auth::from_value(value).filter(|a| self.acceptable.contains(a));
                     let next = suggested.or_else(|| {
-                        let at = self.wanted.auth.and_then(|w| self.acceptable.iter().position(|a| *a == w));
+                        let at = self
+                            .wanted
+                            .auth
+                            .and_then(|w| self.acceptable.iter().position(|a| *a == w));
                         at.and_then(|i| self.acceptable.get(i + 1).copied())
                     });
                     match next {
@@ -434,11 +456,26 @@ mod tests {
     #[test]
     fn an_ordinary_request_is_agreed_to() {
         let (review, agreed) = request(vec![
-            ConfigOption { kind: option::MRU, value: vec![0x05, 0xdc] },
-            ConfigOption { kind: option::ACCM, value: vec![0, 0, 0, 0] },
-            ConfigOption { kind: option::MAGIC, value: vec![1, 2, 3, 4] },
-            ConfigOption { kind: option::PFC, value: vec![] },
-            ConfigOption { kind: option::ACFC, value: vec![] },
+            ConfigOption {
+                kind: option::MRU,
+                value: vec![0x05, 0xdc],
+            },
+            ConfigOption {
+                kind: option::ACCM,
+                value: vec![0, 0, 0, 0],
+            },
+            ConfigOption {
+                kind: option::MAGIC,
+                value: vec![1, 2, 3, 4],
+            },
+            ConfigOption {
+                kind: option::PFC,
+                value: vec![],
+            },
+            ConfigOption {
+                kind: option::ACFC,
+                value: vec![],
+            },
         ]);
         assert_eq!(review, Review::Ack);
         assert_eq!(agreed.mru, 1500);
@@ -500,8 +537,14 @@ mod tests {
     #[test]
     fn something_unnegotiable_is_answered_before_something_merely_wrong() {
         let (review, _) = request(vec![
-            ConfigOption { kind: option::AUTHENTICATION, value: vec![0xff, 0xff] },
-            ConfigOption { kind: 0xfe, value: vec![] },
+            ConfigOption {
+                kind: option::AUTHENTICATION,
+                value: vec![0xff, 0xff],
+            },
+            ConfigOption {
+                kind: 0xfe,
+                value: vec![],
+            },
         ]);
         match review {
             Review::Reject(options) => {
@@ -516,10 +559,22 @@ mod tests {
     #[test]
     fn an_option_of_the_wrong_length_is_rejected_rather_than_guessed_at() {
         for bad in [
-            ConfigOption { kind: option::MRU, value: vec![0x05] },
-            ConfigOption { kind: option::ACCM, value: vec![0, 0] },
-            ConfigOption { kind: option::MAGIC, value: vec![] },
-            ConfigOption { kind: option::PFC, value: vec![0] },
+            ConfigOption {
+                kind: option::MRU,
+                value: vec![0x05],
+            },
+            ConfigOption {
+                kind: option::ACCM,
+                value: vec![0, 0],
+            },
+            ConfigOption {
+                kind: option::MAGIC,
+                value: vec![],
+            },
+            ConfigOption {
+                kind: option::PFC,
+                value: vec![0],
+            },
         ] {
             let (review, _) = request(vec![bad.clone()]);
             assert!(
@@ -549,7 +604,14 @@ mod tests {
     /// the peer may argue with.
     #[test]
     fn a_request_carries_only_what_is_not_already_the_default() {
-        let bare = Wanted { mru: DEFAULT_MRU, accm: 0, magic: 0, pfc: false, acfc: false, auth: None };
+        let bare = Wanted {
+            mru: DEFAULT_MRU,
+            accm: 0,
+            magic: 0,
+            pfc: false,
+            acfc: false,
+            auth: None,
+        };
         // ACCM is the exception: its default is everything escaped, so asking
         // for nothing escaped is a thing that has to be said.
         let options = bare.to_options();
@@ -561,15 +623,24 @@ mod tests {
             accm: crate::frame::DEFAULT_ACCM,
             ..bare
         };
-        assert!(quiet.to_options().is_empty(), "a request with nothing to say says nothing");
+        assert!(
+            quiet.to_options().is_empty(),
+            "a request with nothing to say says nothing"
+        );
     }
 
     /// And what a full one looks like.
     #[test]
     fn the_default_request_asks_for_the_four_things_worth_asking_for() {
-        let wanted = Wanted { magic: 0xdead_beef, ..Wanted::default() };
+        let wanted = Wanted {
+            magic: 0xdead_beef,
+            ..Wanted::default()
+        };
         let kinds: Vec<u8> = wanted.to_options().iter().map(|o| o.kind).collect();
-        assert_eq!(kinds, vec![option::ACCM, option::MAGIC, option::PFC, option::ACFC]);
+        assert_eq!(
+            kinds,
+            vec![option::ACCM, option::MAGIC, option::PFC, option::ACFC]
+        );
     }
 
     /// 6.2: an end that wants to know who is calling asks, and a Nak moves it
@@ -578,20 +649,40 @@ mod tests {
     fn a_demand_moves_down_the_list_and_never_off_the_end() {
         use crate::session::Protocol;
         let mut lcp = Lcp::demanding(Wanted::default(), vec![Auth::ChapMd5, Auth::Pap]);
-        let asked: Vec<_> = lcp.request().into_iter().filter(|o| o.kind == option::AUTHENTICATION).collect();
-        assert_eq!(asked, vec![ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 5] }]);
+        let asked: Vec<_> = lcp
+            .request()
+            .into_iter()
+            .filter(|o| o.kind == option::AUTHENTICATION)
+            .collect();
+        assert_eq!(
+            asked,
+            vec![ConfigOption {
+                kind: option::AUTHENTICATION,
+                value: vec![0xc2, 0x23, 5]
+            }]
+        );
 
         // The far end suggests MS-CHAP, which this end does not do: next on
         // the list instead.
-        lcp.naked(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 0x80] }]);
+        lcp.naked(&[ConfigOption {
+            kind: option::AUTHENTICATION,
+            value: vec![0xc2, 0x23, 0x80],
+        }]);
         assert_eq!(lcp.wanted.auth, Some(Auth::Pap));
         assert_eq!(lcp.refused, None);
 
         // And again, with nothing left: still asking for PAP, and the refusal
         // is noted for the link to end the call over.
-        lcp.naked(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 0x80] }]);
+        lcp.naked(&[ConfigOption {
+            kind: option::AUTHENTICATION,
+            value: vec![0xc2, 0x23, 0x80],
+        }]);
         assert_eq!(lcp.wanted.auth, Some(Auth::Pap), "the demand was dropped");
-        assert!(lcp.refused.as_deref().is_some_and(|r| r.contains("MS-CHAP")));
+        assert!(
+            lcp.refused
+                .as_deref()
+                .is_some_and(|r| r.contains("MS-CHAP"))
+        );
     }
 
     /// 5.4: a far end that rejects the option outright will not authenticate,
@@ -600,7 +691,10 @@ mod tests {
     fn a_rejected_demand_is_not_withdrawn() {
         use crate::session::Protocol;
         let mut lcp = Lcp::demanding(Wanted::default(), vec![Auth::Pap]);
-        lcp.rejected(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc0, 0x23] }]);
+        lcp.rejected(&[ConfigOption {
+            kind: option::AUTHENTICATION,
+            value: vec![0xc0, 0x23],
+        }]);
         assert_eq!(lcp.wanted.auth, Some(Auth::Pap));
         assert!(lcp.refused.is_some());
     }
@@ -612,8 +706,14 @@ mod tests {
         let before = agreed;
         let outcome = review(
             &[
-                ConfigOption { kind: option::MRU, value: vec![0x02, 0x00] },
-                ConfigOption { kind: 0xfe, value: vec![] },
+                ConfigOption {
+                    kind: option::MRU,
+                    value: vec![0x02, 0x00],
+                },
+                ConfigOption {
+                    kind: 0xfe,
+                    value: vec![],
+                },
             ],
             &mut agreed,
         );

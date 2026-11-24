@@ -297,7 +297,14 @@ impl Canceller {
         fft.process(&mut hr, &mut hi);
         let furthest = self.kept - self.taps.len() - 1;
         let (lag, peak) =
-            hr[..furthest].iter().map(|c| c * c).enumerate().fold((0, 0.0), |best, (i, p)| if p > best.1 { (i, p) } else { best });
+            hr[..furthest]
+                .iter()
+                .map(|c| c * c)
+                .enumerate()
+                .fold(
+                    (0, 0.0),
+                    |best, (i, p)| if p > best.1 { (i, p) } else { best },
+                );
         let mean = hr[..furthest].iter().map(|c| c * c).sum::<f64>() / furthest as f64;
         if peak < SURE * mean {
             return;
@@ -332,7 +339,10 @@ mod tests {
     struct Noise(u64);
     impl Noise {
         fn uniform(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gaussian(&mut self) -> f64 {
@@ -352,7 +362,11 @@ mod tests {
         let total = (seconds * fs) as usize;
         let (mut residue, mut wanted) = (0.0, 0.0);
         for n in 0..total {
-            let echo: f64 = shape.iter().enumerate().map(|(i, s)| s * line[delay + i]).sum();
+            let echo: f64 = shape
+                .iter()
+                .enumerate()
+                .map(|(i, s)| s * line[delay + i])
+                .sum();
             let far_now = far * 0.1 * theirs.gaussian();
             let out = canceller.clean(echo + far_now);
             if n + fs as usize >= total {
@@ -375,7 +389,10 @@ mod tests {
             let found = canceller.delay().expect("a delay");
             assert!(found.abs_diff(delay) < 8, "found {found}, was {delay}");
             // Ten seconds of learning with 192 taps: about 34 dB.
-            assert!(left < -30.0, "echo left {left:.1} dB against the far end at {far}");
+            assert!(
+                left < -30.0,
+                "echo left {left:.1} dB against the far end at {far}"
+            );
             assert_eq!(canceller.moved, 0);
         }
     }
@@ -384,7 +401,10 @@ mod tests {
     fn it_goes_on_improving() {
         let (soon, _) = left_over(48_000.0, 3000, 1.0, 4.0);
         let (later, _) = left_over(48_000.0, 3000, 1.0, 30.0);
-        assert!(later < soon - 6.0, "{soon:.1} dB after 4 s, {later:.1} dB after 30");
+        assert!(
+            later < soon - 6.0,
+            "{soon:.1} dB after 4 s, {later:.1} dB after 30"
+        );
         assert!(later < -36.0, "{later:.1} dB after 30 s");
     }
 

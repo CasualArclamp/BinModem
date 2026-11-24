@@ -124,7 +124,8 @@ impl Resolver {
         std::thread::spawn(move || {
             let _ = sender.send(look_up(&name, port));
         });
-        self.asked.insert(host.to_owned(), (receiver, Instant::now()));
+        self.asked
+            .insert(host.to_owned(), (receiver, Instant::now()));
     }
 
     /// Where `authority` is, if that is known yet.
@@ -150,12 +151,15 @@ impl Resolver {
                         "proxy: {host} is {} ({took} ms to look up)",
                         Ipv4Addr::from(address)
                     ));
-                    self.known.insert(host.to_owned(), Known::Found(address, Instant::now()));
+                    self.known
+                        .insert(host.to_owned(), Known::Found(address, Instant::now()));
                 }
                 Err(why) => {
                     self.failures += 1;
-                    self.log.push(format!("proxy: {host} could not be looked up: {why}"));
-                    self.known.insert(host.to_owned(), Known::Failed(why, Instant::now()));
+                    self.log
+                        .push(format!("proxy: {host} could not be looked up: {why}"));
+                    self.known
+                        .insert(host.to_owned(), Known::Failed(why, Instant::now()));
                 }
             }
         }
@@ -208,7 +212,10 @@ mod tests {
     fn an_address_is_its_own_answer() {
         let mut r = Resolver::new();
         r.ask("93.184.216.34:443");
-        assert_eq!(r.answer("93.184.216.34:443"), Answer::Found(Endpoint::new([93, 184, 216, 34], 443)));
+        assert_eq!(
+            r.answer("93.184.216.34:443"),
+            Answer::Found(Endpoint::new([93, 184, 216, 34], 443))
+        );
         assert_eq!(r.lookups, 0, "an address was looked up");
     }
 
@@ -245,7 +252,10 @@ mod tests {
             }
         };
         // localhost is this machine, which is not somewhere to be sent.
-        assert!(matches!(answer, Answer::Failed(ref why) if why.contains("this machine")), "{answer:?}");
+        assert!(
+            matches!(answer, Answer::Failed(ref why) if why.contains("this machine")),
+            "{answer:?}"
+        );
         assert_eq!(r.lookups, 1);
         // Asked again, on another port: no second lookup.
         r.ask("localhost:443");

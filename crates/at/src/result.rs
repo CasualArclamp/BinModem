@@ -92,7 +92,10 @@ pub struct Formatter {
 impl Default for Formatter {
     fn default() -> Self {
         // V.250 6.2.6 and 6.2.5 recommend V1 and Q0.
-        Self { verbose: true, quiet: false }
+        Self {
+            verbose: true,
+            quiet: false,
+        }
     }
 }
 
@@ -168,7 +171,10 @@ mod tests {
 
     #[test]
     fn verbose_format_wraps_in_cr_lf_both_sides() {
-        let f = Formatter { verbose: true, quiet: false };
+        let f = Formatter {
+            verbose: true,
+            quiet: false,
+        };
         assert_eq!(rendered(f, ResultCode::Ok), "\r\nOK\r\n");
         assert_eq!(rendered(f, ResultCode::NoCarrier), "\r\nNO CARRIER\r\n");
     }
@@ -177,14 +183,20 @@ mod tests {
     fn numeric_format_has_a_bare_trailing_cr() {
         // Table 3: V0 result codes are <numeric code><cr>, with no leading
         // <cr><lf> and no <lf> after.
-        let f = Formatter { verbose: false, quiet: false };
+        let f = Formatter {
+            verbose: false,
+            quiet: false,
+        };
         assert_eq!(rendered(f, ResultCode::Ok), "0\r");
         assert_eq!(rendered(f, ResultCode::Busy), "7\r");
     }
 
     #[test]
     fn quiet_suppresses_result_codes() {
-        let f = Formatter { verbose: true, quiet: true };
+        let f = Formatter {
+            verbose: true,
+            quiet: true,
+        };
         assert_eq!(rendered(f, ResultCode::Ok), "");
     }
 
@@ -192,11 +204,19 @@ mod tests {
     fn information_text_format_follows_table_3() {
         let regs = Registers::default();
         let mut v = Vec::new();
-        Formatter { verbose: true, quiet: false }.info("050", &regs, &mut v);
+        Formatter {
+            verbose: true,
+            quiet: false,
+        }
+        .info("050", &regs, &mut v);
         assert_eq!(String::from_utf8(v).unwrap(), "\r\n050\r\n");
 
         let mut v = Vec::new();
-        Formatter { verbose: false, quiet: false }.info("050", &regs, &mut v);
+        Formatter {
+            verbose: false,
+            quiet: false,
+        }
+        .info("050", &regs, &mut v);
         assert_eq!(String::from_utf8(v).unwrap(), "050\r\n");
     }
 

@@ -148,7 +148,13 @@ impl Shape {
         if sps == 0 || (fs - sps as f64 * BAUD).abs() > 1.0 || !sps.is_multiple_of(3) {
             return None;
         }
-        Some(Self { fs, sps, carrier: if real { 0.0 } else { CARRIER }, real, colour: 0 })
+        Some(Self {
+            fs,
+            sps,
+            carrier: if real { 0.0 } else { CARRIER },
+            real,
+            colour: 0,
+        })
     }
 
     /// V.ARC/QAM at this sample rate, which has to be a multiple of 48 kHz.
@@ -174,7 +180,10 @@ impl Shape {
         // Half of each word is checks: the starting table has to carry the
         // first made-to-measure one over a line nothing is known about,
         // and a single carrier has no copies of anything to add together.
-        let mut table = Table { parity: DEFAULT_PARITY, bits: vec![if self.real { 1 } else { 2 }] };
+        let mut table = Table {
+            parity: DEFAULT_PARITY,
+            bits: vec![if self.real { 1 } else { 2 }],
+        };
         let capacity = self.block(&table) * self.group_bits(self.bits_of(&table)) / 8;
         table.parity = crate::link::checks_for(0.5, capacity);
         table
@@ -185,7 +194,12 @@ impl Shape {
     }
 
     fn bits_of(&self, table: &Table) -> u8 {
-        table.bits.first().copied().unwrap_or(0).min(self.max_bits())
+        table
+            .bits
+            .first()
+            .copied()
+            .unwrap_or(0)
+            .min(self.max_bits())
     }
 
     /// Bits a group carries with `bits` to the symbol.
@@ -223,7 +237,9 @@ impl Shape {
     /// Bits a second of frames `table` carries.
     pub fn net(&self, table: &Table) -> f64 {
         let blocks = GROUPS / self.block(table);
-        self.layout(table).map_or(0.0, |l| (blocks * l.payload() * 8) as f64 / self.superframe())
+        self.layout(table).map_or(0.0, |l| {
+            (blocks * l.payload() * 8) as f64 / self.superframe()
+        })
     }
 
     /// The sync word for a mark.
@@ -243,7 +259,11 @@ impl Shape {
                 state ^= state << 5;
                 let a = if state & 0x100 != 0 { 1.0 } else { -1.0 };
                 let b = if state & 0x200 != 0 { 1.0 } else { -1.0 };
-                let point = if self.real { Complex::new(a, 0.0) } else { Complex::new(a * r, b * r) };
+                let point = if self.real {
+                    Complex::new(a, 0.0)
+                } else {
+                    Complex::new(a * r, b * r)
+                };
                 point * signs[i / QUARTER]
             })
             .collect()
@@ -268,7 +288,10 @@ impl Shape {
     /// The unit-power point for `value`, and the reverse.
     fn point(&self, value: u32, bits: u8) -> Complex {
         if self.real {
-            Complex::new(f64::from(pam_level(value, u32::from(bits))) * pam_scale(bits), 0.0)
+            Complex::new(
+                f64::from(pam_level(value, u32::from(bits))) * pam_scale(bits),
+                0.0,
+            )
         } else {
             qam_point(value, bits)
         }
@@ -327,7 +350,10 @@ pub struct Tx {
 
 impl std::fmt::Debug for Tx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tx").field("shape", &self.shape).field("id", &self.id).finish_non_exhaustive()
+        f.debug_struct("Tx")
+            .field("shape", &self.shape)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -353,7 +379,11 @@ impl Tx {
             turn: 0.0,
             step: TAU * shape.carrier / shape.fs,
             // The real part of a complex envelope has half its power.
-            gain: if shape.real { level } else { level * std::f64::consts::SQRT_2 },
+            gain: if shape.real {
+                level
+            } else {
+                level * std::f64::consts::SQRT_2
+            },
             trim: 1.0,
             clipped: 0,
             shape,
@@ -375,7 +405,11 @@ impl Tx {
         for (i, value) in values.iter_mut().enumerate() {
             // The first symbol's sign is the flag, so it brings one bit
             // fewer.
-            *value = if i == 0 { self.reader.take(u32::from(bits) - 1) } else { self.reader.take(u32::from(bits)) };
+            *value = if i == 0 {
+                self.reader.take(u32::from(bits) - 1)
+            } else {
+                self.reader.take(u32::from(bits))
+            };
         }
         let level = |v: u32| f64::from(pam_level(v, u32::from(bits))) * pam_scale(bits);
         let total: f64 = values.iter().map(|&v| level(v)).sum();
@@ -429,7 +463,11 @@ impl Tx {
 
 impl Sender for Tx {
     fn wants(&self) -> Option<Layout> {
-        if self.wanting { self.shape.layout(&self.table) } else { None }
+        if self.wanting {
+            self.shape.layout(&self.table)
+        } else {
+            None
+        }
     }
 
     fn give(&mut self, line: Vec<u8>) {
@@ -695,14 +733,23 @@ impl Rx {
             let gap = 10f64.powf((gap_db + extra) / 10.0);
             let capacity = (1.0 + snr / gap).log2();
             // A ladder on one axis holds half what a point on two does.
-            let room = if self.shape.real { capacity / 2.0 } else { capacity };
+            let room = if self.shape.real {
+                capacity / 2.0
+            } else {
+                capacity
+            };
             // Bits that were asked for are the bits, whatever the line says.
             let room = self.fixed.0.map_or(room, f64::from);
             // Whether the line bears even the smallest grid with this code,
             // or is being given it regardless because there is none smaller.
             let fits = room >= f64::from(least);
-            let bits = (room.floor() as i64).clamp(i64::from(least), i64::from(self.shape.max_bits())) as u8;
-            let mut table = Table { parity: LOADED_PARITY, bits: vec![bits] };
+            let bits = (room.floor() as i64)
+                .clamp(i64::from(least), i64::from(self.shape.max_bits()))
+                as u8;
+            let mut table = Table {
+                parity: LOADED_PARITY,
+                bits: vec![bits],
+            };
             if let Some(rate) = rate {
                 let capacity = self.shape.block(&table) * self.shape.group_bits(bits) / 8;
                 table.parity = crate::link::checks_for(rate, capacity);
@@ -766,13 +813,24 @@ impl Rx {
     fn hunt(&mut self) {
         let (quarters, power) = self.correlate(0);
         let (sum, mark) = Self::combine(&quarters);
-        let quality = if power > 1e-12 { sum.norm_sqr() / (SYNC as f64 * power) } else { 0.0 };
+        let quality = if power > 1e-12 {
+            sum.norm_sqr() / (SYNC as f64 * power)
+        } else {
+            0.0
+        };
         let better = self.found.is_none_or(|f| quality > f.quality);
         if quality > 0.5 && better {
-            self.found = Some(Found { quality, gain: sum / SYNC as f64, mark, age: 0 });
+            self.found = Some(Found {
+                quality,
+                gain: sum / SYNC as f64,
+                mark,
+                age: 0,
+            });
             return;
         }
-        let Some(found) = self.found.as_mut() else { return };
+        let Some(found) = self.found.as_mut() else {
+            return;
+        };
         found.age += 1;
         if found.age < 3 {
             return;
@@ -860,7 +918,11 @@ impl Rx {
             self.heard[self.at / QUARTER] += seen * self.sync[0][self.at].conj();
         }
         let least = if self.shape.real { 1 } else { 2 };
-        let bits = if in_sync { least } else { table.as_ref().map_or(0, |t| self.shape.bits_of(t)) };
+        let bits = if in_sync {
+            least
+        } else {
+            table.as_ref().map_or(0, |t| self.shape.bits_of(t))
+        };
 
         // The diagram shows the data. The sync word is on the smallest grid
         // whatever the data is on, so it is shown only until there is data.
@@ -1002,7 +1064,11 @@ impl Rx {
         match table.and_then(|t| self.shape.layout(t)) {
             Some(layout) => {
                 let line = self.writer.finish(layout.capacity());
-                self.arrived.push_back(Arrived::Octets { line, layout, erased: None });
+                self.arrived.push_back(Arrived::Octets {
+                    line,
+                    layout,
+                    erased: None,
+                });
             }
             None => {
                 self.writer = BitWriter::default();
@@ -1040,8 +1106,11 @@ impl Rx {
                 (sum.abs(), mark, power)
             })
             .collect();
-        let (best, &(size, mark, power)) =
-            looks.iter().enumerate().max_by(|a, b| a.1.0.total_cmp(&b.1.0)).expect("a range");
+        let (best, &(size, mark, power)) = looks
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+            .expect("a range");
         if power < 1e-12 || size * size / (SYNC as f64 * power) < 0.3 {
             self.missed += 1;
             self.quiet = 0;
@@ -1071,7 +1140,11 @@ impl Rx {
         let thirds = SEARCH as f64 - best as f64 + 0.5 * (later - earlier) / bend;
         let offset = thirds * (self.shape.sps / 3) as f64;
         self.timing = offset;
-        self.quiet = if offset.abs() < QUIET * self.shape.fs / 48_000.0 { self.quiet + 1 } else { 0 };
+        self.quiet = if offset.abs() < QUIET * self.shape.fs / 48_000.0 {
+            self.quiet + 1
+        } else {
+            0
+        };
         // Three settings of a second-order loop. Until a word has arrived on
         // time, take out the whole error and half of it again from the rate,
         // which halves what is left at every word; then more gently; and
@@ -1089,7 +1162,8 @@ impl Rx {
             _ => (0.5, 0.1),
         };
         self.interp.nudge(now * offset);
-        self.interp.adjust_step(slow * offset / (SUPER * self.shape.sps) as f64);
+        self.interp
+            .adjust_step(slow * offset / (SUPER * self.shape.sps) as f64);
 
         // The first measurement is taken as soon as the timing has come to
         // rest, and an equaliser with this many taps can go on improving for
@@ -1223,7 +1297,9 @@ impl Receiver for Rx {
     }
 
     fn code(&self) -> Option<(usize, usize)> {
-        let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref())?;
+        let table = self
+            .id
+            .and_then(|id| self.tables[usize::from(id)].as_ref())?;
         self.shape.layout(table).map(|layout| layout.code())
     }
 
@@ -1247,7 +1323,11 @@ impl Receiver for Rx {
         let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref());
         vec![Bin {
             hz: self.shape.carrier,
-            snr_db: if self.stage == Stage::Steady { self.snr_db() } else { 0.0 },
+            snr_db: if self.stage == Stage::Steady {
+                self.snr_db()
+            } else {
+                0.0
+            },
             bits: table.map_or(0, |t| self.shape.bits_of(t)),
         }]
     }
@@ -1261,7 +1341,10 @@ mod tests {
     struct Noise(u64);
     impl Noise {
         fn uniform(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gaussian(&mut self) -> f64 {
@@ -1270,7 +1353,9 @@ mod tests {
     }
 
     fn stream(seed: usize, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
+        (0..len)
+            .map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8)
+            .collect()
     }
 
     /// Two ends, a wire each way with noise and a clock of its own, and a
@@ -1294,7 +1379,13 @@ mod tests {
         fn new(shape: Shape, snr_db: f64, ppm: f64, highpass_hz: f64) -> Self {
             let fs = shape.fs;
             let end = |tx: u8, rx: u8| {
-                Station::new(fs, vec![(Tx::new(shape.clone().coloured(tx)), Rx::new(shape.clone().coloured(rx)))])
+                Station::new(
+                    fs,
+                    vec![(
+                        Tx::new(shape.clone().coloured(tx)),
+                        Rx::new(shape.clone().coloured(rx)),
+                    )],
+                )
             };
             let mut clocks = [Interp::new(), Interp::new()];
             clocks[0].adjust_step(ppm * 1e-6);
@@ -1303,7 +1394,10 @@ mod tests {
                 a: end(0, 1),
                 b: end(1, 0),
                 clocks,
-                slack: [VecDeque::from(vec![0.0; 256]), VecDeque::from(vec![0.0; 256])],
+                slack: [
+                    VecDeque::from(vec![0.0; 256]),
+                    VecDeque::from(vec![0.0; 256]),
+                ],
                 blocked: [(0.0, 0.0); 2],
                 corner: (-TAU * highpass_hz / fs).exp(),
                 noise: Noise(5),
@@ -1318,7 +1412,11 @@ mod tests {
         fn carry(&mut self, way: usize, x: f64) -> f64 {
             // One pole of high-pass: what a coupling capacitor does.
             let (last_in, last_out) = self.blocked[way];
-            let passed = if self.corner < 1.0 { self.corner * (last_out + x - last_in) } else { x };
+            let passed = if self.corner < 1.0 {
+                self.corner * (last_out + x - last_in)
+            } else {
+                x
+            };
             self.blocked[way] = (x, passed);
             let (slack, noise, sigma) = (&mut self.slack[way], &mut self.noise, self.sigma);
             self.clocks[way].feed(passed, |y| slack.push_back(y + sigma * noise.gaussian()));
@@ -1347,9 +1445,23 @@ mod tests {
     #[test]
     #[ignore = "a trace for looking at, not a test"]
     fn trace_of_the_slicer_over_a_minute() {
-        let number = |name: &str, or: f64| std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(or);
-        let shape = if std::env::var("TRACE_PCM").is_ok() { Shape::pcm(48_000.0) } else { Shape::qam(48_000.0) };
-        let mut pair = Pair::new(shape.unwrap(), number("TRACE_SNR", 90.0), number("TRACE_PPM", 2.0), 0.0);
+        let number = |name: &str, or: f64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(or)
+        };
+        let shape = if std::env::var("TRACE_PCM").is_ok() {
+            Shape::pcm(48_000.0)
+        } else {
+            Shape::qam(48_000.0)
+        };
+        let mut pair = Pair::new(
+            shape.unwrap(),
+            number("TRACE_SNR", 90.0),
+            number("TRACE_PPM", 2.0),
+            0.0,
+        );
         for i in 0..1200 {
             if i == 500 {
                 for way in 0..2 {
@@ -1386,7 +1498,9 @@ mod tests {
             assert_eq!(rx.stage(), Stage::Steady);
             read.push(rx.snr_db());
         }
-        let (least, most) = read.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        let (least, most) = read
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         assert!(least > 72.0, "fell to {least:.1} dB");
         assert!(most - least < 6.0, "swung from {least:.1} to {most:.1} dB");
     }
@@ -1411,7 +1525,13 @@ mod tests {
     fn the_baseband_mode_sends_no_dc_whatever_it_is_given() {
         let shape = Shape::pcm(48_000.0).unwrap();
         let mut tx = Tx::new(shape.clone());
-        tx.adopt(1, Table { parity: 16, bits: vec![6] });
+        tx.adopt(
+            1,
+            Table {
+                parity: 16,
+                bits: vec![6],
+            },
+        );
         let mut worst: f64 = 0.0;
         for _ in 0..(SUPER * 3 * 12) {
             if tx.wants().is_some() {
@@ -1443,7 +1563,11 @@ mod tests {
                 "expected {at_slicer:.1}, measured {:.1} at {ppm} ppm",
                 rx.snr_db()
             );
-            assert!((rx.clock_ppm() - ppm).abs() < 2.0, "asked {ppm}, found {:.2}", rx.clock_ppm());
+            assert!(
+                (rx.clock_ppm() - ppm).abs() < 2.0,
+                "asked {ppm}, found {:.2}",
+                rx.clock_ppm()
+            );
             let bits = pair.a.channels[0].tx.table().bits[0];
             let expect = ((1.0 + 10f64.powf((at_slicer - GAP_DB) / 10.0)).log2()).floor() as u8;
             let b = &pair.b.channels[0];
@@ -1455,7 +1579,12 @@ mod tests {
                 b.rx.losses,
                 pair.at_b.len()
             );
-            assert!(pair.at_b == to_b, "{} of {} octets at {snr} dB, {ppm} ppm", pair.at_b.len(), to_b.len());
+            assert!(
+                pair.at_b == to_b,
+                "{} of {} octets at {snr} dB, {ppm} ppm",
+                pair.at_b.len(),
+                to_b.len()
+            );
             assert!(pair.at_a == to_a);
             // A block or two may go by before the sync word has said which
             // way up the constellation is.
@@ -1475,13 +1604,22 @@ mod tests {
         pair.a.write(&to_b);
         pair.run(30.0);
         let rx = &pair.b.channels[0].rx;
-        assert!((rx.snr_db() - 8.0).abs() < 1.5, "measured {:.1} dB", rx.snr_db());
+        assert!(
+            (rx.snr_db() - 8.0).abs() < 1.5,
+            "measured {:.1} dB",
+            rx.snr_db()
+        );
         let table = pair.a.channels[0].tx.table().clone();
         let layout = rx.shape().layout(&table).expect("a layout");
         let (n, k) = layout.code();
         assert_eq!(table.bits[0], 2);
         assert!(k * 2 <= n + 2, "a code of {k}/{n} at 8 dB");
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
     }
 
     #[test]

@@ -191,7 +191,10 @@ impl Default for CharacterScanner {
     fn default() -> Self {
         // The line before the first character has been idle for as long as
         // anyone knows.
-        Self { collecting: None, idle: u32::MAX }
+        Self {
+            collecting: None,
+            idle: u32::MAX,
+        }
     }
 }
 
@@ -235,7 +238,11 @@ impl CharacterScanner {
                 let gap = self.idle;
                 self.idle = 0;
                 // A framing error means this was not one of our characters.
-                Some(if bit { Scanned::Character { value, gap } } else { Scanned::FramingError })
+                Some(if bit {
+                    Scanned::Character { value, gap }
+                } else {
+                    Scanned::FramingError
+                })
             }
         }
     }
@@ -267,7 +274,9 @@ fn unfilled_answer(seen: &[(u8, u32)]) -> Option<Answer> {
     let run = seen.get(seen.len().checked_sub(2 * UNFILLED_PAIRS)?..)?;
     let kind = run[1].0;
     let meant = matches!(kind, ADP_C | ADP_NULL | ADP_M | ADP_P);
-    let repeated = run.chunks(2).all(|pair| pair[0].0 == ADP_E && pair[1].0 == kind);
+    let repeated = run
+        .chunks(2)
+        .all(|pair| pair[0].0 == ADP_E && pair[1].0 == kind);
     let back_to_back = run[1..].iter().all(|&(_, gap)| gap < *FILL.start());
     (meant && repeated && back_to_back).then(|| Answer::from_char(kind))
 }
@@ -359,7 +368,11 @@ impl Originator {
         }
         match self.scanner.scan(bit) {
             Some(Scanned::Character { value, gap }) => {
-                self.text = if texty(value) && gap < *FILL.start() { self.text + 1 } else { 0 };
+                self.text = if texty(value) && gap < *FILL.start() {
+                    self.text + 1
+                } else {
+                    0
+                };
                 if self.text >= TEXT_RUN {
                     self.outcome = Outcome::Text;
                     return self.outcome;
@@ -615,7 +628,11 @@ impl Answerer {
         if self.history == FLAG {
             // Contiguous, or it starts again: two flags eight bits apart are a
             // run and two flags nine bits apart are a coincidence.
-            self.flag_run = if self.since_flag == 8 { self.flag_run + 1 } else { 1 };
+            self.flag_run = if self.since_flag == 8 {
+                self.flag_run + 1
+            } else {
+                1
+            };
             self.since_flag = 0;
             if self.flag_run >= FLAG_RUN {
                 self.flags = true;
@@ -637,7 +654,11 @@ impl Answerer {
         let c = match self.scanner.scan(bit) {
             Some(Scanned::Character { value, gap }) => {
                 // A caller without V.42 whose terminal is already typing.
-                self.text = if texty(value) && gap < *FILL.start() { self.text + 1 } else { 0 };
+                self.text = if texty(value) && gap < *FILL.start() {
+                    self.text + 1
+                } else {
+                    0
+                };
                 if self.text >= TEXT_RUN {
                     self.outcome = Outcome::Text;
                     return self.outcome;
@@ -758,8 +779,7 @@ impl Answerer {
     /// that stopped there would cut Table 3's pattern into pieces with flags
     /// in the gaps -- and 7.2.1.2 wants "at least two adjacent ADPs".
     pub fn sending(&self) -> bool {
-        !self.out.is_empty()
-            || (self.outcome == Outcome::OriginatorDetected && !self.said_enough())
+        !self.out.is_empty() || (self.outcome == Outcome::OriginatorDetected && !self.said_enough())
     }
 
     /// Whether the originator has started the protocol phase.
@@ -882,7 +902,11 @@ mod tests {
         // it, which is the whole point of the appendix.
         let mut o = Originator::default();
         say(&mut o, ADP_M, 5);
-        assert_eq!(o.outcome(), Outcome::Pending, "EM is a prefix, not an answer");
+        assert_eq!(
+            o.outcome(),
+            Outcome::Pending,
+            "EM is a prefix, not an answer"
+        );
         say(&mut o, ADP_C, 10);
         assert_eq!(o.outcome(), Outcome::Answered(Answer::ErrorControl));
     }
@@ -908,7 +932,10 @@ mod tests {
         // not nothing: EM and EP both report V.42 support in their own right.
         let mut o = Originator::default();
         say(&mut o, ADP_M, 5);
-        assert_eq!(o.tick(DEFAULT_T400_MS), Outcome::Answered(Answer::Extended(ADP_M)));
+        assert_eq!(
+            o.tick(DEFAULT_T400_MS),
+            Outcome::Answered(Answer::Extended(ADP_M))
+        );
         assert!(matches!(o.outcome(), Outcome::Answered(a) if a.error_controlled()));
     }
 
@@ -931,7 +958,9 @@ mod tests {
                 seen.push(c);
             }
         }
-        seen.windows(2).filter(|w| w[0] == ADP_E && w[1] == ADP_C).count()
+        seen.windows(2)
+            .filter(|w| w[0] == ADP_E && w[1] == ADP_C)
+            .count()
     }
 
     #[test]
@@ -1076,7 +1105,10 @@ mod tests {
         // Two seconds of pattern on the line with nobody reading it, which is
         // well past T400 and inside the bound a silent line gets.
         for _ in 0..2000 {
-            assert!(a.sending(), "the pattern let go before the far end listened");
+            assert!(
+                a.sending(),
+                "the pattern let go before the far end listened"
+            );
             a.transmit();
             a.tick(1);
         }
@@ -1128,7 +1160,11 @@ mod tests {
             }
             assert_ne!(a.outcome(), Outcome::Text, "after {k} repetitions");
         }
-        assert_eq!(a.outcome(), Outcome::OriginatorDetected, "the ODP was not recognised");
+        assert_eq!(
+            a.outcome(),
+            Outcome::OriginatorDetected,
+            "the ODP was not recognised"
+        );
         // And what goes back is Table 3's answer, as characters: the pattern
         // is only worth sending if the far end can frame it.
         let mut scanner = CharacterScanner::default();
@@ -1264,7 +1300,11 @@ mod tests {
         let heard = o.take_heard();
         let mut scanner = CharacterScanner::default();
         let text: Vec<u8> = heard.iter().filter_map(|b| scanner.feed(*b)).collect();
-        assert!(banner.starts_with(&text) && text.len() >= TEXT_RUN as usize, "{:?}", String::from_utf8_lossy(&text));
+        assert!(
+            banner.starts_with(&text) && text.len() >= TEXT_RUN as usize,
+            "{:?}",
+            String::from_utf8_lossy(&text)
+        );
     }
 
     #[test]
@@ -1306,7 +1346,11 @@ mod tests {
             o.receive(b);
         }
         assert_eq!(o.outcome(), Outcome::Answered(Answer::ErrorControl));
-        assert!(o.patterns().contains(&Answer::Extended(ADP_P)), "{:?}", o.patterns());
+        assert!(
+            o.patterns().contains(&Answer::Extended(ADP_P)),
+            "{:?}",
+            o.patterns()
+        );
     }
 
     #[test]

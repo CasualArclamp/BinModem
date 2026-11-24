@@ -69,7 +69,9 @@ fn call(
         let b = answerer.step(to_answerer);
         to_caller = b;
         to_answerer = noise(a, caller.phase(), caller.progress());
-        outcome.heard.extend(answerer.take_heard().into_iter().map(|m| m.frame));
+        outcome
+            .heard
+            .extend(answerer.take_heard().into_iter().map(|m| m.frame));
         if answerer.phase() == Phase::Receiving && outcome.page.is_none() {
             let lines = answerer.lines().len();
             if outcome.seen.last() != Some(&lines) {
@@ -94,20 +96,54 @@ fn clean(sample: f64, _: Phase, _: Option<f64>) -> f64 {
 fn two_of_these_send_a_page_in_jbig_at_either_resolution() {
     for resolution in [Resolution::Standard, Resolution::Fine] {
         let page = a_page(300, resolution);
-        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone())).offering(&WITH_V17);
+        let mut caller =
+            FaxCall::originate(FS, "61399990000", Some(page.clone())).offering(&WITH_V17);
         let mut answerer = FaxCall::answer(FS, "61388880000").offering(&WITH_V17);
         let got = call(&mut caller, &mut answerer, 60.0, &mut clean);
-        assert_eq!(caller.phase(), Phase::Done, "{resolution:?}: the caller ended at {} ({:?})", caller.phase().name(), caller.trouble());
-        assert_eq!(answerer.phase(), Phase::Done, "{resolution:?}: the answerer ended at {} ({:?})", answerer.phase().name(), answerer.trouble());
+        assert_eq!(
+            caller.phase(),
+            Phase::Done,
+            "{resolution:?}: the caller ended at {} ({:?})",
+            caller.phase().name(),
+            caller.trouble()
+        );
+        assert_eq!(
+            answerer.phase(),
+            Phase::Done,
+            "{resolution:?}: the answerer ended at {} ({:?})",
+            answerer.phase().name(),
+            answerer.trouble()
+        );
         assert!(caller.error_correction() && answerer.error_correction());
-        assert_eq!(caller.coding(), Coding::Jbig, "{resolution:?}: sent in {:?}", caller.coding());
-        assert_eq!(answerer.coding(), Coding::Jbig, "{resolution:?}: read as {:?}", answerer.coding());
+        assert_eq!(
+            caller.coding(),
+            Coding::Jbig,
+            "{resolution:?}: sent in {:?}",
+            caller.coding()
+        );
+        assert_eq!(
+            answerer.coding(),
+            Coding::Jbig,
+            "{resolution:?}: read as {:?}",
+            answerer.coding()
+        );
         let arrived = got.page.expect("no page arrived");
         assert_eq!(arrived.resolution, resolution);
-        assert!(arrived.lines == page.lines, "{resolution:?}: the page came out different");
+        assert!(
+            arrived.lines == page.lines,
+            "{resolution:?}: the page came out different"
+        );
         // Drawn as it came, a frame's worth at a time, not all at the end.
-        let partway = got.seen.iter().filter(|&&n| n > 0 && n < page.lines.len()).count();
-        assert!(partway >= 3, "{resolution:?}: seen at {partway} heights on the way ({:?})", got.seen);
+        let partway = got
+            .seen
+            .iter()
+            .filter(|&&n| n > 0 && n < page.lines.len())
+            .count();
+        assert!(
+            partway >= 3,
+            "{resolution:?}: seen at {partway} heights on the way ({:?})",
+            got.seen
+        );
     }
 }
 
@@ -122,15 +158,21 @@ fn jbig_goes_only_where_both_ends_offer_it_and_error_correction_is_on() {
         (true, true, false, Coding::ModifiedRead),
     ] {
         let page = a_page(40, Resolution::Standard);
-        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone())).with_jbig(at_caller);
+        let mut caller =
+            FaxCall::originate(FS, "61399990000", Some(page.clone())).with_jbig(at_caller);
         let mut answerer = FaxCall::answer(FS, "61388880000")
             .with_jbig(at_answerer)
             .with_error_correction(error_correction);
         let got = call(&mut caller, &mut answerer, 60.0, &mut clean);
-        let case = format!("caller {at_caller}, answerer {at_answerer}, error correction {error_correction}");
+        let case = format!(
+            "caller {at_caller}, answerer {at_answerer}, error correction {error_correction}"
+        );
         assert_eq!(caller.coding(), want, "{case}");
         assert_eq!(answerer.coding(), want, "{case}");
-        assert!(got.page.expect("no page arrived").lines == page.lines, "{case}");
+        assert!(
+            got.page.expect("no page arrived").lines == page.lines,
+            "{case}"
+        );
     }
 }
 
@@ -163,7 +205,13 @@ fn a_burst_of_noise_costs_jbig_frames_and_not_the_page() {
     let got = call(&mut caller, &mut answerer, 90.0, &mut burst);
     assert_eq!(caller.coding(), Coding::Jbig);
     let pps = got.heard.iter().filter(|f| **f == Frame::Pps).count();
-    assert!(pps >= 2, "the damaged frames were never sent again: {:?}", got.heard);
-    let arrived = got.page.unwrap_or_else(|| panic!("no page ({:?})", answerer.trouble()));
+    assert!(
+        pps >= 2,
+        "the damaged frames were never sent again: {:?}",
+        got.heard
+    );
+    let arrived = got
+        .page
+        .unwrap_or_else(|| panic!("no page ({:?})", answerer.trouble()));
     assert!(arrived.lines == page.lines, "the page was not put right");
 }

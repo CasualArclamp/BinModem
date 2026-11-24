@@ -78,7 +78,11 @@ fn the_first_packet_on_a_connection_goes_whole() {
     let (kind, wire) = across(&mut c, &mut d, &one);
     assert_eq!(kind, Kind::Uncompressed);
     assert_eq!(kind.protocol(), 0x002f, "RFC 1332 4 names this one");
-    assert_eq!(wire.len(), one.len(), "it is the same packet, not a smaller one");
+    assert_eq!(
+        wire.len(),
+        one.len(),
+        "it is the same packet, not a smaller one"
+    );
     // "The IP protocol field (byte 9) is changed from 6 to a connection
     // number." Slot zero, being the first.
     assert_eq!(wire[9], 0);
@@ -112,7 +116,11 @@ fn a_one_way_transfer_is_the_other_special_case() {
     let more = Seg::new(1004, 2000, 101).build(b"abcd");
     let (kind, wire) = across(&mut c, &mut d, &more);
     assert_eq!(kind, Kind::Compressed);
-    assert_eq!(wire, vec![0x0f, 0xbe, 0xef, b'a', b'b', b'c', b'd'], "got {wire:02x?}");
+    assert_eq!(
+        wire,
+        vec![0x0f, 0xbe, 0xef, b'a', b'b', b'c', b'd'],
+        "got {wire:02x?}"
+    );
 }
 
 /// "Acks for that FTP look like 04 c c a where a is the amount of data being
@@ -182,7 +190,12 @@ fn a_connection_opening_or_closing_is_not_compressed() {
 fn something_that_is_not_tcp_is_left_alone() {
     let (mut c, mut d) = pair();
     across(&mut c, &mut d, &Seg::new(1000, 2000, 100).build(b"a"));
-    let echo = ip::Echo { reply: false, id: 7, sequence: 1, payload: vec![0; 56] };
+    let echo = ip::Echo {
+        reply: false,
+        id: 7,
+        sequence: 1,
+        payload: vec![0; 56],
+    };
     let ping = ip::datagram(HERE, THERE, &echo, 500);
     let (kind, wire) = across(&mut c, &mut d, &ping);
     assert_eq!(kind, Kind::Ip);
@@ -226,9 +239,16 @@ fn a_damaged_frame_makes_the_far_end_wait_for_a_connection_number() {
     // The next compressed packet has no connection number, so it goes.
     let (kind, wire) = c.compress(&Seg::new(1001, 2001, 101).build(b"b"));
     assert_eq!(kind, Kind::Compressed);
-    assert_eq!(wire[0] & 0x40, 0, "the compressor named the connection anyway");
+    assert_eq!(
+        wire[0] & 0x40,
+        0,
+        "the compressor named the connection anyway"
+    );
     assert_eq!(d.decompress(kind, &wire), None, "it was believed");
-    assert!(d.tossing(), "it stopped tossing without being told the connection");
+    assert!(
+        d.tossing(),
+        "it stopped tossing without being told the connection"
+    );
 
     // An uncompressed packet says which connection, and things go on.
     let recovered = Seg::new(1002, 2002, 102).build(b"c");
@@ -240,7 +260,11 @@ fn a_damaged_frame_makes_the_far_end_wait_for_a_connection_number() {
     assert_eq!(d.decompress(kind, &wire), None);
     let retransmit = Seg::new(1001, 2002, 103).build(b"b");
     let (kind, wire) = c.compress(&retransmit);
-    assert_eq!(kind, Kind::Uncompressed, "a sequence number that went back was compressed");
+    assert_eq!(
+        kind,
+        Kind::Uncompressed,
+        "a sequence number that went back was compressed"
+    );
     assert_eq!(d.decompress(kind, &wire), Some(retransmit));
     assert!(!d.tossing(), "it is still throwing packets away");
 }
@@ -262,7 +286,11 @@ fn a_sequence_number_that_goes_backwards_resynchronises_the_far_end() {
 fn a_jump_too_large_to_encode_goes_whole() {
     let (mut c, mut d) = pair();
     across(&mut c, &mut d, &Seg::new(1000, 2000, 100).build(b"a"));
-    let (kind, _) = across(&mut c, &mut d, &Seg::new(1000 + 70_000, 2000, 101).build(b"b"));
+    let (kind, _) = across(
+        &mut c,
+        &mut d,
+        &Seg::new(1000 + 70_000, 2000, 101).build(b"b"),
+    );
     assert_eq!(kind, Kind::Uncompressed);
 }
 
@@ -281,7 +309,11 @@ fn the_connection_number_is_sent_only_when_it_changes() {
 
     // Back to the first: the number has to be said again.
     let (_, wire) = across(&mut c, &mut d, &Seg::new(1001, 2001, 101).build(b"b"));
-    assert_ne!(wire[0] & 0x40, 0, "the connection changed and was not named");
+    assert_ne!(
+        wire[0] & 0x40,
+        0,
+        "the connection changed and was not named"
+    );
     assert_eq!(wire[1], 0, "the first connection took slot zero");
 
     // And again on it, the number is left out.
@@ -294,7 +326,10 @@ fn the_connection_number_is_sent_only_when_it_changes() {
 /// the C bit in every change mask, and must include the slot identifier".
 #[test]
 fn a_far_end_that_will_not_have_the_number_left_out_is_obeyed() {
-    let params = Params { max_slot: 15, compress_slot: false };
+    let params = Params {
+        max_slot: 15,
+        compress_slot: false,
+    };
     let mut c = Compressor::new(params);
     let mut d = Decompressor::new(params);
     across(&mut c, &mut d, &Seg::new(1000, 2000, 100).build(b"a"));
@@ -307,7 +342,10 @@ fn a_far_end_that_will_not_have_the_number_left_out_is_obeyed() {
 /// one that took its place is announced uncompressed.
 #[test]
 fn more_connections_than_slots_reuses_the_one_used_longest_ago() {
-    let params = Params { max_slot: 2, compress_slot: true };
+    let params = Params {
+        max_slot: 2,
+        compress_slot: true,
+    };
     let mut c = Compressor::new(params);
     let mut d = Decompressor::new(params);
     let at = |port: u16, seq: u32, id: u16| {
@@ -334,7 +372,11 @@ fn more_connections_than_slots_reuses_the_one_used_longest_ago() {
     assert_eq!(kind, Kind::Compressed, "7002 lost a slot it had just used");
     // And 7003, untouched since it was first seen, is the one that went.
     let (kind, _) = across(&mut c, &mut d, &at(7003, 1001, 113).build(b"b"));
-    assert_eq!(kind, Kind::Uncompressed, "7003 kept a slot it should have lost");
+    assert_eq!(
+        kind,
+        Kind::Uncompressed,
+        "7003 kept a slot it should have lost"
+    );
 
     // Everything above is why RFC 1332 Appendix A asks for "at least 4 slots,
     // usually 16": with three, four conversations spend their time evicting
@@ -473,7 +515,11 @@ fn the_number_encoding_matches_the_examples_in_the_document() {
         let mut out = Vec::new();
         encode(value, &mut out);
         let mut at = 0;
-        assert_eq!(decode(&out, &mut at), Some(value), "{value} did not survive");
+        assert_eq!(
+            decode(&out, &mut at),
+            Some(value),
+            "{value} did not survive"
+        );
     }
 }
 
@@ -487,9 +533,14 @@ fn a_packet_that_stops_early_is_not_believed() {
     for cut in 0..wire.len().min(6) {
         let mut d = Decompressor::new(Params::DEFAULT);
         // Seed it so the failure is the truncation and not the missing slot.
-        let (k, w) = Compressor::new(Params::DEFAULT).compress(&Seg::new(1000, 2000, 100).build(b"a"));
+        let (k, w) =
+            Compressor::new(Params::DEFAULT).compress(&Seg::new(1000, 2000, 100).build(b"a"));
         d.decompress(k, &w);
-        assert_eq!(d.decompress(Kind::Compressed, &wire[..cut]), None, "cut at {cut}");
+        assert_eq!(
+            d.decompress(Kind::Compressed, &wire[..cut]),
+            None,
+            "cut at {cut}"
+        );
     }
 }
 
@@ -497,12 +548,21 @@ fn a_packet_that_stops_early_is_not_believed() {
 #[test]
 fn a_slot_nothing_has_seeded_is_refused() {
     let mut d = Decompressor::new(Params::DEFAULT);
-    assert_eq!(d.decompress(Kind::Compressed, &[0x4b, 0x05, 0xbe, 0xef, b'x']), None);
+    assert_eq!(
+        d.decompress(Kind::Compressed, &[0x4b, 0x05, 0xbe, 0xef, b'x']),
+        None
+    );
     assert!(d.tossing());
     // And one outside the agreed range, which is a far end disagreeing about
     // what was negotiated.
-    let mut d = Decompressor::new(Params { max_slot: 3, compress_slot: true });
-    assert_eq!(d.decompress(Kind::Compressed, &[0x40, 0x09, 0xbe, 0xef]), None);
+    let mut d = Decompressor::new(Params {
+        max_slot: 3,
+        compress_slot: true,
+    });
+    assert_eq!(
+        d.decompress(Kind::Compressed, &[0x40, 0x09, 0xbe, 0xef]),
+        None
+    );
 }
 
 /// The protocol numbers of RFC 1332 4, both ways round.

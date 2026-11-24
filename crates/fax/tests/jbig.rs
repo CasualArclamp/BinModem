@@ -85,12 +85,36 @@ fn decode(bie: &[u8], width: usize) -> jbig::Decoder {
 fn seven_two_two_gives_table_29_to_the_byte_and_decodes_to_the_image() {
     let image = jbig::artificial_image();
     let tests = [
-        (Options { stripe: 1951, mx: 0, two_line: false, typical_prediction: false, variable_length: false },
-         [316_094, 317_362, 317_364, 317_364, 317_384]),
-        (Options { stripe: 1951, mx: 0, two_line: true, typical_prediction: false, variable_length: false },
-         [315_887, 317_110, 317_112, 317_112, 317_132]),
-        (Options { stripe: 128, mx: 8, two_line: false, typical_prediction: true, variable_length: false },
-         [252_557, 253_593, 253_625, 253_633, 253_653]),
+        (
+            Options {
+                stripe: 1951,
+                mx: 0,
+                two_line: false,
+                typical_prediction: false,
+                variable_length: false,
+            },
+            [316_094, 317_362, 317_364, 317_364, 317_384],
+        ),
+        (
+            Options {
+                stripe: 1951,
+                mx: 0,
+                two_line: true,
+                typical_prediction: false,
+                variable_length: false,
+            },
+            [315_887, 317_110, 317_112, 317_112, 317_132],
+        ),
+        (
+            Options {
+                stripe: 128,
+                mx: 8,
+                two_line: false,
+                typical_prediction: true,
+                variable_length: false,
+            },
+            [252_557, 253_593, 253_625, 253_633, 253_653],
+        ),
     ];
     for (options, [scd, pscd, sde, bid, bie]) in tests {
         let coded = jbig::encode(&image, options);
@@ -108,7 +132,10 @@ fn seven_two_two_gives_table_29_to_the_byte_and_decodes_to_the_image() {
         let decoder = decode(&coded, 1960);
         assert!(decoder.is_done(), "{options:?}: not the whole page");
         assert_eq!(decoder.damaged(), 0);
-        assert!(decoder.lines() == image.as_slice(), "{options:?}: not the image");
+        assert!(
+            decoder.lines() == image.as_slice(),
+            "{options:?}: not the image"
+        );
     }
 }
 
@@ -118,8 +145,20 @@ fn seven_two_two_decodes_the_same_arriving_a_few_bits_at_a_time() {
     // significant first, in uneven handfuls, with the lines checked as they
     // come.
     let image = jbig::artificial_image();
-    let bie = jbig::encode(&image, Options { stripe: 128, mx: 8, two_line: false, typical_prediction: true, variable_length: false });
-    let bits: Vec<bool> = bie.iter().flat_map(|&b| (0..8).map(move |i| b >> i & 1 == 1)).collect();
+    let bie = jbig::encode(
+        &image,
+        Options {
+            stripe: 128,
+            mx: 8,
+            two_line: false,
+            typical_prediction: true,
+            variable_length: false,
+        },
+    );
+    let bits: Vec<bool> = bie
+        .iter()
+        .flat_map(|&b| (0..8).map(move |i| b >> i & 1 == 1))
+        .collect();
     let mut decoder = jbig::Decoder::new(1960);
     let mut at = 0;
     let mut seen = Vec::new();
@@ -138,7 +177,11 @@ fn seven_two_two_decodes_the_same_arriving_a_few_bits_at_a_time() {
     assert!(decoder.is_done());
     assert!(decoder.lines() == image.as_slice());
     // It kept up: lines arrived in more than one step a stripe.
-    assert!(seen.len() > 1951 / 2, "only {} steps for 1951 lines", seen.len());
+    assert!(
+        seen.len() > 1951 / 2,
+        "only {} steps for 1951 lines",
+        seen.len()
+    );
 }
 
 /// A page of the kind a fax carries: lines of type with a rule now and then,
@@ -185,7 +228,13 @@ fn fax_pages_come_back_whatever_the_options() {
         for two_line in [false, true] {
             for typical_prediction in [false, true] {
                 for mx in [0, 8, 127] {
-                    let options = Options { stripe, mx, two_line, typical_prediction, variable_length: false };
+                    let options = Options {
+                        stripe,
+                        mx,
+                        two_line,
+                        typical_prediction,
+                        variable_length: false,
+                    };
                     let bie = jbig::encode(&page, options);
                     let decoder = decode(&bie, fax::page::WIDTH);
                     assert!(decoder.is_done(), "{options:?}");
@@ -201,12 +250,28 @@ fn fax_pages_come_back_whatever_the_options() {
 fn the_dither_moves_the_at_pixel_and_that_pays() {
     // Annex C finds the band's period, and the page is smaller for it.
     let page = fax_page(600);
-    let still = jbig::encode(&page, Options { mx: 0, ..Options::FAX });
+    let still = jbig::encode(
+        &page,
+        Options {
+            mx: 0,
+            ..Options::FAX
+        },
+    );
     let free = jbig::encode(&page, Options::FAX);
     let moves = count(&free).moves;
     assert!(!moves.is_empty(), "the AT pixel never moved");
-    assert!(moves.iter().all(|&(_, at, tx, ty)| at == 0 && ty == 0 && (3..=8).contains(&tx)), "{moves:?}");
-    assert!(free.len() < still.len(), "{} bytes moving against {} still", free.len(), still.len());
+    assert!(
+        moves
+            .iter()
+            .all(|&(_, at, tx, ty)| at == 0 && ty == 0 && (3..=8).contains(&tx)),
+        "{moves:?}"
+    );
+    assert!(
+        free.len() < still.len(),
+        "{} bytes moving against {} still",
+        free.len(),
+        still.len()
+    );
     assert!(decode(&free, fax::page::WIDTH).lines() == page.as_slice());
 }
 
@@ -259,14 +324,23 @@ fn a_page_of_unknown_length_ends_where_the_newlen_says() {
     // T.85 Amendment 1, Appendix I: a page of 500 lines sent by a machine that
     // did not know it was 500 when it started.
     let page = fax_page(500);
-    let options = Options { mx: 0, ..Options::FAX };
+    let options = Options {
+        mx: 0,
+        ..Options::FAX
+    };
     let exact = jbig::encode(&page, options);
     let ends = stripe_ends(&exact);
     assert_eq!(ends.len(), 4);
 
     // Basic mode-1: YD = 0xffffffff, and the NEWLEN in front of the fourth
     // stripe -- which is what the encoder's own variable length does.
-    let own = jbig::encode(&page, Options { variable_length: true, ..options });
+    let own = jbig::encode(
+        &page,
+        Options {
+            variable_length: true,
+            ..options
+        },
+    );
     let mut spliced = with_height(&exact[..ends[2]], u32::MAX, 128);
     spliced.extend_from_slice(&new_length(500));
     spliced.extend_from_slice(&exact[ends[2]..]);
@@ -280,27 +354,47 @@ fn a_page_of_unknown_length_ends_where_the_newlen_says() {
 
     // Option mode: one stripe for the page, YD and L0 both 0xffffffff, and the
     // same NEWLEN and null stripe after it.
-    let whole = jbig::encode(&page, Options { stripe: 500, ..options });
+    let whole = jbig::encode(
+        &page,
+        Options {
+            stripe: 500,
+            ..options
+        },
+    );
     let mut one = with_height(&whole, u32::MAX, u32::MAX);
     one.extend_from_slice(&new_length(500));
     one.extend_from_slice(&[ESC, SDNORM]);
 
-    for (name, bie) in [("basic mode-1", own), ("basic mode-2", late), ("option mode", one)] {
+    for (name, bie) in [
+        ("basic mode-1", own),
+        ("basic mode-2", late),
+        ("option mode", one),
+    ] {
         // All at once, and a byte at a time, which sees the lines past 500
         // that mode-2 decodes and then takes back.
         let decoder = decode(&bie, fax::page::WIDTH);
         assert!(decoder.is_done(), "{name}");
         assert_eq!(decoder.damaged(), 0, "{name}");
-        assert!(decoder.lines() == page.as_slice(), "{name}: {} lines", decoder.lines().len());
+        assert!(
+            decoder.lines() == page.as_slice(),
+            "{name}: {} lines",
+            decoder.lines().len()
+        );
         let mut decoder = jbig::Decoder::new(fax::page::WIDTH);
         let mut most = 0;
         for &byte in &bie {
             decoder.feed_bytes(&[byte]);
             most = most.max(decoder.lines().len());
             let n = decoder.lines().len().min(500);
-            assert!(decoder.lines()[..n] == page[..n], "{name}: a wrong line on the way");
+            assert!(
+                decoder.lines()[..n] == page[..n],
+                "{name}: a wrong line on the way"
+            );
         }
-        assert!(decoder.lines() == page.as_slice(), "{name}, a byte at a time");
+        assert!(
+            decoder.lines() == page.as_slice(),
+            "{name}, a byte at a time"
+        );
         assert!(most <= 512, "{name}: {most} lines at most");
         assert_eq!(decoder.header().map(|h| h.variable_length), Some(true));
     }
@@ -310,7 +404,13 @@ fn a_page_of_unknown_length_ends_where_the_newlen_says() {
 fn a_newlen_that_would_lengthen_the_page_is_not_believed() {
     // "The new YD shall never be greater than the original" (6.2.6.2).
     let page = fax_page(200);
-    let exact = jbig::encode(&page, Options { mx: 0, ..Options::FAX });
+    let exact = jbig::encode(
+        &page,
+        Options {
+            mx: 0,
+            ..Options::FAX
+        },
+    );
     let mut bie = with_height(&exact, 200, 128);
     bie.extend_from_slice(&new_length(300));
     let decoder = decode(&bie, fax::page::WIDTH);

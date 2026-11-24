@@ -120,7 +120,13 @@ pub fn design(law: Law, uinfo: u8) -> Descriptor {
         .map(|u| u as u8)
         .filter(|&u| u != uinfo && ucode::level(law, u) <= LOUDEST)
         .collect();
-    Descriptor { signs, training, h: [H; 8], refs: [uinfo; 8], ucodes }
+    Descriptor {
+        signs,
+        training,
+        h: [H; 8],
+        refs: [uinfo; 8],
+        ucodes,
+    }
 }
 
 /// What the route did, as far as the DIL showed it.
@@ -151,7 +157,11 @@ impl Default for Analysis {
 
 impl Analysis {
     pub fn new() -> Self {
-        Self { sum: [[0.0; UCODES]; INTERVALS], squares: [[0.0; UCODES]; INTERVALS], count: [[0; UCODES]; INTERVALS] }
+        Self {
+            sum: [[0.0; UCODES]; INTERVALS],
+            squares: [[0.0; UCODES]; INTERVALS],
+            count: [[0; UCODES]; INTERVALS],
+        }
     }
 
     /// One symbol: the codeword and sign that were sent, the interval they
@@ -180,9 +190,17 @@ impl Analysis {
                 variance += self.squares[i][u] - f64::from(n) * mean * mean;
                 degrees += n.saturating_sub(1);
             }
-            spread[u] = if degrees > 0 { (variance.max(0.0) / f64::from(degrees)).sqrt() } else { f64::INFINITY };
+            spread[u] = if degrees > 0 {
+                (variance.max(0.0) / f64::from(degrees)).sqrt()
+            } else {
+                f64::INFINITY
+            };
         }
-        Route { levels, spread, readings: self.count }
+        Route {
+            levels,
+            spread,
+            readings: self.count,
+        }
     }
 }
 
@@ -191,12 +209,21 @@ impl Route {
     /// `noise` of spread.
     pub fn clean(law: Law, noise: f64) -> Self {
         let levels = std::array::from_fn(|_| std::array::from_fn(|u| ucode::level(law, u as u8)));
-        Self { levels, spread: [noise; UCODES], readings: [[1; UCODES]; INTERVALS] }
+        Self {
+            levels,
+            spread: [noise; UCODES],
+            readings: [[1; UCODES]; INTERVALS],
+        }
     }
 
     /// The typical spread, the median across codewords that were read.
     pub fn noise(&self) -> f64 {
-        let mut s: Vec<f64> = self.spread.iter().copied().filter(|x| x.is_finite()).collect();
+        let mut s: Vec<f64> = self
+            .spread
+            .iter()
+            .copied()
+            .filter(|x| x.is_finite())
+            .collect();
         if s.is_empty() {
             return f64::INFINITY;
         }
@@ -227,7 +254,10 @@ impl Route {
             return self.noise();
         }
         let n = points.len() as f64;
-        let (mx, my) = (points.iter().map(|p| p.0).sum::<f64>() / n, points.iter().map(|p| p.1).sum::<f64>() / n);
+        let (mx, my) = (
+            points.iter().map(|p| p.0).sum::<f64>() / n,
+            points.iter().map(|p| p.1).sum::<f64>() / n,
+        );
         let sxx: f64 = points.iter().map(|p| (p.0 - mx).powi(2)).sum();
         let sxy: f64 = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
         let slope = if sxx > 0.0 { (sxy / sxx).max(0.0) } else { 0.0 };
@@ -244,8 +274,12 @@ impl Route {
     /// same level as one already taken -- a robbed bit's neighbour, say --
     /// is too close to it and left out.
     pub fn constellation(&self, i: usize, spacing: f64, law: Law) -> Vec<u8> {
-        let mut order: Vec<u8> = (0..UCODES as u8).filter(|&u| self.readings[i][usize::from(u)] > 0).collect();
-        order.sort_by(|&a, &b| self.levels[i][usize::from(b)].total_cmp(&self.levels[i][usize::from(a)]));
+        let mut order: Vec<u8> = (0..UCODES as u8)
+            .filter(|&u| self.readings[i][usize::from(u)] > 0)
+            .collect();
+        order.sort_by(|&a, &b| {
+            self.levels[i][usize::from(b)].total_cmp(&self.levels[i][usize::from(a)])
+        });
         // How far a codeword arrived from where it was sent.
         let moved = |u: u8| (self.levels[i][usize::from(u)] - ucode::level(law, u)).abs();
         let mut chosen: Vec<u8> = Vec::new();
@@ -257,7 +291,10 @@ impl Route {
                 break;
             }
             match chosen.last().copied() {
-                Some(last) if self.levels[i][usize::from(last)] - level < 0.5 * spacing * (spread + self.spread[usize::from(last)]) => {
+                Some(last)
+                    if self.levels[i][usize::from(last)] - level
+                        < 0.5 * spacing * (spread + self.spread[usize::from(last)]) =>
+                {
                     // Two codewords the route put in the same place: keep the
                     // one that arrived as itself.
                     if moved(u) < moved(last) {
@@ -332,7 +369,9 @@ pub struct Choice {
 fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
     let level = |u: u8| route.levels[i][usize::from(u)];
     let mut order: Vec<u8> = (0..UCODES as u8)
-        .filter(|&u| route.readings[i][usize::from(u)] > 0 && 2.0 * route.spread[usize::from(u)] <= spacing)
+        .filter(|&u| {
+            route.readings[i][usize::from(u)] > 0 && 2.0 * route.spread[usize::from(u)] <= spacing
+        })
         .collect();
     order.sort_by(|&a, &b| level(a).total_cmp(&level(b)));
     let moved = |u: u8| (level(u) - ucode::level(law, u)).abs();
@@ -362,7 +401,10 @@ fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
         if 2.0 * level(u) < spacing {
             continue;
         }
-        if chosen.last().is_none_or(|&last| level(u) - level(last) >= spacing) {
+        if chosen
+            .last()
+            .is_none_or(|&last| level(u) - level(last) >= spacing)
+        {
             chosen.push(u);
         }
     }
@@ -391,7 +433,13 @@ pub fn fits_with_room(moduli: Moduli, k: u32) -> bool {
 /// interval's ladder is short -- a robbed bit halves it -- the others take
 /// more, the cheapest next rung first. None if the ladders cannot carry `k`
 /// or the result is over `limit`.
-fn quietest(route: &Route, law: Law, k: u32, spacing: f64, limit: f64) -> Option<[Vec<u8>; INTERVALS]> {
+fn quietest(
+    route: &Route,
+    law: Law,
+    k: u32,
+    spacing: f64,
+    limit: f64,
+) -> Option<[Vec<u8>; INTERVALS]> {
     let ladders: [Vec<u8>; INTERVALS] = std::array::from_fn(|i| ladder(route, law, i, spacing));
     let even = (2f64.powf(f64::from(k) / INTERVALS as f64) - 1e-9).ceil() as usize;
     let mut sizes: [usize; INTERVALS] = std::array::from_fn(|i| even.min(ladders[i].len()));
@@ -453,7 +501,13 @@ pub fn choose(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool)
 /// Both, because phase 4's TRN2d, MP and Ed "use the spectral shaping
 /// parameters defined by CPt" (8.6): the equaliser learns the shaped
 /// spectrum before data mode sends it.
-pub fn choose_shaped(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool, shaping: Shaping) -> Option<Choice> {
+pub fn choose_shaped(
+    route: &Route,
+    law: Law,
+    limit: u32,
+    enabled: impl Fn(u8) -> bool,
+    shaping: Shaping,
+) -> Option<Choice> {
     let limit = f64::from(limit).powi(2);
     let s = shaping.redundancy.data_bits() as u32;
     let (k_low, k_high) = (super::D_RANGE.0 - s, super::largest_k(s));
@@ -467,8 +521,16 @@ pub fn choose_shaped(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -
     // Table 17: K from 6 to 24, with S anywhere from 3 to 6.
     let (k, training_sets) = (6..=24u32)
         .rev()
-        .find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).filter(|sets| 2.0 * average_power(law, sets, k) >= data_power).map(|sets| (k, sets)))
-        .or_else(|| (6..=24u32).rev().find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).map(|sets| (k, sets))))?;
+        .find_map(|k| {
+            widest(route, law, k, 2.0 * SPACING, limit)
+                .filter(|sets| 2.0 * average_power(law, sets, k) >= data_power)
+                .map(|sets| (k, sets))
+        })
+        .or_else(|| {
+            (6..=24u32)
+                .rev()
+                .find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).map(|sets| (k, sets)))
+        })?;
     let mut training = cp_for(&training_sets, (k + s - 8) as u8, false);
     shaping.apply(&mut data);
     shaping.apply(&mut training);
@@ -483,11 +545,20 @@ pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
     let mut out = vec![format!("noise {noise:.2e}, ceiling {:.0}", limit.sqrt())];
     for i in 0..INTERVALS {
         let l = ladder(route, law, i, SPACING * noise);
-        out.push(format!("interval {i}: {} rungs at {:.0} apart, from {:?}", l.len(), SPACING * noise * 32768.0, &l[..l.len().min(8)]));
+        out.push(format!(
+            "interval {i}: {} rungs at {:.0} apart, from {:?}",
+            l.len(),
+            SPACING * noise * 32768.0,
+            &l[..l.len().min(8)]
+        ));
     }
     for k in [15u32, 20, 25, 30, 36] {
         match quietest(route, law, k, SPACING * noise, f64::INFINITY) {
-            Some(sets) => out.push(format!("K {k}: power {:.0}, sizes {:?}", average_power(law, &sets, k).sqrt(), sets.iter().map(Vec::len).collect::<Vec<_>>())),
+            Some(sets) => out.push(format!(
+                "K {k}: power {:.0}, sizes {:?}",
+                average_power(law, &sets, k).sqrt(),
+                sets.iter().map(Vec::len).collect::<Vec<_>>()
+            )),
             None => out.push(format!("K {k}: the ladders cannot carry it")),
         }
     }
@@ -499,10 +570,21 @@ pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
 pub fn least_gap(cp: &Cp, route: &Route) -> f64 {
     (0..INTERVALS)
         .map(|i| {
-            let mut levels: Vec<f64> =
-                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
+            let mut levels: Vec<f64> = cp
+                .points(i)
+                .iter()
+                .flat_map(|&u| {
+                    [
+                        route.levels[i][usize::from(u)],
+                        -route.levels[i][usize::from(u)],
+                    ]
+                })
+                .collect();
             levels.sort_by(f64::total_cmp);
-            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
+            levels
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .fold(f64::INFINITY, f64::min)
         })
         .fold(f64::INFINITY, f64::min)
 }
@@ -528,9 +610,18 @@ pub fn least_gap(cp: &Cp, route: &Route) -> f64 {
 /// gamma), which on four points is 68 symbols, 28 ms at 2400 baud and less at
 /// any faster symbol rate.
 fn cp_for(sets: &[Vec<u8>; INTERVALS], drn: u8, data_mode: bool) -> Cp {
-    let constellations: Vec<Mask> = sets.iter().map(|set| set.iter().fold(0 as Mask, |m, &u| m | 1 << u)).collect();
+    let constellations: Vec<Mask> = sets
+        .iter()
+        .map(|set| set.iter().fold(0 as Mask, |m, &u| m | 1 << u))
+        .collect();
     let intervals = std::array::from_fn(|i| i as u8);
-    Cp { data_mode, drn, intervals, constellations, ..Cp::default() }
+    Cp {
+        data_mode,
+        drn,
+        intervals,
+        constellations,
+        ..Cp::default()
+    }
 }
 
 #[cfg(test)]
@@ -554,9 +645,17 @@ mod tests {
         let symbols: Vec<(u8, bool)> = d.symbols().collect();
         let fiftieth = d.ucodes[50];
         assert!(symbols[36 * 50..36 * 50 + 6].iter().all(|&(u, _)| u == 79));
-        assert!(symbols[36 * 50 + 6..36 * 51].iter().all(|&(u, _)| u == fiftieth));
+        assert!(
+            symbols[36 * 50 + 6..36 * 51]
+                .iter()
+                .all(|&(u, _)| u == fiftieth)
+        );
         // And no two neighbours alike.
-        assert!(d.ucodes.windows(2).all(|w| w[0].abs_diff(w[1]) >= 3), "{:?}", d.ucodes);
+        assert!(
+            d.ucodes.windows(2).all(|w| w[0].abs_diff(w[1]) >= 3),
+            "{:?}",
+            d.ucodes
+        );
         // Signs about balanced.
         let positive = d.signs.iter().filter(|b| **b).count();
         assert!((12..=24).contains(&positive), "{positive} of 36 positive");
@@ -590,12 +689,19 @@ mod tests {
     #[test]
     fn the_analysis_reads_the_levels_and_the_noise() {
         let route = analyse(0.002, false);
-        assert!((route.noise() / 0.002 - 1.0).abs() < 0.2, "noise read as {}", route.noise());
+        assert!(
+            (route.noise() / 0.002 - 1.0).abs() < 0.2,
+            "noise read as {}",
+            route.noise()
+        );
         for (i, levels) in route.levels.iter().enumerate().take(INTERVALS) {
             // UINFO read off the references, and the loudest the DIL asks for.
             for u in [0u8, 40, 79, 98] {
                 let want = ucode::level(Law::Mu, u);
-                assert!((levels[usize::from(u)] - want).abs() < 0.003, "interval {i} code {u}");
+                assert!(
+                    (levels[usize::from(u)] - want).abs() < 0.003,
+                    "interval {i} code {u}"
+                );
             }
         }
     }
@@ -643,8 +749,14 @@ mod tests {
     /// 8.5.2's formula against a count done the long way.
     #[test]
     fn the_average_power_formula_counts_every_message() {
-        let sets: [Vec<u8>; INTERVALS] =
-            [vec![10, 20, 30], vec![5, 60], vec![100, 101, 102, 103, 104], vec![1], vec![7, 8], vec![90, 91, 92]];
+        let sets: [Vec<u8>; INTERVALS] = [
+            vec![10, 20, 30],
+            vec![5, 60],
+            vec![100, 101, 102, 103, 104],
+            vec![1],
+            vec![7, 8],
+            vec![90, 91, 92],
+        ];
         let k = 5;
         let formula = average_power(Law::Mu, &sets, k);
         let moduli: Moduli = std::array::from_fn(|i| sets[i].len() as u16);
@@ -660,7 +772,10 @@ mod tests {
             }
         }
         brute /= INTERVALS as f64 * f64::from(1u32 << k);
-        assert!((formula - brute).abs() < 1e-6 * brute, "{formula} against {brute}");
+        assert!(
+            (formula - brute).abs() < 1e-6 * brute,
+            "{formula} against {brute}"
+        );
     }
 
     /// At a given rate, the room between levels is as wide as the power
@@ -671,11 +786,23 @@ mod tests {
         let route = Route::clean(Law::Mu, noise);
         let choice = choose(&route, Law::Mu, 4024, |_| true).unwrap();
         for i in 0..INTERVALS {
-            let mut levels: Vec<f64> = choice.data.points(i).iter().map(|&u| ucode::level(Law::Mu, u)).collect();
+            let mut levels: Vec<f64> = choice
+                .data
+                .points(i)
+                .iter()
+                .map(|&u| ucode::level(Law::Mu, u))
+                .collect();
             levels.sort_by(f64::total_cmp);
-            let closest = levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min);
+            let closest = levels
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .fold(f64::INFINITY, f64::min);
             assert!(closest >= SPACING * noise, "interval {i}: {closest} apart");
-            assert!(2.0 * levels[0] >= SPACING * noise, "interval {i}: {} from its opposite", 2.0 * levels[0]);
+            assert!(
+                2.0 * levels[0] >= SPACING * noise,
+                "interval {i}: {} from its opposite",
+                2.0 * levels[0]
+            );
         }
     }
 
@@ -688,7 +815,13 @@ mod tests {
         let training = Mapping::from_cp(&choice.training).expect("the CPt is not a mapping");
         assert!(training.frame_bits() <= 30);
         // Within the power it was given.
-        assert!(average_power(Law::Mu, &std::array::from_fn(|i| choice.data.points(i)), data.k) <= 15124f64.powi(2));
+        assert!(
+            average_power(
+                Law::Mu,
+                &std::array::from_fn(|i| choice.data.points(i)),
+                data.k
+            ) <= 15124f64.powi(2)
+        );
     }
 
     #[test]
@@ -700,11 +833,24 @@ mod tests {
         let noisy = choose(&Route::clean(Law::Mu, 0.003), Law::Mu, 15124, |_| true).unwrap();
         let low = choose(&Route::clean(Law::Mu, 0.0004), Law::Mu, 2540, |_| true).unwrap();
         let rate = |c: &Choice| Mapping::from_cp(&c.data).unwrap().rate();
-        assert!(rate(&noisy) < rate(&quiet), "{} against {}", rate(&noisy), rate(&quiet));
+        assert!(
+            rate(&noisy) < rate(&quiet),
+            "{} against {}",
+            rate(&noisy),
+            rate(&quiet)
+        );
         assert!(rate(&low) < rate(&quiet));
-        println!("quiet {} noisy {} at -16 dBm0 {}", rate(&quiet), rate(&noisy), rate(&low));
+        println!(
+            "quiet {} noisy {} at -16 dBm0 {}",
+            rate(&quiet),
+            rate(&noisy),
+            rate(&low)
+        );
         // And only enabled rates are asked for.
-        let odd = choose(&Route::clean(Law::Mu, 0.00005), Law::Mu, 15124, |drn| drn % 2 == 1).unwrap();
+        let odd = choose(&Route::clean(Law::Mu, 0.00005), Law::Mu, 15124, |drn| {
+            drn % 2 == 1
+        })
+        .unwrap();
         assert_eq!(odd.data.drn % 2, 1);
     }
 
@@ -728,13 +874,22 @@ mod tests {
                 assert_eq!(Cp::from_bits(&bits).as_ref(), Some(cp), "{what}");
             }
         }
-        let alike = |cp: &Cp| (0..INTERVALS).any(|i| (i + 1..INTERVALS).any(|j| cp.constellations[i] == cp.constellations[j]));
+        let alike = |cp: &Cp| {
+            (0..INTERVALS)
+                .any(|i| (i + 1..INTERVALS).any(|j| cp.constellations[i] == cp.constellations[j]))
+        };
         let choice = choose(&clean, Law::Mu, 4024, |_| true).unwrap();
-        assert!(alike(&choice.data) && alike(&choice.training), "a clean route's intervals are alike, and are sent six times");
+        assert!(
+            alike(&choice.data) && alike(&choice.training),
+            "a clean route's intervals are alike, and are sent six times"
+        );
     }
 
     #[test]
     fn a_route_too_noisy_for_28000_is_refused() {
-        assert_eq!(choose(&Route::clean(Law::Mu, 0.05), Law::Mu, 15124, |_| true), None);
+        assert_eq!(
+            choose(&Route::clean(Law::Mu, 0.05), Law::Mu, 15124, |_| true),
+            None
+        );
     }
 }

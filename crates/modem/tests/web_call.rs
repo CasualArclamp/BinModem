@@ -34,7 +34,9 @@ fn a_web_server(body: Vec<u8>) -> (String, thread::JoinHandle<Option<String>>) {
     let address = listener.local_addr().expect("addr").to_string();
     let handle = thread::spawn(move || {
         let (mut socket, _) = listener.accept().ok()?;
-        socket.set_read_timeout(Some(Duration::from_secs(60))).ok()?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .ok()?;
         let mut request = Vec::new();
         let mut buffer = [0u8; 512];
         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -66,7 +68,9 @@ fn a_browser(proxy: String, target: String) -> thread::JoinHandle<Result<Vec<u8>
             .set_read_timeout(Some(Duration::from_secs(300)))
             .map_err(|e| e.to_string())?;
         let request = format!("GET http://{target}/over-a-modem HTTP/1.0\r\nHost: example\r\n\r\n");
-        socket.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+        socket
+            .write_all(request.as_bytes())
+            .map_err(|e| e.to_string())?;
         let mut page = Vec::new();
         socket.read_to_end(&mut page).map_err(|e| e.to_string())?;
         Ok(page)
@@ -209,7 +213,10 @@ fn a_page_over(carrier: &str) {
     }
     let up_at = up_at.expect("PPP never reached the network phase");
     let waiter = waiter.expect("the page never came back");
-    let page = waiter.join().expect("the waiting thread panicked").expect("no page");
+    let page = waiter
+        .join()
+        .expect("the waiting thread panicked")
+        .expect("no page");
 
     let text = String::from_utf8_lossy(&page);
     assert!(

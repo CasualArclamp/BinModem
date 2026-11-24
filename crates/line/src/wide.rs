@@ -83,7 +83,11 @@ impl std::fmt::Debug for Wide {
     }
 }
 
-fn find(devices: impl Iterator<Item = cpal::Device>, name: &str, kind: &str) -> Result<cpal::Device, String> {
+fn find(
+    devices: impl Iterator<Item = cpal::Device>,
+    name: &str,
+    kind: &str,
+) -> Result<cpal::Device, String> {
     let all: Vec<cpal::Device> = devices.collect();
     // The whole name first, then a name that contains what was asked for,
     // since nobody types "CABLE-A Output (VB-Audio Virtual Cable A)" twice.
@@ -91,9 +95,15 @@ fn find(devices: impl Iterator<Item = cpal::Device>, name: &str, kind: &str) -> 
     let position = all
         .iter()
         .position(|d| d.to_string().eq_ignore_ascii_case(name))
-        .or_else(|| all.iter().position(|d| d.to_string().to_lowercase().contains(&lower)));
+        .or_else(|| {
+            all.iter()
+                .position(|d| d.to_string().to_lowercase().contains(&lower))
+        });
     match position {
-        Some(i) => Ok(all.into_iter().nth(i).expect("position came from this list")),
+        Some(i) => Ok(all
+            .into_iter()
+            .nth(i)
+            .expect("position came from this list")),
         None => Err(format!("no {kind} device named {name:?}")),
     }
 }
@@ -104,17 +114,33 @@ impl Wide {
     pub fn open(input: Option<&str>, output: Option<&str>) -> Result<Self, String> {
         let host = crate::host();
         let in_device = match input {
-            Some(name) => find(host.input_devices().map_err(|e| e.to_string())?, name, "input")?,
-            None => host.default_input_device().ok_or("no default input device")?,
+            Some(name) => find(
+                host.input_devices().map_err(|e| e.to_string())?,
+                name,
+                "input",
+            )?,
+            None => host
+                .default_input_device()
+                .ok_or("no default input device")?,
         };
         let out_device = match output {
-            Some(name) => find(host.output_devices().map_err(|e| e.to_string())?, name, "output")?,
-            None => host.default_output_device().ok_or("no default output device")?,
+            Some(name) => find(
+                host.output_devices().map_err(|e| e.to_string())?,
+                name,
+                "output",
+            )?,
+            None => host
+                .default_output_device()
+                .ok_or("no default output device")?,
         };
         let in_name = in_device.to_string();
         let out_name = out_device.to_string();
-        let in_config = in_device.default_input_config().map_err(|e| e.to_string())?;
-        let out_config = out_device.default_output_config().map_err(|e| e.to_string())?;
+        let in_config = in_device
+            .default_input_config()
+            .map_err(|e| e.to_string())?;
+        let out_config = out_device
+            .default_output_config()
+            .map_err(|e| e.to_string())?;
         let rate = in_config.sample_rate();
         let output_rate = out_config.sample_rate();
         let in_channels = in_config.channels() as usize;
@@ -124,7 +150,11 @@ impl Wide {
             incoming: Mutex::new(VecDeque::with_capacity(BUFFER * CHANNELS)),
             settling: Mutex::new(SETTLE),
             delivering: AtomicBool::new(false),
-            outgoing: Mutex::new(VecDeque::from(vec![0.0; output_rate as usize / PRIME_PER_SECOND * CHANNELS])),
+            outgoing: Mutex::new(VecDeque::from(vec![
+                0.0;
+                output_rate as usize / PRIME_PER_SECOND
+                    * CHANNELS
+            ])),
             counters: Counters::default(),
         });
 
@@ -136,8 +166,12 @@ impl Wide {
                     // Blocking here is right: the reader holds this only to
                     // drain it, and a frame dropped is a slip no modulation
                     // this dense survives.
-                    let Ok(mut queue) = capture.incoming.lock() else { return };
-                    let Ok(mut left) = capture.settling.lock() else { return };
+                    let Ok(mut queue) = capture.incoming.lock() else {
+                        return;
+                    };
+                    let Ok(mut left) = capture.settling.lock() else {
+                        return;
+                    };
                     for frame in data.chunks(in_channels) {
                         if *left > 0 {
                             *left -= 1;
@@ -215,11 +249,16 @@ impl Wide {
 
     /// Queue frames for the line, interleaved left and right.
     pub fn transmit(&self, frames: &[f32]) {
-        let Ok(mut queue) = self.shared.outgoing.lock() else { return };
+        let Ok(mut queue) = self.shared.outgoing.lock() else {
+            return;
+        };
         for frame in frames.as_chunks::<CHANNELS>().0 {
             if queue.len() >= BUFFER * CHANNELS {
                 queue.drain(..CHANNELS);
-                self.shared.counters.dropped_out.fetch_add(1, Ordering::Relaxed);
+                self.shared
+                    .counters
+                    .dropped_out
+                    .fetch_add(1, Ordering::Relaxed);
             }
             queue.extend(frame);
         }
@@ -235,7 +274,11 @@ impl Wide {
 
     /// Frames waiting to go out.
     pub fn pending(&self) -> usize {
-        self.shared.outgoing.lock().map(|q| q.len() / CHANNELS).unwrap_or(0)
+        self.shared
+            .outgoing
+            .lock()
+            .map(|q| q.len() / CHANNELS)
+            .unwrap_or(0)
     }
 
     /// Frames of input lost because nothing read them in time.

@@ -17,7 +17,11 @@ pub fn encode(lines: &[Vec<bool>], options: Options) -> Vec<u8> {
     let stripe = options.stripe.max(1) as usize;
     let header = Header {
         width: width as u32,
-        height: if options.variable_length { u32::MAX } else { height as u32 },
+        height: if options.variable_length {
+            u32::MAX
+        } else {
+            height as u32
+        },
         stripe: stripe as u32,
         mx: options.mx.min(127),
         my: 0,
@@ -271,7 +275,15 @@ mod tests {
         // so the twenty is a misprint. It changes nothing in CHECK: c_6 is
         // c_lmin either way, and the one condition that uses it holds with
         // either by more than six hundred.
-        let table_28 = [(0, 2336), (3, 2456), (4, 2472), (5, 2446), (6, 2422), (7, 2730), (8, 3534)];
+        let table_28 = [
+            (0, 2336),
+            (3, 2456),
+            (4, 2472),
+            (5, 2446),
+            (6, 2422),
+            (7, 2730),
+            (8, 3534),
+        ];
         for (n, want) in table_28 {
             assert_eq!(watch.counts[n], want, "c_{n}");
         }
@@ -291,7 +303,11 @@ mod tests {
             }
         }
         assert!(watch.all > CHECK_AFTER);
-        assert_eq!(watch.check(0), None, "every candidate agrees with every pel");
+        assert_eq!(
+            watch.check(0),
+            None,
+            "every candidate agrees with every pel"
+        );
     }
 
     fn text(rows: usize, width: usize) -> Vec<Vec<bool>> {
@@ -299,7 +315,9 @@ mod tests {
             .map(|y| {
                 let within = y % 24;
                 (0..width)
-                    .map(|x| within < 18 && ((x + y / 24 * 7) % 29 < 4 || (within == 8 && x % 29 < 20)))
+                    .map(|x| {
+                        within < 18 && ((x + y / 24 * 7) % 29 < 4 || (within == 8 && x % 29 < 20))
+                    })
                     .collect()
             })
             .collect()
@@ -308,7 +326,13 @@ mod tests {
     #[test]
     fn a_stripe_ends_in_an_escape_and_sdnorm_and_nothing_else_is_escaped() {
         let bie = encode(&text(300, 1728), Options::FAX);
-        assert_eq!(bie[..20], Header::read(bie[..20].try_into().unwrap()).unwrap().0.to_bytes());
+        assert_eq!(
+            bie[..20],
+            Header::read(bie[..20].try_into().unwrap())
+                .unwrap()
+                .0
+                .to_bytes()
+        );
         let body = &bie[20..];
         let mut ends = 0;
         let mut i = 0;
@@ -336,7 +360,13 @@ mod tests {
             for two_line in [false, true] {
                 for typical_prediction in [false, true] {
                     for mx in [0, 8, 127] {
-                        let options = Options { stripe, mx, two_line, typical_prediction, variable_length: false };
+                        let options = Options {
+                            stripe,
+                            mx,
+                            two_line,
+                            typical_prediction,
+                            variable_length: false,
+                        };
                         let bie = encode(&page, options);
                         let mut decoder = Decoder::new(400);
                         decoder.feed_bytes(&bie);

@@ -73,7 +73,10 @@ enum Signal {
     /// The primary channel's carrier in its training.
     PrimaryTraining,
     /// Primary channel data: `n` bits, the first in bit 0.
-    Primary { bits: u8, n: u8 },
+    Primary {
+        bits: u8,
+        n: u8,
+    },
 }
 
 /// What an end put on the line, as the Figures of F.5 draw it.
@@ -155,7 +158,10 @@ enum Mode {
     Control,
     /// Off the control channel: the bits still held, then 4T of ones, then
     /// the primary channel (the source) or silence (the recipient).
-    Leaving { ones: usize, primary: bool },
+    Leaving {
+        ones: usize,
+        primary: bool,
+    },
     PrimaryGap(f64),
     PrimaryTraining(f64),
     /// The source, sending the page.
@@ -165,10 +171,15 @@ enum Mode {
     ControlGap(f64),
     /// The source's Sh, S-bar-h and ALT (or PPh, ALT and MPh) until it has
     /// heard enough of the recipient's answer, and then its E.
-    Resync { heard: f64, e: f64 },
+    Resync {
+        heard: f64,
+        e: f64,
+    },
     /// The recipient, silent: listening for the primary channel, and for the
     /// source coming back to the control channel after it.
-    Listen { heard: f64 },
+    Listen {
+        heard: f64,
+    },
     /// The recipient's answer to the source's resynchronisation.
     Answering(f64),
     Hung,
@@ -358,7 +369,8 @@ impl Modem {
             // the control channel by its start-up if a new rate is wanted.
             (Mode::Primary, Line::V34Control | Line::V34Listen) => {
                 self.renegotiating = end.renegotiate();
-                self.sent.push((t, Sent::Page(std::mem::take(&mut self.page), self.rcps)));
+                self.sent
+                    .push((t, Sent::Page(std::mem::take(&mut self.page), self.rcps)));
                 self.mode = Mode::PrimaryOff(PRIMARY_OFF);
             }
             _ => {}
@@ -389,7 +401,11 @@ impl Modem {
                     let bits: Vec<bool> = (0..n).map(|i| bits >> i & 1 == 1).collect();
                     end.fast_bits(&bits);
                 }
-                let heard = if arriving == Signal::ControlTraining { heard + DT } else { 0.0 };
+                let heard = if arriving == Signal::ControlTraining {
+                    heard + DT
+                } else {
+                    0.0
+                };
                 self.mode = if heard >= HEAR_SH {
                     Mode::Answering(ANSWER)
                 } else {
@@ -398,7 +414,10 @@ impl Modem {
             }
             Mode::Resync { heard, e } if heard < SH => {
                 if matches!(arriving, Signal::ControlTraining | Signal::Control(_)) {
-                    self.mode = Mode::Resync { heard: heard + DT, e };
+                    self.mode = Mode::Resync {
+                        heard: heard + DT,
+                        e,
+                    };
                 }
             }
             _ => {}
@@ -435,7 +454,10 @@ impl Modem {
                     return Signal::Control(Some(bit));
                 }
                 if ones > 0 {
-                    self.mode = Mode::Leaving { ones: ones - 1, primary };
+                    self.mode = Mode::Leaving {
+                        ones: ones - 1,
+                        primary,
+                    };
                     return Signal::Control(Some(true));
                 }
                 self.mode = if primary {
@@ -501,7 +523,11 @@ impl Modem {
             }
             Mode::Resync { heard, e } => {
                 if heard >= SH {
-                    let wait = E + if self.renegotiating { START_UP_EXTRA } else { 0.0 };
+                    let wait = E + if self.renegotiating {
+                        START_UP_EXTRA
+                    } else {
+                        0.0
+                    };
                     if e + DT >= wait {
                         if self.renegotiating {
                             // What MPh settles is the modem's business; this
@@ -565,7 +591,11 @@ impl Modem {
             self.end_ones(t);
         }
         if let Some(message) = self.tap.feed(bit) {
-            let n = self.counts.iter().filter(|(f, _)| *f == message.frame).count();
+            let n = self
+                .counts
+                .iter()
+                .filter(|(f, _)| *f == message.frame)
+                .count();
             self.counts.push((message.frame, n));
             let lost = self.setup.lose.contains(&(message.frame, n));
             if lost {
@@ -726,7 +756,8 @@ fn a_busy_page(rows: usize) -> Page {
             .map(|y| {
                 (0..WIDTH)
                     .map(|x| {
-                        let h = (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(40_503);
+                        let h = (x as u32).wrapping_mul(2_654_435_761)
+                            ^ (y as u32).wrapping_mul(40_503);
                         h.wrapping_mul(2_246_822_519) >> 29 == 0
                     })
                     .collect()
@@ -782,8 +813,14 @@ fn a_page_goes_over_v34_half_duplex_as_figures_f5_1_and_f5_3_draw_it() {
     assert_done(&caller, &answerer, &record);
     assert_eq!(caller.trouble, None);
     assert_eq!(answerer.trouble, None);
-    assert_eq!(names(&record.caller), ["TSI", "DCS", "ones", "page", "PPS-EOP", "DCN"]);
-    assert_eq!(names(&record.answerer), ["CSI", "DIS", "CFR", "silent", "MCF"]);
+    assert_eq!(
+        names(&record.caller),
+        ["TSI", "DCS", "ones", "page", "PPS-EOP", "DCN"]
+    );
+    assert_eq!(
+        names(&record.answerer),
+        ["CSI", "DIS", "CFR", "silent", "MCF"]
+    );
 
     let got = received(&mut answerer);
     assert_eq!(got.len(), 1);
@@ -793,7 +830,11 @@ fn a_page_goes_over_v34_half_duplex_as_figures_f5_1_and_f5_3_draw_it() {
     // The capabilities and the command as Table 2 has them under V.34: the
     // DIS says V.8 and error correction; the DCS names no rate (Note 33).
     let (_, dis) = first(&record.answerer, Frame::Dis);
-    assert!(t30::bit(&dis.fif, 6) && t30::bit(&dis.fif, 27), "{:02x?}", dis.fif);
+    assert!(
+        t30::bit(&dis.fif, 6) && t30::bit(&dis.fif, 27),
+        "{:02x?}",
+        dis.fif
+    );
     let (_, dcs) = first(&record.caller, Frame::Dcs);
     assert_eq!(t30::field_of(&dcs.fif, 11, 14), 0, "{:02x?}", dcs.fif);
     assert!(t30::bit(&dcs.fif, 27) && t30::commands_jbig(&dcs.fif));
@@ -814,7 +855,9 @@ fn pages_follow_one_another_as_figure_f5_2_draws_it() {
         (false, Resolution::Standard),
         (false, Resolution::Fine),
     ] {
-        let sent: Vec<Page> = (0..3).map(|n| a_page(60 + 20 * n, resolution, n + 2)).collect();
+        let sent: Vec<Page> = (0..3)
+            .map(|n| a_page(60 + 20 * n, resolution, n + 2))
+            .collect();
         let mut caller = caller(sent.clone());
         let mut answerer = answerer(jbig);
         let record = run(&mut caller, &mut answerer, &Setup::default());
@@ -832,7 +875,9 @@ fn pages_follow_one_another_as_figure_f5_2_draws_it() {
         );
         assert_eq!(
             names(&record.answerer),
-            ["CSI", "DIS", "CFR", "silent", "MCF", "silent", "MCF", "silent", "MCF"],
+            [
+                "CSI", "DIS", "CFR", "silent", "MCF", "silent", "MCF", "silent", "MCF"
+            ],
             "{want:?}, {resolution:?}"
         );
         let got = received(&mut answerer);
@@ -840,7 +885,12 @@ fn pages_follow_one_another_as_figure_f5_2_draws_it() {
         assert_eq!(numbers, [1, 2, 3]);
         for ((n, page), want) in got.iter().zip(&sent) {
             assert_eq!(page.resolution, resolution, "page {n}");
-            assert_eq!(page.lines, want.lines, "page {n} came out different in {:?}", caller.coding());
+            assert_eq!(
+                page.lines,
+                want.lines,
+                "page {n} came out different in {:?}",
+                caller.coding()
+            );
         }
     }
 }
@@ -858,7 +908,11 @@ fn a_standard_page_after_a_fine_one_goes_fine() {
     let got = received(&mut answerer);
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].1.lines, fine.lines);
-    let doubled: Vec<Vec<bool>> = standard.lines.iter().flat_map(|l| [l.clone(), l.clone()]).collect();
+    let doubled: Vec<Vec<bool>> = standard
+        .lines
+        .iter()
+        .flat_map(|l| [l.clone(), l.clone()])
+        .collect();
     assert_eq!(got[1].1.lines, doubled);
     assert_eq!(got[1].1.resolution, Resolution::Fine);
 }
@@ -869,7 +923,9 @@ fn a_standard_page_after_a_fine_one_goes_fine() {
 /// recipient's silence has come back down the line.
 #[test]
 fn a_round_trip_of_a_second_and_a_half_is_only_slower() {
-    let sent: Vec<Page> = (0..2).map(|n| a_page(80, Resolution::Fine, n + 4)).collect();
+    let sent: Vec<Page> = (0..2)
+        .map(|n| a_page(80, Resolution::Fine, n + 4))
+        .collect();
     let mut caller = caller(sent.clone());
     let mut answerer = answerer(true);
     let setup = Setup {
@@ -886,7 +942,9 @@ fn a_round_trip_of_a_second_and_a_half_is_only_slower() {
     }
     assert_eq!(
         names(&record.caller),
-        ["TSI", "DCS", "ones", "page", "PPS-MPS", "ones", "page", "PPS-EOP", "DCN"]
+        [
+            "TSI", "DCS", "ones", "page", "PPS-MPS", "ones", "page", "PPS-EOP", "DCN"
+        ]
     );
     // Every run of ones lasted the round trip, and forty more.
     for (_, s) in &record.caller {
@@ -901,7 +959,10 @@ fn a_round_trip_of_a_second_and_a_half_is_only_slower() {
 /// flags").
 #[test]
 fn the_far_ends_flags_stopping_is_as_good_as_its_silence() {
-    let sent = vec![a_page(50, Resolution::Standard, 1), a_page(50, Resolution::Standard, 6)];
+    let sent = vec![
+        a_page(50, Resolution::Standard, 1),
+        a_page(50, Resolution::Standard, 6),
+    ];
     let mut caller = caller(sent.clone());
     let mut answerer = answerer(false);
     let setup = Setup {
@@ -934,12 +995,26 @@ fn frames_the_primary_channel_spoils_cost_a_ppr_and_not_the_page() {
     assert_done(&caller, &answerer, &record);
     assert_eq!(
         names(&record.caller),
-        ["TSI", "DCS", "ones", "page", "PPS-EOP", "ones", "page", "PPS-EOP", "DCN"]
+        [
+            "TSI", "DCS", "ones", "page", "PPS-EOP", "ones", "page", "PPS-EOP", "DCN"
+        ]
     );
-    assert_eq!(names(&record.answerer), ["CSI", "DIS", "CFR", "silent", "PPR", "silent", "MCF"]);
+    assert_eq!(
+        names(&record.answerer),
+        ["CSI", "DIS", "CFR", "silent", "PPR", "silent", "MCF"]
+    );
     let bursts = pages(&record.caller);
-    assert!(bursts[0].0.len() > 4, "only {} frames: {:?}", bursts[0].0.len(), bursts[0].0);
-    assert_eq!(bursts[1].0, [1, 3], "the retransmission was not the frames asked for");
+    assert!(
+        bursts[0].0.len() > 4,
+        "only {} frames: {:?}",
+        bursts[0].0.len(),
+        bursts[0].0
+    );
+    assert_eq!(
+        bursts[1].0,
+        [1, 3],
+        "the retransmission was not the frames asked for"
+    );
     let got = received(&mut answerer);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].1.lines, page.lines, "the page was not put right");
@@ -967,7 +1042,10 @@ fn four_pprs_in_a_row_bring_a_new_rate_and_not_a_ctc() {
     assert_eq!(said.iter().filter(|s| *s == "PPR").count(), 4, "{said:?}");
     assert_eq!(said.last().map(String::as_str), Some("MCF"));
     let commands = names(&record.caller);
-    assert!(!commands.iter().any(|c| c == "CTC" || c.starts_with("EOR")), "{commands:?}");
+    assert!(
+        !commands.iter().any(|c| c == "CTC" || c.starts_with("EOR")),
+        "{commands:?}"
+    );
     assert_eq!(pages(&record.caller).len(), 5, "{commands:?}");
     assert_eq!(record.renegotiations, 1, "no new rate was asked for");
     assert_eq!(record.rate, 26_400);
@@ -994,16 +1072,26 @@ fn a_block_that_never_gets_through_ends_in_eor() {
     let said = names(&record.answerer);
     assert_eq!(said.iter().filter(|s| *s == "PPR").count(), 8, "{said:?}");
     assert_eq!(said.last().map(String::as_str), Some("ERR"), "{said:?}");
-    assert_eq!(&commands[commands.len() - 2..], ["EOR-EOP", "DCN"], "{commands:?}");
+    assert_eq!(
+        &commands[commands.len() - 2..],
+        ["EOR-EOP", "DCN"],
+        "{commands:?}"
+    );
     assert_eq!(pages(&record.caller).len(), 8);
-    assert_eq!(record.renegotiations, 1, "a second new rate for the same block");
+    assert_eq!(
+        record.renegotiations, 1,
+        "a second new rate for the same block"
+    );
 }
 
 /// Figure F.5-7: the MCF is lost, T4 runs out, the PPS goes again on the
 /// control channel and is answered again -- without the page, which arrived.
 #[test]
 fn a_lost_mcf_is_recovered_by_t4_as_figure_f5_7_draws_it() {
-    let sent = vec![a_page(50, Resolution::Standard, 2), a_page(50, Resolution::Standard, 7)];
+    let sent = vec![
+        a_page(50, Resolution::Standard, 2),
+        a_page(50, Resolution::Standard, 7),
+    ];
     let mut caller = caller(sent.clone());
     let mut answerer = answerer(true);
     let setup = Setup {
@@ -1015,11 +1103,22 @@ fn a_lost_mcf_is_recovered_by_t4_as_figure_f5_7_draws_it() {
     assert_done(&caller, &answerer, &record);
     assert_eq!(
         names(&record.caller),
-        ["TSI", "DCS", "ones", "page", "PPS-MPS", "PPS-MPS", "ones", "page", "PPS-EOP", "DCN"]
+        [
+            "TSI", "DCS", "ones", "page", "PPS-MPS", "PPS-MPS", "ones", "page", "PPS-EOP", "DCN"
+        ]
     );
     assert_eq!(
         names(&record.answerer),
-        ["CSI", "DIS", "CFR", "silent", "MCF (lost)", "MCF", "silent", "MCF"]
+        [
+            "CSI",
+            "DIS",
+            "CFR",
+            "silent",
+            "MCF (lost)",
+            "MCF",
+            "silent",
+            "MCF"
+        ]
     );
     // "T4 elapsed" between the two.
     let pps: Vec<f64> = record
@@ -1077,16 +1176,35 @@ fn a_lost_ppr_is_recovered_by_t4_and_still_costs_only_the_frames_asked_for() {
     assert_done(&caller, &answerer, &record);
     assert_eq!(
         names(&record.caller),
-        ["TSI", "DCS", "ones", "page", "PPS-EOP", "PPS-EOP", "ones", "page", "PPS-EOP", "DCN"]
+        [
+            "TSI", "DCS", "ones", "page", "PPS-EOP", "PPS-EOP", "ones", "page", "PPS-EOP", "DCN"
+        ]
     );
     assert_eq!(
         names(&record.answerer),
-        ["CSI", "DIS", "CFR", "silent", "PPR (lost)", "PPR", "silent", "MCF"]
+        [
+            "CSI",
+            "DIS",
+            "CFR",
+            "silent",
+            "PPR (lost)",
+            "PPR",
+            "silent",
+            "MCF"
+        ]
     );
     let bursts = pages(&record.caller);
     assert_eq!(bursts.len(), 2);
-    assert_eq!(bursts[1].0, [2], "the retransmission was not the frame asked for");
-    assert_eq!(received(&mut answerer)[0].1.lines, page.lines, "the page was not put right");
+    assert_eq!(
+        bursts[1].0,
+        [2],
+        "the retransmission was not the frame asked for"
+    );
+    assert_eq!(
+        received(&mut answerer)[0].1.lines,
+        page.lines,
+        "the page was not put right"
+    );
 }
 
 /// A far end that says only what it is told to, in order: for the parts of
@@ -1209,7 +1327,11 @@ impl End for Script {
 fn burst(lines: &[Vec<bool>], resolution: Resolution, rate: u32) -> (VecDeque<bool>, usize) {
     let octets = ecm::pack(&Coding::Mmr.encode(lines, resolution, 0));
     let data = ecm::frames(&octets, ecm::FRAME_OCTETS);
-    let numbered: Vec<(u8, &[u8])> = data.iter().enumerate().map(|(i, d)| (i as u8, d.as_slice())).collect();
+    let numbered: Vec<(u8, &[u8])> = data
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (i as u8, d.as_slice()))
+        .collect();
     (ecm::partial_page(&numbered, rate).into(), data.len())
 }
 
@@ -1270,16 +1392,24 @@ fn a_change_of_mode_goes_as_figure_f5_4_draws_it() {
         ..Setup::default()
     };
     let record = run(&mut source, &mut answerer, &setup);
-    assert!(source.done, "the script stopped at {:?}", source.steps.front());
+    assert!(
+        source.done,
+        "the script stopped at {:?}",
+        source.steps.front()
+    );
     assert_eq!(answerer.phase(), Phase::Done, "{:?}", answerer.trouble);
     assert_eq!(answerer.trouble, None);
     assert_eq!(
         names(&record.caller),
-        ["TSI", "DCS", "ones", "page", "PPS-EOM", "TSI", "DCS", "ones", "page", "PPS-EOP", "DCN"]
+        [
+            "TSI", "DCS", "ones", "page", "PPS-EOM", "TSI", "DCS", "ones", "page", "PPS-EOP", "DCN"
+        ]
     );
     assert_eq!(
         names(&record.answerer),
-        ["CSI", "DIS", "CFR", "silent", "MCF", "CSI", "DIS", "CFR", "silent", "MCF"]
+        [
+            "CSI", "DIS", "CFR", "silent", "MCF", "CSI", "DIS", "CFR", "silent", "MCF"
+        ]
     );
     // "T2 elapsed" from the end of the MCF to the DIS, and the flags on both
     // sides of the line meanwhile did not put it back.
@@ -1292,7 +1422,12 @@ fn a_change_of_mode_goes_as_figure_f5_4_draws_it() {
         })
         .collect();
     let mcf = said.iter().find(|(_, f)| *f == Frame::Mcf).unwrap().0;
-    let dis = said.iter().filter(|(_, f)| *f == Frame::Dis).nth(1).unwrap().0;
+    let dis = said
+        .iter()
+        .filter(|(_, f)| *f == Frame::Dis)
+        .nth(1)
+        .unwrap()
+        .0;
     assert!(
         dis - mcf > fax::call::T2_SECONDS,
         "the DIS came {:.2} s after the MCF",
@@ -1300,6 +1435,12 @@ fn a_change_of_mode_goes_as_figure_f5_4_draws_it() {
     );
     let got = received(&mut answerer);
     assert_eq!(got.len(), 2);
-    assert_eq!((got[0].1.resolution, &got[0].1.lines), (Resolution::Standard, &first_page.lines));
-    assert_eq!((got[1].1.resolution, &got[1].1.lines), (Resolution::Fine, &second_page.lines));
+    assert_eq!(
+        (got[0].1.resolution, &got[0].1.lines),
+        (Resolution::Standard, &first_page.lines)
+    );
+    assert_eq!(
+        (got[1].1.resolution, &got[1].1.lines),
+        (Resolution::Fine, &second_page.lines)
+    );
 }

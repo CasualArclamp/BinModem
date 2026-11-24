@@ -77,10 +77,23 @@ fn a_call_is_placed_answered_used_and_put_down() {
     assert!(pair.caller.off_hook());
 
     pair.run(13.0);
-    assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
-    assert_eq!(pair.host.state(), State::Data, "{}", Pair::said(&pair.at_host));
+    assert_eq!(
+        pair.caller.state(),
+        State::Data,
+        "{}",
+        Pair::said(&pair.at_caller)
+    );
+    assert_eq!(
+        pair.host.state(),
+        State::Data,
+        "{}",
+        Pair::said(&pair.at_host)
+    );
     let told = Pair::said(&pair.at_caller);
-    assert!(told.contains("CONNECT ") && told.contains("/VARC"), "{told}");
+    assert!(
+        told.contains("CONNECT ") && told.contains("/VARC"),
+        "{told}"
+    );
     // One clean signal at 48 kHz, on both channels: several hundred kilobits.
     let rate = pair.caller.rate().expect("a rate once connected");
     assert!(rate > 300_000, "{rate} bit/s");
@@ -96,7 +109,12 @@ fn a_call_is_placed_answered_used_and_put_down() {
     }
     type_at(&mut pair.host, "hello from the far end\r\n");
     pair.run(3.0);
-    assert!(pair.at_host == page, "{} of {} octets", pair.at_host.len(), page.len());
+    assert!(
+        pair.at_host == page,
+        "{} of {} octets",
+        pair.at_host.len(),
+        page.len()
+    );
     assert_eq!(Pair::said(&pair.at_caller), "hello from the far end\r\n");
 
     // A second of quiet, the escape, a second of quiet, and the line is
@@ -114,18 +132,30 @@ fn a_call_is_placed_answered_used_and_put_down() {
     pair.at_host.clear();
     pair.run(7.0);
     assert_eq!(pair.host.state(), State::Command);
-    assert!(Pair::said(&pair.at_host).contains("NO CARRIER"), "{}", Pair::said(&pair.at_host));
+    assert!(
+        Pair::said(&pair.at_host).contains("NO CARRIER"),
+        "{}",
+        Pair::said(&pair.at_host)
+    );
 }
 
 #[test]
 fn the_single_carrier_modes_connect_too() {
-    for (carrier, name, least) in [("VARCQ", "V.ARC/QAM", 125_000), ("VARCP", "V.ARC/PCM", 75_000)] {
+    for (carrier, name, least) in [
+        ("VARCQ", "V.ARC/QAM", 125_000),
+        ("VARCP", "V.ARC/PCM", 75_000),
+    ] {
         let mut pair = Pair::new(carrier);
         type_at(&mut pair.host, "ATA\r");
         type_at(&mut pair.caller, "ATD1\r");
         pair.run(14.0);
         assert_eq!(pair.caller.standard(), name);
-        assert_eq!(pair.caller.state(), State::Data, "{name}: {}", Pair::said(&pair.at_caller));
+        assert_eq!(
+            pair.caller.state(),
+            State::Data,
+            "{name}: {}",
+            Pair::said(&pair.at_caller)
+        );
         let rate = pair.caller.rate().unwrap_or(0);
         assert!(rate > least, "{name}: {rate} bit/s");
         pair.at_host.clear();
@@ -143,7 +173,11 @@ fn every_mode_with_symbols_gives_the_symbol_diagram_its_points() {
     // noise at all, it goes on asking for more levels until it asks for more
     // than it can read, and a channel starts again; that is a few seconds
     // on its starting table every so often, and not what this is about.
-    for (carrier, shape, after) in [("VARC", "QAM", 14.0), ("VARCQ", "QAM", 14.0), ("VARCP", "PCM", 9.0)] {
+    for (carrier, shape, after) in [
+        ("VARC", "QAM", 14.0),
+        ("VARCQ", "QAM", 14.0),
+        ("VARCP", "PCM", 9.0),
+    ] {
         let mut pair = Pair::new(carrier);
         assert_eq!(pair.caller.shape(), "-", "{carrier}: before the call");
         type_at(&mut pair.host, "ATA\r");
@@ -160,7 +194,10 @@ fn every_mode_with_symbols_gives_the_symbol_diagram_its_points() {
         assert!(states >= 16, "{carrier}: {states} points in the grid");
         // A clean line: every point within its grid, and the grid filled
         // out to its edge on the wider axis.
-        let reach = points.iter().map(|p| p.0.abs().max(p.1.abs())).fold(0.0, f64::max);
+        let reach = points
+            .iter()
+            .map(|p| p.0.abs().max(p.1.abs()))
+            .fold(0.0, f64::max);
         assert!((0.9..1.05).contains(&reach), "{carrier}: reaches {reach}");
         // Taken means taken.
         assert!(pair.caller.varc_points().len() < points.len(), "{carrier}");
@@ -186,14 +223,24 @@ fn a_lead_with_one_channel_wired_still_connects() {
     type_at(&mut pair.host, "ATA\r");
     type_at(&mut pair.caller, "ATD1\r");
     pair.run(19.0);
-    assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
+    assert_eq!(
+        pair.caller.state(),
+        State::Data,
+        "{}",
+        Pair::said(&pair.at_caller)
+    );
     pair.at_host.clear();
     let page: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + (i >> 5)) as u8).collect();
     for &b in &page {
         pair.caller.feed_dte(b);
     }
     pair.run(3.0);
-    assert!(pair.at_host == page, "{} of {} octets", pair.at_host.len(), page.len());
+    assert!(
+        pair.at_host == page,
+        "{} of {} octets",
+        pair.at_host.len(),
+        page.len()
+    );
 }
 
 #[test]
@@ -232,7 +279,11 @@ fn nobody_there_is_no_answer_and_an_ordinary_step_is_silence_meanwhile() {
         said.extend(modem.take_dte());
     }
     assert_eq!(modem.state(), State::Command);
-    assert!(Pair::said(&said).contains("NO ANSWER"), "{}", Pair::said(&said));
+    assert!(
+        Pair::said(&said).contains("NO ANSWER"),
+        "{}",
+        Pair::said(&said)
+    );
     assert_eq!(modem.varc_wanted(), None);
 }
 
@@ -284,7 +335,10 @@ fn on_a_g711_call(a_law: bool, recoded: bool, seconds: f64) -> (Modem, Modem, St
         let (to_host, to_caller) = ([carry(from_caller[0])], [carry(from_host[0])]);
         // As a line does it: told what it is before every block, and
         // stepped only while the call is still V.ARC's.
-        for (modem, heard, said) in [(&mut caller, &to_caller, &mut from_caller), (&mut host, &to_host, &mut from_host)] {
+        for (modem, heard, said) in [
+            (&mut caller, &to_caller, &mut from_caller),
+            (&mut host, &to_host, &mut from_host),
+        ] {
             if modem.varc_wanted().is_some() {
                 modem.varc_codeword_line(Some(a_law));
                 modem.varc_step(8000.0, heard, said);
@@ -364,7 +418,11 @@ fn compressed(setup: [&str; 2], sent: &[u8], seconds: f64) -> (Vec<u8>, Squeezed
 
 #[test]
 fn a_call_compresses_its_stream_with_the_best_both_ends_have() {
-    let text: Vec<u8> = (0..120_000).map(|i| b"what the terminal wrote is mostly text, and text is mostly the same words. "[i % 75]).collect();
+    let text: Vec<u8> = (0..120_000)
+        .map(|i| {
+            b"what the terminal wrote is mostly text, and text is mostly the same words. "[i % 75]
+        })
+        .collect();
     for (setup, method) in [
         (["", ""], "LZ"),
         (["AT+VARCZ=1\r", ""], "V.44"),
@@ -375,9 +433,16 @@ fn a_call_compresses_its_stream_with_the_best_both_ends_have() {
         let (out, back, [plain, coded, _, _]) = said.expect("a V.ARC call");
         assert_eq!(out, method, "{setup:?}");
         assert_eq!(back, method, "{setup:?}");
-        assert!(got.ends_with(&text[text.len() - 4000..]), "{setup:?}: {} octets arrived", got.len());
+        assert!(
+            got.ends_with(&text[text.len() - 4000..]),
+            "{setup:?}: {} octets arrived",
+            got.len()
+        );
         if method != "none" {
-            assert!(coded * 4 < plain, "{setup:?}: {plain} octets sent as {coded}");
+            assert!(
+                coded * 4 < plain,
+                "{setup:?}: {plain} octets sent as {coded}"
+            );
         }
     }
 }
@@ -400,8 +465,17 @@ fn a_call_that_is_not_exact_after_all_carries_on_as_the_multicarrier_mode() {
     assert!(told.contains("/VARC"), "{told}");
     assert_eq!(got, "samples that are the data");
     // Sixteen-bit samples are a clean line by any other measure.
-    assert!(caller.rate().unwrap_or(0) > 100_000, "{:?} bit/s", caller.rate());
-    assert!(caller.take_line_notes().iter().any(|n| n.contains("does not carry samples exactly")));
+    assert!(
+        caller.rate().unwrap_or(0) > 100_000,
+        "{:?} bit/s",
+        caller.rate()
+    );
+    assert!(
+        caller
+            .take_line_notes()
+            .iter()
+            .any(|n| n.contains("does not carry samples exactly"))
+    );
 }
 
 #[test]
@@ -416,10 +490,21 @@ fn a_call_answered_in_g711_becomes_an_ordinary_call() {
     assert!(modem.off_hook());
     assert_eq!(modem.standard(), "V.8");
     assert_eq!(modem.modulation(), "V92");
-    assert!(modem.take_line_notes().iter().any(|n| n.contains("cannot carry it")));
+    assert!(
+        modem
+            .take_line_notes()
+            .iter()
+            .any(|n| n.contains("cannot carry it"))
+    );
     // It makes sound again through the ordinary door.
-    let loud = (0..16_000).map(|_| modem.step(0.0).abs()).fold(0.0, f64::max);
-    assert!(loud > 0.0 || modem.line_phase() == "quiet", "{}", modem.line_phase());
+    let loud = (0..16_000)
+        .map(|_| modem.step(0.0).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        loud > 0.0 || modem.line_phase() == "quiet",
+        "{}",
+        modem.line_phase()
+    );
 }
 
 /// A line made of two sound devices that do not run at the same rate: this
@@ -456,7 +541,10 @@ fn two_devices_at_two_rates_are_a_line_each_way() {
     assert_eq!(Pair::said(&at_host), "each way at its own rate");
     // The fast way carries a good deal more than the slow way does.
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
-    assert!(down > 3 * up / 2 && up > 300_000, "{down} arriving at the caller, {up} at the host");
+    assert!(
+        down > 3 * up / 2 && up > 300_000,
+        "{down} arriving at the caller, {up} at the host"
+    );
 }
 
 /// One pair of wires: both ends send into it, and each hears the other
@@ -479,7 +567,11 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
     let mut typed = false;
     let echo = |line: &std::collections::VecDeque<f64>| -> f64 {
-        shape.iter().enumerate().map(|(i, s)| s * line[delay + i]).sum()
+        shape
+            .iter()
+            .enumerate()
+            .map(|(i, s)| s * line[delay + i])
+            .sum()
     };
     for _ in 0..(45.0 * FS) as usize {
         // The far end arrives 6 dB down; the echo is the louder.
@@ -512,10 +604,18 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     let rate = caller.rate().unwrap_or(0);
     assert!(rate > 200_000, "{rate} bit/s");
     let far = caller.varc_far_end().expect("a report").0;
-    assert!(far.snr_db > 50.0, "the far end reads this end at {:.1} dB", far.snr_db);
+    assert!(
+        far.snr_db > 50.0,
+        "the far end reads this end at {:.1} dB",
+        far.snr_db
+    );
     // Each end had the line to itself first and said how that went.
     let told = caller.take_line_notes().join("\n") + &host.take_line_notes().join("\n");
-    assert_eq!(told.matches("learned with the line to itself").count(), 2, "{told}");
+    assert_eq!(
+        told.matches("learned with the line to itself").count(),
+        2,
+        "{told}"
+    );
     eprintln!("two-wire: {rate} bit/s, echo {:.1} dB down", echo[0].0);
 }
 
@@ -593,7 +693,13 @@ fn across(
             type_at(&mut caller, "said, then agreed, then sent");
         }
     }
-    (caller, host, Pair::said(&at_caller), Pair::said(&at_host), notes)
+    (
+        caller,
+        host,
+        Pair::said(&at_caller),
+        Pair::said(&at_host),
+        notes,
+    )
 }
 
 /// The rig that the handshake was written for: each end hears on one sound
@@ -602,15 +708,25 @@ fn across(
 /// nothing and say NO CARRIER.
 #[test]
 fn ends_that_were_told_two_wire_and_cannot_be_run_a_wire_each_way() {
-    let (caller, host, told, got, notes) = across("VARC2W", (48_000.0, 192_000.0), (192_000.0, 48_000.0), 16.0);
+    let (caller, host, told, got, notes) =
+        across("VARC2W", (48_000.0, 192_000.0), (192_000.0, 48_000.0), 16.0);
     assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
     assert_eq!(host.state(), State::Data);
     assert_eq!(got, "said, then agreed, then sent");
-    assert!(caller.varc_echo().is_empty(), "no canceller on a wire each way");
+    assert!(
+        caller.varc_echo().is_empty(),
+        "no canceller on a wire each way"
+    );
     let all = notes.join("\n");
-    assert!(all.contains("the far end hears at 192000 Hz and sends at 48000 Hz"), "{all}");
+    assert!(
+        all.contains("the far end hears at 192000 Hz and sends at 48000 Hz"),
+        "{all}"
+    );
     assert!(all.contains("two-wire was asked for"), "{all}");
-    assert!(all.contains("agreed on a wire each way, 192000 Hz out and 48000 Hz back"), "{all}");
+    assert!(
+        all.contains("agreed on a wire each way, 192000 Hz out and 48000 Hz back"),
+        "{all}"
+    );
 }
 
 /// A card at 192 kHz calling one at 48 kHz. The modulation runs at 48 kHz
@@ -618,11 +734,15 @@ fn ends_that_were_told_two_wire_and_cannot_be_run_a_wire_each_way() {
 /// each other signals built for different rates.
 #[test]
 fn a_fast_card_and_a_slow_card_run_at_the_slow_cards_rate() {
-    let (caller, host, told, got, notes) = across("VARC", (192_000.0, 192_000.0), (48_000.0, 48_000.0), 16.0);
+    let (caller, host, told, got, notes) =
+        across("VARC", (192_000.0, 192_000.0), (48_000.0, 48_000.0), 16.0);
     assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
     assert_eq!(got, "said, then agreed, then sent");
     let all = notes.join("\n");
-    assert!(all.contains("agreed on a wire each way, 48000 Hz out and 48000 Hz back"), "{all}");
+    assert!(
+        all.contains("agreed on a wire each way, 48000 Hz out and 48000 Hz back"),
+        "{all}"
+    );
     assert!(all.contains("the ends' sound cards differ"), "{all}");
     // What a 48 kHz line carries, each way.
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
@@ -662,11 +782,18 @@ impl Dull {
         let taps: Vec<f64> = (-half..=half)
             .map(|i| {
                 let t = i as f64;
-                let sinc = if i == 0 { cut } else { (std::f64::consts::PI * cut * t).sin() / (std::f64::consts::PI * t) };
+                let sinc = if i == 0 {
+                    cut
+                } else {
+                    (std::f64::consts::PI * cut * t).sin() / (std::f64::consts::PI * t)
+                };
                 sinc * (0.5 + 0.5 * (std::f64::consts::PI * t / (half + 1) as f64).cos())
             })
             .collect();
-        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len()]), taps }
+        Self {
+            past: std::collections::VecDeque::from(vec![0.0; taps.len()]),
+            taps,
+        }
     }
 
     fn pass(&mut self, x: f64) -> f64 {
@@ -719,11 +846,20 @@ fn an_end_that_cannot_hear_asks_for_it_slower_and_gets_it() {
     // 4.9 kHz. The other way is as it was.
     assert_eq!(caller.varc_slowed(), (4, 1), "{told}");
     assert_eq!(host.varc_slowed(), (1, 4), "{heard}");
-    assert!(told.contains("asking it to send 2 times slower") && told.contains("4 times slower"), "{told}");
-    assert!(heard.contains("the far end cannot hear this end; sending 4 times slower"), "{heard}");
+    assert!(
+        told.contains("asking it to send 2 times slower") && told.contains("4 times slower"),
+        "{told}"
+    );
+    assert!(
+        heard.contains("the far end cannot hear this end; sending 4 times slower"),
+        "{heard}"
+    );
     // And the rates say so: a quarter of the baud one way.
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
-    assert!(down > 10_000 && down < 100_000 && up > 150_000, "{down} down the dull way, {up} up the cable");
+    assert!(
+        down > 10_000 && down < 100_000 && up > 150_000,
+        "{down} down the dull way, {up} up the cable"
+    );
 }
 
 /// The baud, the code and the bits a symbol, chosen by hand at one end for
@@ -738,7 +874,12 @@ fn a_baud_a_code_and_a_grid_can_be_chosen_by_hand() {
     type_at(&mut pair.host, "ATA\r");
     type_at(&mut pair.caller, "ATD1\r");
     pair.run(16.0);
-    assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
+    assert_eq!(
+        pair.caller.state(),
+        State::Data,
+        "{}",
+        Pair::said(&pair.at_caller)
+    );
     // What the caller hears is what it asked for: half the baud a 48 kHz
     // line would give it, sixteen points, half of every word checks.
     assert_eq!(pair.caller.varc_bauds(), (8_000, 16_000));
@@ -749,12 +890,19 @@ fn a_baud_a_code_and_a_grid_can_be_chosen_by_hand() {
     assert!(!pair.caller.varc_points().is_empty());
     assert_eq!(pair.caller.states(), 16);
     let (n, k) = pair.caller.varc_code().expect("a code");
-    assert!((k as f64 / n as f64 - 0.5).abs() < 0.03, "a code of {k}/{n}");
+    assert!(
+        (k as f64 / n as f64 - 0.5).abs() < 0.03,
+        "a code of {k}/{n}"
+    );
     // 8000 baud of four bits, half of them data, less the sync words.
     let rate = pair.caller.rate().unwrap_or(0);
     assert!((14_000..16_500).contains(&rate), "{rate} bit/s");
     // And the way nobody chose is as fast as it would have been.
-    assert!(pair.host.rate().unwrap_or(0) > 100_000, "{:?}", pair.host.rate());
+    assert!(
+        pair.host.rate().unwrap_or(0) > 100_000,
+        "{:?}",
+        pair.host.rate()
+    );
     pair.at_caller.clear();
     type_at(&mut pair.host, "as asked");
     pair.run(1.5);
@@ -765,7 +913,11 @@ fn a_baud_a_code_and_a_grid_can_be_chosen_by_hand() {
 /// third of its rate in baud for the carrier, two-thirds for the levels.
 #[test]
 fn the_single_carrier_modes_run_at_the_cards_own_rate() {
-    for (carrier, fs, baud) in [("VARCQ", 48_000.0, 16_000), ("VARCP", 48_000.0, 32_000), ("VARCQ", 192_000.0, 64_000)] {
+    for (carrier, fs, baud) in [
+        ("VARCQ", 48_000.0, 16_000),
+        ("VARCP", 48_000.0, 32_000),
+        ("VARCQ", 192_000.0, 64_000),
+    ] {
         let mut caller = Modem::new(16_000.0);
         let mut host = Modem::new(16_000.0);
         type_at(&mut caller, &format!("AT+MS={carrier}\r"));
@@ -781,7 +933,10 @@ fn the_single_carrier_modes_run_at_the_cards_own_rate() {
         assert_eq!(caller.varc_bauds(), (baud, baud), "{carrier} at {fs} Hz");
         // Several bits a symbol on a line with no noise in it.
         let rate = caller.rate().unwrap_or(0);
-        assert!(rate > 4 * baud, "{carrier} at {fs} Hz: {rate} bit/s at {baud} baud");
+        assert!(
+            rate > 4 * baud,
+            "{carrier} at {fs} Hz: {rate} bit/s at {baud} baud"
+        );
     }
 }
 
@@ -813,8 +968,16 @@ fn bis_call(caller_set: &str, host_set: &str, seconds: f64) -> (Modem, Modem, St
         }
         if tick % 3 == 0 {
             let (was_caller, was_host) = (from_caller, from_host);
-            from_caller = if caller.varc_wanted().is_none() { caller.step(was_host) } else { 0.0 };
-            from_host = if host.varc_wanted().is_none() { host.step(was_caller) } else { 0.0 };
+            from_caller = if caller.varc_wanted().is_none() {
+                caller.step(was_host)
+            } else {
+                0.0
+            };
+            from_host = if host.varc_wanted().is_none() {
+                host.step(was_caller)
+            } else {
+                0.0
+            };
         }
         for (who, m) in [("caller", &mut caller), ("host", &mut host)] {
             for line in m.take_line_notes() {
@@ -840,8 +1003,15 @@ fn an_ordinary_call_between_two_that_list_varc_becomes_one() {
     assert_eq!(host.varc_wanted(), Some(VarcMode::Dmt));
     assert_eq!(caller.state(), State::Data, "{notes}");
     assert_eq!(host.state(), State::Data, "{notes}");
-    assert!(told.contains("CONNECT ") && told.contains("/VARC"), "{told}");
-    assert!(caller.rate().unwrap_or(0) > 300_000, "{:?} bit/s", caller.rate());
+    assert!(
+        told.contains("CONNECT ") && told.contains("/VARC"),
+        "{told}"
+    );
+    assert!(
+        caller.rate().unwrap_or(0) > 300_000,
+        "{:?} bit/s",
+        caller.rate()
+    );
 }
 
 /// The same with it at one end only: nothing of V.ARC happens at all.
@@ -850,7 +1020,10 @@ fn a_call_to_one_that_does_not_list_varc_is_an_ordinary_call() {
     for (caller_set, host_set) in [(";+VARCBIS=1", ""), ("", ";+VARCBIS=1")] {
         let (caller, host, notes, _) = bis_call(caller_set, host_set, 20.0);
         assert!(!notes.contains("both ends have V.ARC"), "{notes}");
-        assert!(notes.contains("V.8 bis: sent MS") || notes.contains("V.8 bis: heard MS"), "{notes}");
+        assert!(
+            notes.contains("V.8 bis: sent MS") || notes.contains("V.8 bis: heard MS"),
+            "{notes}"
+        );
         assert_eq!(caller.varc_wanted(), None);
         assert_eq!(host.varc_wanted(), None);
     }
@@ -887,6 +1060,10 @@ fn varc_chosen_and_then_refused_by_the_line_is_not_chosen_again() {
         }
     }
     assert_eq!(fell_back, 2, "once at each end and no more\n{notes}");
-    assert_eq!(notes.matches("caller: V.8 bis: sent MS").count(), 2, "{notes}");
+    assert_eq!(
+        notes.matches("caller: V.8 bis: sent MS").count(),
+        2,
+        "{notes}"
+    );
     assert!(notes.contains("caller: V.8 bis: sent MS (V.92"), "{notes}");
 }

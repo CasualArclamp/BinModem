@@ -443,7 +443,10 @@ impl Account {
                 line("ptime_ms", &account.ptime_ms.to_string());
             }
             if account.transport != fallback.transport {
-                line("transport", &account.transport.to_string().to_ascii_lowercase());
+                line(
+                    "transport",
+                    &account.transport.to_string().to_ascii_lowercase(),
+                );
             }
         }
         out
@@ -571,7 +574,11 @@ impl Account {
             let stripped: String = written.chars().filter(|ch| !is_modifier(*ch)).collect();
             // Unless there is nothing left, which means it was a name made
             // only of those letters after all.
-            if stripped.is_empty() { written } else { stripped }
+            if stripped.is_empty() {
+                written
+            } else {
+                stripped
+            }
         } else {
             written
         };
@@ -835,10 +842,7 @@ password  = hunter2
         assert_eq!(account.registrar, "sip.example.net");
         // Not written, so taken from the registrar.
         assert_eq!(account.domain, "sip.example.net");
-        assert_eq!(
-            account.uri().to_string(),
-            "sip:0398765432@sip.example.net"
-        );
+        assert_eq!(account.uri().to_string(), "sip:0398765432@sip.example.net");
         assert_eq!(account.auth_name(), "0398765432");
         assert_eq!(account.next_hop(), "sip.example.net");
         assert!(account.register);
@@ -1031,7 +1035,11 @@ register  = no
             assert_eq!(wrote.domain, read.domain, "the domain of {}", wrote.name);
             assert_eq!(wrote.username, read.username);
             assert_eq!(wrote.auth_username, read.auth_username);
-            assert_eq!(wrote.password, read.password, "the password of {}", wrote.name);
+            assert_eq!(
+                wrote.password, read.password,
+                "the password of {}",
+                wrote.name
+            );
             assert_eq!(wrote.display, read.display);
             assert_eq!(wrote.outbound_proxy, read.outbound_proxy);
             assert_eq!(wrote.register, read.register);
@@ -1071,8 +1079,9 @@ register  = no
                 ..Account::default()
             };
             let text = Account::to_text(std::slice::from_ref(&account));
-            let back = Account::parse(&text)
-                .unwrap_or_else(|e| panic!("{password:?} was written as\n{text}\nand refused: {e}"));
+            let back = Account::parse(&text).unwrap_or_else(|e| {
+                panic!("{password:?} was written as\n{text}\nand refused: {e}")
+            });
             assert_eq!(back[0].password, password, "written as\n{text}");
         }
     }
@@ -1081,7 +1090,12 @@ register  = no
     #[test]
     fn an_account_says_what_it_still_needs() {
         let empty = Account::default();
-        assert_eq!(empty.what_is_missing().len(), 4, "{:?}", empty.what_is_missing());
+        assert_eq!(
+            empty.what_is_missing().len(),
+            4,
+            "{:?}",
+            empty.what_is_missing()
+        );
 
         let half_done = Account {
             name: "trunk".to_owned(),

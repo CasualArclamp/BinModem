@@ -157,7 +157,10 @@ impl Script {
         // Once the password has gone, a refusal is worth stopping for at
         // once rather than after the far end has gone quiet.
         if matches!(self.stage, Stage::Command | Stage::Starting)
-            && let Some(line) = self.heard.lines().find(|l| REFUSALS.iter().any(|r| l.contains(r)))
+            && let Some(line) = self
+                .heard
+                .lines()
+                .find(|l| REFUSALS.iter().any(|r| l.contains(r)))
         {
             let line = line.trim().to_owned();
             self.finish(Outcome::Failed(format!("the far end said \"{line}\"")));
@@ -178,15 +181,21 @@ impl Script {
 
         match self.stage {
             Stage::Name if !self.heard_anything && self.stage_ms >= SILENT_MS => {
-                self.notes.push("the far end said nothing, so this end starts PPP".to_owned());
+                self.notes
+                    .push("the far end said nothing, so this end starts PPP".to_owned());
                 self.finish(Outcome::Ppp { early: Vec::new() });
             }
             Stage::Name | Stage::Password if self.stage_ms >= PROMPT_MS => {
-                let what = if self.stage == Stage::Name { "login" } else { "password" };
+                let what = if self.stage == Stage::Name {
+                    "login"
+                } else {
+                    "password"
+                };
                 self.finish(Outcome::Failed(format!("no {what} prompt came")));
             }
             Stage::Command | Stage::Starting if self.quiet_ms >= AFTER_LOGIN_MS => {
-                self.notes.push("the far end went quiet, so this end starts PPP".to_owned());
+                self.notes
+                    .push("the far end went quiet, so this end starts PPP".to_owned());
                 self.finish(Outcome::Ppp { early: Vec::new() });
             }
             _ => {}
@@ -202,14 +211,17 @@ impl Script {
             Stage::Name if asks(&NAME_PROMPTS) => {
                 let name = self.account.name.clone();
                 self.say(&name, Stage::Password);
-                self.notes.push(format!("answered the login prompt as {name}"));
+                self.notes
+                    .push(format!("answered the login prompt as {name}"));
             }
             Stage::Password if asks(&PASSWORD_PROMPTS) => {
                 let password = self.account.password.clone();
                 self.say(&password, Stage::Command);
                 self.notes.push("answered the password prompt".to_owned());
             }
-            Stage::Password | Stage::Command | Stage::Starting if asks(&NAME_PROMPTS) || asks(&PASSWORD_PROMPTS) => {
+            Stage::Password | Stage::Command | Stage::Starting
+                if asks(&NAME_PROMPTS) || asks(&PASSWORD_PROMPTS) =>
+            {
                 self.finish(Outcome::Failed(
                     "the far end asked for the login again, so the name or password was not accepted".to_owned(),
                 ));
@@ -276,13 +288,21 @@ mod tests {
     #[test]
     fn it_answers_a_login_and_a_password_and_types_ppp() {
         let mut s = script();
-        assert_eq!(hear(&mut s, "\r\nWelcome to the Internet\r\n\r\nlogin: "), "guest\r");
+        assert_eq!(
+            hear(&mut s, "\r\nWelcome to the Internet\r\n\r\nlogin: "),
+            "guest\r"
+        );
         assert_eq!(hear(&mut s, "guest\r\nPassword: "), "letmein\r");
-        assert_eq!(hear(&mut s, "\r\nLast login: Tue Sep 15 on ttyS0\r\n$ "), "ppp\r");
+        assert_eq!(
+            hear(&mut s, "\r\nLast login: Tue Sep 15 on ttyS0\r\n$ "),
+            "ppp\r"
+        );
         s.feed(&[0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21]);
         assert_eq!(
             s.take_outcome(),
-            Some(Outcome::Ppp { early: vec![0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21] })
+            Some(Outcome::Ppp {
+                early: vec![0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21]
+            })
         );
     }
 
@@ -295,7 +315,10 @@ mod tests {
         s.tick(QUIET_MS / 2);
         s.feed(b" Tue Sep 15 on ttyS0\r\n");
         s.tick(QUIET_MS);
-        assert!(s.take_output().is_empty(), "answered a line that was not a prompt");
+        assert!(
+            s.take_output().is_empty(),
+            "answered a line that was not a prompt"
+        );
     }
 
     #[test]

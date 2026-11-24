@@ -137,11 +137,18 @@ impl Link {
 
     /// The same, with an account to prove who this end is and, if
     /// `callers` is set, a demand that the far end prove who it is.
-    pub fn with_authentication(local: [u8; 4], remote: [u8; 4], authentication: Authentication) -> Self {
+    pub fn with_authentication(
+        local: [u8; 4],
+        remote: [u8; 4],
+        authentication: Authentication,
+    ) -> Self {
         // A modem call has a round trip measured in whole seconds once a VoIP
         // trunk is in it, so the Restart timer is the long end of what 4.6
         // suggests rather than the short.
-        let limits = Limits { restart_ms: 3000, ..Limits::default() };
+        let limits = Limits {
+            restart_ms: 3000,
+            ..Limits::default()
+        };
         let wanted = crate::lcp::Wanted::default();
         let lcp = match &authentication.callers {
             Some(accounts) => Lcp::demanding(wanted, auth::methods_for(accounts)),
@@ -204,7 +211,10 @@ impl Link {
     }
 
     pub fn counters(&self) -> Counters {
-        Counters { bad_frames: self.deframer.bad_fcs + self.deframer.aborted + self.deframer.short, ..self.counters }
+        Counters {
+            bad_frames: self.deframer.bad_fcs + self.deframer.aborted + self.deframer.short,
+            ..self.counters
+        }
     }
 
     /// Routers' complaints since this was last called.
@@ -266,7 +276,10 @@ impl Link {
     pub fn ended(&self) -> bool {
         self.opened
             && self.phase == Phase::Dead
-            && matches!(self.lcp.state(), State::Closed | State::Stopped | State::Initial | State::Starting)
+            && matches!(
+                self.lcp.state(),
+                State::Closed | State::Stopped | State::Initial | State::Starting
+            )
     }
 
     /// The modem has connected: there is something under this now.
@@ -491,7 +504,10 @@ impl Link {
                 let (local, _) = self.addresses();
                 // RFC 791 3.2: a host that receives a datagram not addressed to
                 // it has nothing to do with it -- this end routes nothing.
-                let carried = datagram.as_deref().and_then(ip::read).filter(|c| c.to == local);
+                let carried = datagram
+                    .as_deref()
+                    .and_then(ip::read)
+                    .filter(|c| c.to == local);
                 let Some(carried) = carried else {
                     self.counters.dropped_in += 1;
                     return;
@@ -520,8 +536,7 @@ impl Link {
                         // and doing it here rather than above keeps a ping
                         // working before there is anything above.
                         let reply = arrived.echo.to_reply();
-                        let datagram =
-                            ip::datagram(arrived.to, arrived.from, &reply, self.next_id);
+                        let datagram = ip::datagram(arrived.to, arrived.from, &reply, self.next_id);
                         self.next_id = self.next_id.wrapping_add(1);
                         self.send_datagram(datagram);
                     }
@@ -580,7 +595,11 @@ impl Link {
         // What this end demands of the far end is what it asked for -- never
         // what came back in the acknowledgement, which a far end could have
         // trimmed. A demand is not something the other side gets a say in.
-        let ours = self.authentication.callers.as_ref().and(self.lcp.protocol.wanted.auth);
+        let ours = self
+            .authentication
+            .callers
+            .as_ref()
+            .and(self.lcp.protocol.wanted.auth);
         if self.authentication.callers.is_some() && ours.is_none() {
             self.note("this end would have asked the caller who it is, and did not");
             self.close_link();
@@ -591,8 +610,17 @@ impl Link {
             self.prover = Some(Prover::new(method, account));
         }
         if let (Some(method), Some(accounts)) = (ours, self.authentication.callers.clone()) {
-            let name = if self.authentication.name.is_empty() { "binmodem" } else { &self.authentication.name };
-            self.authenticator = Some(Authenticator::new(method, accounts, name, self.authentication.seed));
+            let name = if self.authentication.name.is_empty() {
+                "binmodem"
+            } else {
+                &self.authentication.name
+            };
+            self.authenticator = Some(Authenticator::new(
+                method,
+                accounts,
+                name,
+                self.authentication.seed,
+            ));
         }
         if self.prover.is_some() || self.authenticator.is_some() {
             self.phase = Phase::Authenticate;
@@ -770,7 +798,8 @@ impl Link {
         // negotiated." Which is what lets a far end that has already gone back
         // to its defaults read a Terminate-Request, or a new Configure-Request
         // for a link it thinks is open, at all.
-        let unconfigured = protocol == crate::protocol::LCP && matches!(payload.first(), Some(1..=7));
+        let unconfigured =
+            protocol == crate::protocol::LCP && matches!(payload.first(), Some(1..=7));
         let packet = Packet { protocol, payload };
         self.counters.frames_out += 1;
         if unconfigured {

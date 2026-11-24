@@ -93,7 +93,10 @@ impl Echo {
     /// The answer this echo deserves: RFC 792 has the reply carry the
     /// request's identifier, sequence and data back unchanged.
     pub fn to_reply(&self) -> Self {
-        Self { reply: true, ..self.clone() }
+        Self {
+            reply: true,
+            ..self.clone()
+        }
     }
 }
 
@@ -273,7 +276,10 @@ mod tests {
     /// An odd number of octets pads with a zero that is not sent.
     #[test]
     fn an_odd_length_is_summed_as_if_padded() {
-        assert_eq!(checksum(&[0x12, 0x34, 0x56]), checksum(&[0x12, 0x34, 0x56, 0x00]));
+        assert_eq!(
+            checksum(&[0x12, 0x34, 0x56]),
+            checksum(&[0x12, 0x34, 0x56, 0x00])
+        );
     }
 
     #[test]
@@ -294,10 +300,18 @@ mod tests {
     /// And the reply carries the identifier, sequence and data back.
     #[test]
     fn a_reply_is_the_request_turned_round() {
-        let echo = Echo { reply: false, id: 1, sequence: 2, payload: vec![3, 4] };
+        let echo = Echo {
+            reply: false,
+            id: 1,
+            sequence: 2,
+            payload: vec![3, 4],
+        };
         let reply = echo.to_reply();
         assert!(reply.reply);
-        assert_eq!((reply.id, reply.sequence, &reply.payload), (1, 2, &vec![3, 4]));
+        assert_eq!(
+            (reply.id, reply.sequence, &reply.payload),
+            (1, 2, &vec![3, 4])
+        );
         let bytes = datagram([1, 1, 1, 1], [2, 2, 2, 2], &reply, 1);
         assert!(parse(&bytes).unwrap().echo.reply);
     }
@@ -305,7 +319,12 @@ mod tests {
     /// A datagram with a bit flipped anywhere in its header is not read.
     #[test]
     fn a_damaged_header_is_not_believed() {
-        let echo = Echo { reply: false, id: 1, sequence: 1, payload: vec![0; 32] };
+        let echo = Echo {
+            reply: false,
+            id: 1,
+            sequence: 1,
+            payload: vec![0; 32],
+        };
         let good = datagram([10, 0, 0, 1], [10, 0, 0, 2], &echo, 1);
         for i in 0..20 {
             let mut bad = good.clone();
@@ -317,7 +336,12 @@ mod tests {
     /// And one with a bit flipped in the echo itself.
     #[test]
     fn a_damaged_echo_is_not_believed() {
-        let echo = Echo { reply: false, id: 1, sequence: 1, payload: vec![7; 16] };
+        let echo = Echo {
+            reply: false,
+            id: 1,
+            sequence: 1,
+            payload: vec![7; 16],
+        };
         let good = datagram([10, 0, 0, 1], [10, 0, 0, 2], &echo, 1);
         for i in 20..good.len() {
             let mut bad = good.clone();
@@ -329,12 +353,17 @@ mod tests {
     /// Anything that is not an echo is not this layer's business.
     #[test]
     fn other_traffic_is_left_alone() {
-        let mut udp = datagram([1, 1, 1, 1], [2, 2, 2, 2], &Echo {
-            reply: false,
-            id: 0,
-            sequence: 0,
-            payload: vec![],
-        }, 1);
+        let mut udp = datagram(
+            [1, 1, 1, 1],
+            [2, 2, 2, 2],
+            &Echo {
+                reply: false,
+                id: 0,
+                sequence: 0,
+                payload: vec![],
+            },
+            1,
+        );
         udp[9] = 17; // UDP
         udp[10..12].copy_from_slice(&[0, 0]);
         let sum = checksum(&udp[..20]);

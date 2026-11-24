@@ -184,7 +184,9 @@ impl Duplex {
         let in_name = in_device.to_string();
         let out_name = out_device.to_string();
 
-        let in_config = in_device.default_input_config().map_err(|e| e.to_string())?;
+        let in_config = in_device
+            .default_input_config()
+            .map_err(|e| e.to_string())?;
         let out_config = out_device
             .default_output_config()
             .map_err(|e| e.to_string())?;
@@ -319,7 +321,11 @@ impl Duplex {
 
     /// Whether the path has settled and is delivering.
     pub fn settled(&self) -> bool {
-        self.shared.settling.lock().map(|n| *n == 0).unwrap_or(false)
+        self.shared
+            .settling
+            .lock()
+            .map(|n| *n == 0)
+            .unwrap_or(false)
     }
 
     /// Take everything that has arrived from the line, at the modem's rate.

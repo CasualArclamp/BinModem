@@ -17,7 +17,8 @@ fn round_trip_with(input: &[u8], params: Params) -> Vec<u8> {
 
     let mut dec = Decoder::new(params);
     let mut out = Vec::new();
-    dec.decode(&wire, &mut out).expect("the far end could not read it");
+    dec.decode(&wire, &mut out)
+        .expect("the far end could not read it");
     out
 }
 
@@ -151,11 +152,16 @@ fn chunked_traffic_survives_a_full_dictionary() {
         let mut wire = Vec::new();
         enc.encode(&plain[at..end], &mut wire);
         enc.flush(&mut wire);
-        dec.decode(&wire, &mut back).expect("the far end could not read it");
+        dec.decode(&wire, &mut back)
+            .expect("the far end could not read it");
         at = end;
     }
     if back != plain {
-        let i = back.iter().zip(&plain).position(|(a, b)| a != b).unwrap_or(0);
+        let i = back
+            .iter()
+            .zip(&plain)
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
         panic!(
             "came apart at octet {i} of {}: sent {:?}, got {:?}",
             plain.len(),
@@ -171,13 +177,12 @@ fn chunked_traffic_survives_a_full_dictionary() {
 #[test]
 fn a_dictionary_that_fills_starts_again_without_losing_anything() {
     // Small enough that both limits are reached many times over.
-    let params = Params { n2: 256, n7: 32, n8: 512 };
-    let text: Vec<u8> = b"abcdefghij"
-        .iter()
-        .copied()
-        .cycle()
-        .take(30_000)
-        .collect();
+    let params = Params {
+        n2: 256,
+        n7: 32,
+        n8: 512,
+    };
+    let text: Vec<u8> = b"abcdefghij".iter().copied().cycle().take(30_000).collect();
     assert_eq!(round_trip_with(&text, params), text);
 }
 
@@ -206,11 +211,7 @@ fn the_negotiable_parameters_all_work() {
     for n2 in [256u16, 512, 1024, 2048, 8192] {
         for n7 in [32u8, 46, 47, 78, 142, 255] {
             let params = Params::of(n2, n7);
-            assert_eq!(
-                round_trip_with(&text, params),
-                text,
-                "n2 {n2} n7 {n7}"
-            );
+            assert_eq!(round_trip_with(&text, params), text, "n2 {n2} n7 {n7}");
         }
     }
 }
@@ -257,7 +258,10 @@ fn transparent_mode_carries_characters_and_restarts_the_dictionary() {
     let mut wire = Vec::new();
     let mut back = Vec::new();
 
-    enc.encode(b"some ordinary text to begin with, ordinary text", &mut wire);
+    enc.encode(
+        b"some ordinary text to begin with, ordinary text",
+        &mut wire,
+    );
     enc.flush(&mut wire);
     dec.decode(&wire, &mut back).expect("decode failed");
 
@@ -333,7 +337,8 @@ fn the_escape_is_not_set_back_by_entering_compressed_mode() {
 
     let mut dec = Decoder::new(params);
     let mut out = Vec::new();
-    dec.decode(&stream, &mut out).expect("a stream built from the clause would not decode");
+    dec.decode(&stream, &mut out)
+        .expect("a stream built from the clause would not decode");
     assert_eq!(out, [0x00, 0x33, 0x00, 0x62]);
 
     // And this encoder writes the transparent stretches of that same stream.
@@ -364,10 +369,7 @@ fn a_codeword_nothing_has_created_is_refused() {
     w.write(1, 1, &mut wire);
     w.write(60, 6, &mut wire);
     w.align(&mut wire);
-    assert_eq!(
-        dec.decode(&wire, &mut out),
-        Err(Error::UnknownCodeword(60))
-    );
+    assert_eq!(dec.decode(&wire, &mut out), Err(Error::UnknownCodeword(60)));
 }
 
 /// The compression actually has to beat V.42bis on text, or there is no

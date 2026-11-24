@@ -93,7 +93,9 @@ fn names(arrived: &[Received]) -> Vec<&str> {
 #[test]
 fn one_file_from_sz() {
     let data: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 256) as u8).collect();
-    let Some((arrived, state)) = from_sz(&[], &[("ONE.BIN", data.clone())]) else { return };
+    let Some((arrived, state)) = from_sz(&[], &[("ONE.BIN", data.clone())]) else {
+        return;
+    };
     assert_eq!(state, State::Done);
     assert_eq!(names(&arrived), ["ONE.BIN"]);
     assert_eq!(arrived[0].data, data);
@@ -104,7 +106,9 @@ fn a_batch_from_sz_keeps_every_file() {
     let one = b"MAIN MENU\r\n".repeat(400);
     let two: Vec<u8> = (0..50_000u32).map(|i| (i % 253) as u8).collect();
     let files = [("FIRST.TXT", one.clone()), ("SECOND.BIN", two.clone())];
-    let Some((arrived, state)) = from_sz(&[], &files) else { return };
+    let Some((arrived, state)) = from_sz(&[], &files) else {
+        return;
+    };
     assert_eq!(state, State::Done);
     assert_eq!(names(&arrived), ["FIRST.TXT", "SECOND.BIN"]);
     assert_eq!(arrived[0].data, one);
@@ -115,7 +119,9 @@ fn a_batch_from_sz_keeps_every_file() {
 #[test]
 fn sz_that_starts_with_a_zsinit_is_answered() {
     let data: Vec<u8> = (0..=255u8).cycle().take(8_000).collect();
-    let Some((arrived, state)) = from_sz(&["-e"], &[("CTRL.BIN", data.clone())]) else { return };
+    let Some((arrived, state)) = from_sz(&["-e"], &[("CTRL.BIN", data.clone())]) else {
+        return;
+    };
     assert_eq!(state, State::Done);
     assert_eq!(names(&arrived), ["CTRL.BIN"]);
     assert_eq!(arrived[0].data, data);
@@ -125,7 +131,9 @@ fn sz_that_starts_with_a_zsinit_is_answered() {
 #[test]
 fn sz_with_sixteen_bit_checks() {
     let data = b"16 bit\r\n".repeat(2_000);
-    let Some((arrived, state)) = from_sz(&["-o"], &[("SHORT.TXT", data.clone())]) else { return };
+    let Some((arrived, state)) = from_sz(&["-o"], &[("SHORT.TXT", data.clone())]) else {
+        return;
+    };
     assert_eq!(state, State::Done);
     assert_eq!(arrived[0].data, data);
 }

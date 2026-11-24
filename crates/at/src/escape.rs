@@ -53,7 +53,10 @@ impl Default for EscapeDetector {
 
 impl EscapeDetector {
     pub fn new() -> Self {
-        Self { phase: Phase::NeedGuard, idle_ms: 0 }
+        Self {
+            phase: Phase::NeedGuard,
+            idle_ms: 0,
+        }
     }
 
     /// Guard time in milliseconds, from S12 in fiftieths of a second.

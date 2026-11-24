@@ -102,7 +102,12 @@ impl Board {
             let mut files: Vec<(String, Vec<u8>)> = entries
                 .filter_map(Result::ok)
                 .filter(|e| e.path().is_file())
-                .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).ok()?)))
+                .filter_map(|e| {
+                    Some((
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).ok()?,
+                    ))
+                })
                 .collect();
             files.sort();
             board.files = files;
@@ -227,7 +232,11 @@ impl Board {
             }
             32..=126 => {
                 self.typing.push(b as char);
-                let echo = if self.place == Place::Password { '*' } else { b as char };
+                let echo = if self.place == Place::Password {
+                    '*'
+                } else {
+                    b as char
+                };
                 self.say(&echo.to_string());
             }
             _ => {}
@@ -237,7 +246,11 @@ impl Board {
     fn line(&mut self, line: &str, now: f64) {
         match self.place {
             Place::Login => {
-                self.caller = if line.is_empty() { "guest".to_owned() } else { line.to_owned() };
+                self.caller = if line.is_empty() {
+                    "guest".to_owned()
+                } else {
+                    line.to_owned()
+                };
                 self.say("\x1b[0m\r\n\x1b[0;37mpassword: \x1b[1;37m");
                 self.place = Place::Password;
             }
@@ -357,7 +370,8 @@ impl Board {
             self.notice(&text);
             return;
         }
-        let colour = NICK_COLOURS[nick.bytes().map(usize::from).sum::<usize>() % NICK_COLOURS.len()];
+        let colour =
+            NICK_COLOURS[nick.bytes().map(usize::from).sum::<usize>() % NICK_COLOURS.len()];
         let me = nick == self.caller;
         self.say(&format!(
             "\x1b[0;90m<\x1b[{}{colour}m{nick}\x1b[0;90m>\x1b[0m {}{text}\x1b[0m\r\n",
@@ -380,7 +394,9 @@ fn parse_chat(text: &str) -> (Vec<Said>, Vec<(usize, Vec<Said>)>) {
         }
         if let Some(head) = line.strip_prefix("==") {
             let head = head.trim();
-            into = head.strip_prefix("after").and_then(|n| n.trim().parse().ok());
+            into = head
+                .strip_prefix("after")
+                .and_then(|n| n.trim().parse().ok());
             if let Some(n) = into
                 && !after.iter().any(|(k, _)| *k == n)
             {
@@ -389,9 +405,17 @@ fn parse_chat(text: &str) -> (Vec<Said>, Vec<(usize, Vec<Said>)>) {
             continue;
         }
         let mut parts = line.splitn(3, ' ');
-        let (Some(delay), Some(nick)) = (parts.next(), parts.next()) else { continue };
-        let Ok(after_s) = delay.parse::<f64>() else { continue };
-        let said = Said { after: after_s, nick: nick.to_owned(), text: parts.next().unwrap_or("").to_owned() };
+        let (Some(delay), Some(nick)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(after_s) = delay.parse::<f64>() else {
+            continue;
+        };
+        let said = Said {
+            after: after_s,
+            nick: nick.to_owned(),
+            text: parts.next().unwrap_or("").to_owned(),
+        };
         match into {
             None => join.push(said),
             Some(n) => {
@@ -433,10 +457,16 @@ mod tests {
         assert!(text(&mut b).contains("login: "));
         typed(&mut b, "rory", 0.0);
         let shown = text(&mut b);
-        assert!(shown.contains("rory") && shown.contains("password: "), "{shown:?}");
+        assert!(
+            shown.contains("rory") && shown.contains("password: "),
+            "{shown:?}"
+        );
         typed(&mut b, "hunter2", 0.0);
         let shown = text(&mut b);
-        assert!(shown.contains("*******"), "the password was echoed: {shown:?}");
+        assert!(
+            shown.contains("*******"),
+            "the password was echoed: {shown:?}"
+        );
         assert!(!shown.contains("hunter2"));
         assert!(shown.contains("Welcome back, rory") && shown.contains("V.34 33600"));
         assert!(shown.contains("Command: "));
@@ -458,7 +488,10 @@ mod tests {
         b.tick(12.5);
         assert!(text(&mut b).is_empty(), "the next line came early");
         b.tick(13.0);
-        assert!(text(&mut b).contains("morning rory"), "{{you}} not filled in");
+        assert!(
+            text(&mut b).contains("morning rory"),
+            "{{you}} not filled in"
+        );
         typed(&mut b, "hello all", 20.0);
         let shown = text(&mut b);
         assert!(shown.contains("rory") && shown.contains("hello all"));
@@ -495,21 +528,41 @@ mod tests {
         text(&mut b);
         b.hear(b"d", 1.0);
         let shown = text(&mut b);
-        assert!(shown.contains("bandplan.txt") && shown.contains("ZMODEM"), "{shown:?}");
-        assert_eq!(b.take_download().map(|(n, d)| (n, d.len())), Some(("bandplan.txt".to_owned(), 1000)));
+        assert!(
+            shown.contains("bandplan.txt") && shown.contains("ZMODEM"),
+            "{shown:?}"
+        );
+        assert_eq!(
+            b.take_download().map(|(n, d)| (n, d.len())),
+            Some(("bandplan.txt".to_owned(), 1000))
+        );
         assert_eq!(b.take_download(), None, "handed over twice");
         b.hear(b"g", 2.0);
-        assert_eq!(b.gone_at(), None, "a key in the middle of the transfer was taken as a command");
+        assert_eq!(
+            b.gone_at(),
+            None,
+            "a key in the middle of the transfer was taken as a command"
+        );
         b.download_finished(1000, 0.5, true);
         let shown = text(&mut b);
-        assert!(shown.contains("2000 cps") && shown.contains("Command: "), "{shown:?}");
+        assert!(
+            shown.contains("2000 cps") && shown.contains("Command: "),
+            "{shown:?}"
+        );
     }
 
     #[test]
     fn a_chat_file_reads_into_its_sections() {
         let (join, after) = parse_chat(CHAT);
         assert_eq!(join.len(), 2);
-        assert_eq!(join[1], Said { after: 2.0, nick: "vk4bob".into(), text: "morning {you}".into() });
+        assert_eq!(
+            join[1],
+            Said {
+                after: 2.0,
+                nick: "vk4bob".into(),
+                text: "morning {you}".into()
+            }
+        );
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].0, 1);
         assert_eq!(after[0].1[0].nick, "dxnut");

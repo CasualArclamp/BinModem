@@ -148,7 +148,9 @@ impl Header {
     /// and TPDON and DPON's meaning are "not necessary to recognize" (T.85
     /// Table 1, Note 1), and are not.
     pub fn read(bytes: &[u8; Self::LEN]) -> Result<(Self, bool), &'static str> {
-        let word = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        let word = |at: usize| {
+            u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
         let (dl, d, p) = (bytes[0], bytes[1], bytes[2]);
         if dl != 0 || d != 0 {
             return Err("more than the lowest resolution layer, which T.85 does not have");
@@ -240,7 +242,8 @@ pub fn artificial_image() -> Vec<Vec<bool>> {
                         return false;
                     }
                     if j < 1023 || (i >> 3) & 3 == 0 {
-                        let sum = (prsg & 1) + (prsg >> 2 & 1) + (prsg >> 11 & 1) + (prsg >> 15 & 1);
+                        let sum =
+                            (prsg & 1) + (prsg >> 2 & 1) + (prsg >> 11 & 1) + (prsg >> 15 & 1);
                         prsg = prsg << 1 | (sum & 1);
                         let pel = prsg & 3 == 0;
                         repeat[(i & 7) as usize] = pel;
@@ -341,7 +344,11 @@ impl Rows {
     fn context(&self, two_line: bool, x: usize, at: u8) -> usize {
         let i = LEFT + x;
         let (a2, a1, r) = (&self.above2, &self.above, &self.row);
-        let at = if at == 0 { a1[i + 2] } else { r[i - usize::from(at)] };
+        let at = if at == 0 {
+            a1[i + 2]
+        } else {
+            r[i - usize::from(at)]
+        };
         let pel = |row: &[u8], k: usize| usize::from(row[k]);
         let template = if two_line {
             pel(a1, i - 3) << 9
@@ -389,7 +396,11 @@ const FIGURE_12: [&str; 2] = [" BFFBBF", "BFBF?  "];
 /// not. The AT bit is the figure's "F" wherever the AT pixel has moved to:
 /// the context is a pattern of the template's bits, not a place on the page.
 fn slntp_context(two_line: bool) -> usize {
-    let (figure, x): (&[&str], usize) = if two_line { (&FIGURE_12, 4) } else { (&FIGURE_11, 2) };
+    let (figure, x): (&[&str], usize) = if two_line {
+        (&FIGURE_12, 4)
+    } else {
+        (&FIGURE_11, 2)
+    };
     let mut rows = Rows::new(figure[0].len());
     let paint = |row: &mut Vec<u8>, drawn: &str| {
         for (i, c) in drawn.bytes().enumerate() {
@@ -430,8 +441,8 @@ mod tests {
         // a differential layer while the text says it has none and the sample
         // has one SDE. T.85 Table 1 fixes D at 0, and 0 is what goes here.
         let printed: [u8; 20] = [
-            0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x06, 0xc0, 0x00, 0x00, 0x09, 0x48,
-            0x00, 0x00, 0x09, 0x48, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x06, 0xc0, 0x00, 0x00, 0x09, 0x48, 0x00, 0x00,
+            0x09, 0x48, 0x00, 0x00, 0x00, 0x00,
         ];
         let header = Header {
             width: 1728,
@@ -478,7 +489,11 @@ mod tests {
         bytes[19] |= DPON | DPPRIV;
         assert_eq!(Header::read(&bytes).map(|(_, table)| table), Ok(true));
         bytes[19] |= DPLAST;
-        assert_eq!(Header::read(&bytes).map(|(_, table)| table), Ok(false), "the last table again");
+        assert_eq!(
+            Header::read(&bytes).map(|(_, table)| table),
+            Ok(false),
+            "the last table again"
+        );
     }
 
     #[test]

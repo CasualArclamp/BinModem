@@ -74,11 +74,20 @@ impl Front {
         for ph in 0..FILTER_PHASES {
             let row = &mut table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
             for (i, tap) in row.iter_mut().enumerate() {
-                let tau = ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
+                let tau =
+                    ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
                 let x = 2.0 * cutoff * tau / band.fs;
-                let sinc = if x.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                let sinc = if x.abs() < 1e-12 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
                 let edge = (FILTER_TAPS / 2) as f64;
-                let taper = if tau.abs() >= edge { 0.0 } else { kaiser(tau / edge, 8.0) };
+                let taper = if tau.abs() >= edge {
+                    0.0
+                } else {
+                    kaiser(tau / edge, 8.0)
+                };
                 *tap = sinc * taper;
             }
             let sum: f64 = row.iter().sum();
@@ -127,7 +136,8 @@ impl Front {
         let at = self.due;
         self.due += self.half * (1.0 + self.drift);
         self.power += 0.002 * (value.norm_sqr() - self.power);
-        self.envelope = self.envelope_keep * self.envelope + (1.0 - self.envelope_keep) * value.abs();
+        self.envelope =
+            self.envelope_keep * self.envelope + (1.0 - self.envelope_keep) * value.abs();
         let index = self.made;
         self.made += 1;
         self.halves.push_back(value);
@@ -153,7 +163,9 @@ impl Front {
     /// on it when their samples come. For a grid that training has found the
     /// far clock's drift for.
     pub(super) fn regrid(&mut self, anchor: u64, step: f64) {
-        let Some(start) = anchor.checked_sub(self.first).map(|s| s as usize) else { return };
+        let Some(start) = anchor.checked_sub(self.first).map(|s| s as usize) else {
+            return;
+        };
         if start >= self.halves.len() {
             return;
         }
@@ -202,7 +214,9 @@ impl Front {
         }
         let offset = (from - self.history_first as i64) as usize;
         let row = &self.table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
-        Some(row.iter().enumerate().fold(Complex::ZERO, |sum, (i, tap)| sum + self.history[offset + i] * *tap))
+        Some(row.iter().enumerate().fold(Complex::ZERO, |sum, (i, tap)| {
+            sum + self.history[offset + i] * *tap
+        }))
     }
 
     /// The `reach` half-symbol samples either side of `centre`, and it

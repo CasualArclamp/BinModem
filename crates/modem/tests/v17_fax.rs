@@ -27,7 +27,11 @@ fn a_page(lines: usize) -> Page {
     let width = fax::page::WIDTH;
     Page {
         lines: (0..lines)
-            .map(|y| (0..width).map(|x| (x / 40 + y / 8).is_multiple_of(2) && x % 40 < 30).collect())
+            .map(|y| {
+                (0..width)
+                    .map(|x| (x / 40 + y / 8).is_multiple_of(2) && x % 40 < 30)
+                    .collect()
+            })
             .collect(),
         resolution: Resolution::Standard,
     }
@@ -65,10 +69,18 @@ struct Outcome {
 /// at `snr_db` of Es/N0 against a page carrier's power, which is 0.707 root
 /// mean square from every transmitter here.
 fn call(caller: &mut FaxCall, answerer: &mut FaxCall, snr_db: f64, seconds: f64) -> Outcome {
-    let sigma = if snr_db.is_finite() { ((FS / 2.0) / 2400.0 * 0.5 * 10f64.powf(-snr_db / 10.0)).sqrt() } else { 0.0 };
+    let sigma = if snr_db.is_finite() {
+        ((FS / 2.0) / 2400.0 * 0.5 * 10f64.powf(-snr_db / 10.0)).sqrt()
+    } else {
+        0.0
+    };
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let (mut to_caller, mut to_answerer) = (0.0, 0.0);
-    let mut outcome = Outcome { page: None, speeds: Vec::new(), shapes: Vec::new() };
+    let mut outcome = Outcome {
+        page: None,
+        speeds: Vec::new(),
+        shapes: Vec::new(),
+    };
     let mut was = Phase::Calling;
     for _ in 0..(seconds * FS) as usize {
         let a = caller.step(to_caller);
@@ -78,7 +90,9 @@ fn call(caller: &mut FaxCall, answerer: &mut FaxCall, snr_db: f64, seconds: f64)
         let phase = caller.phase();
         if phase != was && matches!(phase, Phase::Training | Phase::Sending) {
             let speed = caller.speed();
-            outcome.speeds.push((speed.modulation, speed.bits_per_second));
+            outcome
+                .speeds
+                .push((speed.modulation, speed.bits_per_second));
         }
         was = phase;
         let shape = answerer.shape();
@@ -104,15 +118,36 @@ fn two_ends_offering_v17_send_the_page_at_14400() {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()))
             .offering(&WITH_V17)
             .with_error_correction(ecm);
-        let mut answerer = FaxCall::answer(FS, "61388880000").offering(&WITH_V17).with_error_correction(ecm);
+        let mut answerer = FaxCall::answer(FS, "61388880000")
+            .offering(&WITH_V17)
+            .with_error_correction(ecm);
         let got = call(&mut caller, &mut answerer, f64::INFINITY, 60.0);
-        eprintln!("error correction {ecm}: speeds {:?}, the scope drew {:?}", got.speeds, got.shapes);
-        assert_eq!(caller.phase(), Phase::Done, "the caller ended at {} ({:?})", caller.phase().name(), caller.trouble());
-        assert_eq!(answerer.phase(), Phase::Done, "the answerer ended at {} ({:?})", answerer.phase().name(), answerer.trouble());
+        eprintln!(
+            "error correction {ecm}: speeds {:?}, the scope drew {:?}",
+            got.speeds, got.shapes
+        );
+        assert_eq!(
+            caller.phase(),
+            Phase::Done,
+            "the caller ended at {} ({:?})",
+            caller.phase().name(),
+            caller.trouble()
+        );
+        assert_eq!(
+            answerer.phase(),
+            Phase::Done,
+            "the answerer ended at {} ({:?})",
+            answerer.phase().name(),
+            answerer.trouble()
+        );
         let arrived = got.page.expect("no page arrived");
         assert_eq!(arrived.lines, page.lines, "the page came out different");
         // The training check and the page, both at the top rate, first time.
-        assert_eq!(got.speeds, vec![(Modulation::V17, 14_400); 2], "error correction {ecm}");
+        assert_eq!(
+            got.speeds,
+            vec![(Modulation::V17, 14_400); 2],
+            "error correction {ecm}"
+        );
         assert!(got.shapes.contains(&"128TCM"), "{:?}", got.shapes);
         assert_eq!(caller.error_correction(), ecm);
     }
@@ -161,7 +196,11 @@ fn a_page_crosses_at_v17_between_two_modems() {
             break;
         }
     }
-    assert_eq!(arrived.expect("no page arrived").lines, page.lines, "the page came out different");
+    assert_eq!(
+        arrived.expect("no page arrived").lines,
+        page.lines,
+        "the page came out different"
+    );
     assert_eq!(speed, Some((Modulation::V17, 14_400)));
 }
 
@@ -173,15 +212,34 @@ fn a_line_that_will_not_carry_14400_steps_down_to_12000_or_9600() {
     // and measured, V.29's is refused there and V.17's, trellis coded, is not.
     for (snr, want) in [(20.0, 12_000), (16.0, 9600)] {
         let page = a_page(40);
-        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone())).offering(&WITH_V17);
+        let mut caller =
+            FaxCall::originate(FS, "61399990000", Some(page.clone())).offering(&WITH_V17);
         let mut answerer = FaxCall::answer(FS, "61388880000").offering(&WITH_V17);
         let got = call(&mut caller, &mut answerer, snr, 120.0);
         eprintln!("{snr} dB: speeds {:?}", got.speeds);
-        let arrived = got.page.unwrap_or_else(|| panic!("{snr} dB: no page arrived ({:?})", caller.trouble()));
-        assert_eq!(arrived.lines, page.lines, "{snr} dB: the page came out different");
-        assert_eq!(got.speeds.first(), Some(&(Modulation::V17, 14_400)), "{snr} dB: V.17 14 400 was not tried first");
-        assert!(got.speeds.iter().all(|(_, rate)| *rate >= want), "{snr} dB: went below {want}: {:?}", got.speeds);
-        assert_eq!(caller.speed().bits_per_second, want, "{snr} dB: the page went at {:?}", caller.speed());
+        let arrived = got
+            .page
+            .unwrap_or_else(|| panic!("{snr} dB: no page arrived ({:?})", caller.trouble()));
+        assert_eq!(
+            arrived.lines, page.lines,
+            "{snr} dB: the page came out different"
+        );
+        assert_eq!(
+            got.speeds.first(),
+            Some(&(Modulation::V17, 14_400)),
+            "{snr} dB: V.17 14 400 was not tried first"
+        );
+        assert!(
+            got.speeds.iter().all(|(_, rate)| *rate >= want),
+            "{snr} dB: went below {want}: {:?}",
+            got.speeds
+        );
+        assert_eq!(
+            caller.speed().bits_per_second,
+            want,
+            "{snr} dB: the page went at {:?}",
+            caller.speed()
+        );
     }
 }
 

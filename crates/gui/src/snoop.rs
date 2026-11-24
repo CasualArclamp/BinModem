@@ -38,7 +38,12 @@ impl eframe::App for Snoop {
         egui::Panel::top("name").show(ui, |ui| {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("DIALSNOOP").monospace().strong().color(Color32::from_rgb(220, 225, 235)));
+                ui.label(
+                    RichText::new("DIALSNOOP")
+                        .monospace()
+                        .strong()
+                        .color(Color32::from_rgb(220, 225, 235)),
+                );
                 ui.label(
                     RichText::new(format!("a dial-up call, read off a recording   {BUILD}"))
                         .small()
@@ -72,7 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("dialsnoop {BUILD}");
                 return Ok(());
             }
-            other if other.starts_with('-') => return Err(format!("unknown argument {other}").into()),
+            other if other.starts_with('-') => {
+                return Err(format!("unknown argument {other}").into());
+            }
             other => recording = Some(PathBuf::from(other)),
         }
     }

@@ -22,8 +22,10 @@ use line::AudioSink;
 use modem::{Modem, Role, State};
 use telemetry::{CallState, Direction, Leds, Publisher};
 
-use crate::engine::{Control, FFT_SIZE, PCM_DEPTH, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth};
 use crate::dialin::{Login, Next as LoginNext, Settings as DialIn};
+use crate::engine::{
+    Control, FFT_SIZE, PCM_DEPTH, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth,
+};
 use crate::network::{Networking, Request as NetRequest, View as NetView};
 
 /// The rate the modem runs at, whatever the sound card is doing.
@@ -36,9 +38,14 @@ const FS: f64 = 16_000.0;
 /// What the window has asked the line to do.
 #[derive(Debug, Clone)]
 enum Request {
-    Open { input: String, output: String },
+    Open {
+        input: String,
+        output: String,
+    },
     /// Open a line made of packets instead: this account from the SIP file.
-    OpenSip { account: String },
+    OpenSip {
+        account: String,
+    },
     Close,
 }
 
@@ -58,7 +65,11 @@ enum Wire {
     /// The same two audio devices as they are, both channels at their own
     /// rate, for as long as a V.ARC call wants them that way. The names are
     /// kept to put the two-wire line back afterwards.
-    Wide { line: Box<line::Wide>, input: String, output: String },
+    Wide {
+        line: Box<line::Wide>,
+        input: String,
+        output: String,
+    },
 }
 
 impl Wire {
@@ -131,7 +142,10 @@ pub const LINE_OUT: &[&str] = &["CABLE-B Input", "CABLE Input"];
 /// A call's rates as one phrase: one number when both directions agree,
 /// which is every modulation but V.34, and both when they do not.
 pub fn line_rates(modem: &Modem) -> String {
-    let (receive, send) = (modem.rate().unwrap_or(0), modem.transmit_rate().unwrap_or(0));
+    let (receive, send) = (
+        modem.rate().unwrap_or(0),
+        modem.transmit_rate().unwrap_or(0),
+    );
     if receive == send {
         format!("{receive} bit/s")
     } else {
@@ -226,7 +240,11 @@ pub fn easy_sip_name(peer: &str, port: u16, coding: &str, upnp: bool) -> String 
 
 /// Whether an EasySip line's name asks for the router to be opened.
 pub fn easy_sip_upnp(name: &str) -> bool {
-    name.strip_prefix(EASY_SIP).is_some_and(|rest| rest.split('|').skip(2).any(|f| f.trim().eq_ignore_ascii_case("upnp")))
+    name.strip_prefix(EASY_SIP).is_some_and(|rest| {
+        rest.split('|')
+            .skip(2)
+            .any(|f| f.trim().eq_ignore_ascii_case("upnp"))
+    })
 }
 
 /// What an EasySip call can be carried in, as it is written in a line's
@@ -251,7 +269,11 @@ pub const EASY_CODINGS: [(&str, &str); 11] = [
 pub fn easy_sip_coding(name: &str) -> &'static str {
     let fields = name.strip_prefix(EASY_SIP).unwrap_or("").split('|').skip(2);
     fields
-        .filter_map(|asked| EASY_CODINGS.iter().find(|(token, _)| token.eq_ignore_ascii_case(asked.trim())))
+        .filter_map(|asked| {
+            EASY_CODINGS
+                .iter()
+                .find(|(token, _)| token.eq_ignore_ascii_case(asked.trim()))
+        })
         .map(|c| c.0)
         .next()
         .unwrap_or(EASY_CODINGS[0].0)
@@ -272,12 +294,19 @@ pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
 /// is expected to be BinModem and V.ARC wants them, with G.711 behind for
 /// anything else that answers.
 fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
-    let (peer, port) = easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
+    let (peer, port) =
+        easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
     let coding = easy_sip_coding(name);
     if peer.is_empty() {
-        return Err("EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060".to_owned());
+        return Err(
+            "EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060"
+                .to_owned(),
+        );
     }
-    let host = peer.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map_or(peer.as_str(), |(h, _)| h);
+    let host = peer
+        .rsplit_once(':')
+        .filter(|(_, p)| p.parse::<u16>().is_ok())
+        .map_or(peer.as_str(), |(h, _)| h);
     Ok(sip::Account {
         name: name.to_owned(),
         registrar: peer.clone(),
@@ -289,10 +318,17 @@ fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
         // The router is only in the way of a far end that is beyond it. One
         // on this network, or this machine, is reached as it is, and told
         // the router's outside address would send its sound to the router.
-        upnp: easy_sip_upnp(name) && host.parse::<std::net::IpAddr>().map_or(true, sip::upnp::is_public),
+        upnp: easy_sip_upnp(name)
+            && host
+                .parse::<std::net::IpAddr>()
+                .map_or(true, sip::upnp::is_public),
         // G.711 chosen is that law first and the other behind it, so that
         // two ends that chose differently still have a call.
-        laws: if coding == "PCMA" { vec![sip::Law::A, sip::Law::Mu] } else { vec![sip::Law::Mu, sip::Law::A] },
+        laws: if coding == "PCMA" {
+            vec![sip::Law::A, sip::Law::Mu]
+        } else {
+            vec![sip::Law::Mu, sip::Law::A]
+        },
         local_port: port,
         ..sip::Account::default()
     })
@@ -336,7 +372,9 @@ fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
         let where_it_goes = sip::Account::default_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the SIP account file".to_owned());
-        return Err(format!("there are no SIP accounts; fill in {where_it_goes}"));
+        return Err(format!(
+            "there are no SIP accounts; fill in {where_it_goes}"
+        ));
     }
     let account = accounts
         .into_iter()
@@ -464,12 +502,19 @@ struct LineNoise {
 impl LineNoise {
     /// From `BINMODEM_LINE_NOISE`, in dBFS RMS, if it is set and reads.
     fn from_env() -> Option<Self> {
-        let dbfs: f32 = std::env::var("BINMODEM_LINE_NOISE").ok()?.trim().parse().ok()?;
+        let dbfs: f32 = std::env::var("BINMODEM_LINE_NOISE")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
         Some(Self::at(dbfs))
     }
 
     fn at(dbfs: f32) -> Self {
-        Self { rms: 10f32.powf(dbfs / 20.0), state: 0x9E37_79B9_7F4A_7C15 }
+        Self {
+            rms: 10f32.powf(dbfs / 20.0),
+            state: 0x9E37_79B9_7F4A_7C15,
+        }
     }
 
     /// A uniform number in (0, 1].
@@ -556,7 +601,11 @@ pub struct LineState {
 enum Job {
     Sending(Box<transfer::zmodem::Sender>),
     /// The receiver, the folder files go into, and where the last one went.
-    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf, Option<String>),
+    Receiving(
+        Box<transfer::zmodem::Receiver>,
+        std::path::PathBuf,
+        Option<String>,
+    ),
 }
 
 /// What a file transfer is doing, for the window to show.
@@ -778,7 +827,10 @@ const DEFAULT_DRIVE: f32 = 0.1;
 impl Session {
     /// What this end calls itself in a fax call.
     pub fn fax_identification(&self) -> String {
-        self.fax_identification.lock().map(|v| v.clone()).unwrap_or_default()
+        self.fax_identification
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     pub fn set_fax_identification(&self, who: &str) {
@@ -844,12 +896,18 @@ impl Session {
 
     /// A page that arrived, with its number in the call, once and only once.
     pub fn take_fax_received(&self) -> Option<(usize, fax::page::Page)> {
-        self.fax_received.lock().ok().and_then(|mut v| v.pop_front())
+        self.fax_received
+            .lock()
+            .ok()
+            .and_then(|mut v| v.pop_front())
     }
 
     /// The T.30 frames since the window last asked, in order.
     pub fn take_fax_exchange(&self) -> Vec<fax::call::Exchanged> {
-        self.fax_exchange.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+        self.fax_exchange
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 
     /// Answer the SIP call ringing here, leaving the modem as it is.
@@ -867,7 +925,9 @@ impl Session {
     /// from it, and in place of it if they are a new page: a window that fell
     /// behind wants the page that is arriving, not the one before.
     fn push_fax_lines(&self, arriving: Arriving) {
-        let Ok(mut waiting) = self.fax_arriving.lock() else { return };
+        let Ok(mut waiting) = self.fax_arriving.lock() else {
+            return;
+        };
         match waiting.as_mut() {
             Some(w) if w.page == arriving.page && w.from + w.lines.len() == arriving.from => {
                 w.resolution = arriving.resolution;
@@ -903,14 +963,16 @@ impl Session {
     /// `Modem::set_pcm_upstream`). Until this is called the modem keeps
     /// whatever `BINMODEM_V92_PCM_UP` gave it.
     pub fn set_pcm_upstream(&self, on: bool) {
-        self.pcm_upstream.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+        self.pcm_upstream
+            .store(if on { 2 } else { 1 }, Ordering::Relaxed);
     }
 
     /// Whether V.92 calls from here on may use the short start-up on a
     /// connection that has been made before (see `Modem::set_quick_connect`).
     /// Until this is called the modem keeps what `BINMODEM_V92_QC` gave it.
     pub fn set_quick_connect(&self, on: bool) {
-        self.quick_connect.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+        self.quick_connect
+            .store(if on { 2 } else { 1 }, Ordering::Relaxed);
     }
 
     fn take_quick_connect(&self) -> Option<bool> {
@@ -993,7 +1055,8 @@ impl Session {
     /// too high and everything between here and there clips or turns its
     /// automatic gain control down on the whole call.
     pub fn set_drive(&self, drive: f32) {
-        self.drive.store(drive.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.drive
+            .store(drive.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn type_bytes(&self, bytes: &[u8]) {
@@ -1181,7 +1244,10 @@ impl Session {
     }
 
     fn take_typed(&self) -> Vec<u8> {
-        self.typed.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+        self.typed
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
     }
 
     fn set_state(&self, state: LineState) {
@@ -1222,7 +1288,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
     }
     tx.log(Direction::Note, "modem ready");
-    tx.log(Direction::Note, "type AT commands; ATD to dial, ATA to answer, +++ to escape");
+    tx.log(
+        Direction::Note,
+        "type AT commands; ATD to dial, ATA to answer, +++ to escape",
+    );
 
     // Opened and closed on request, and never handed across a thread: on
     // Windows a cpal stream is not Send and has to stay where it was made.
@@ -1230,7 +1299,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut modem = Modem::new(FS);
     // V.92 connections that have connected before, by the string dialled:
     // the next call to one opens with the short start-up (V.92 9.2, 9.4).
-    modem.remember_connections(crate::remembered::recognised_connections().map(modem::memos::Memos::open));
+    modem.remember_connections(
+        crate::remembered::recognised_connections().map(modem::memos::Memos::open),
+    );
     modem.set_pinned_rate(session.rate_pinned());
     modem.choose_upstream(session.up_pinned());
     // The rate menu, looked at a few times a second: working it out after a
@@ -1311,7 +1382,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // V.90 call, told a line at a time as it happens.
     let mut noted: Vec<(usize, f64, String)> = Vec::new();
     let mut was_recording = false;
-    let mut trace = std::env::var_os("BINMODEM_VARC_TRACE").and_then(|path| std::fs::File::create(path).ok());
+    let mut trace =
+        std::env::var_os("BINMODEM_VARC_TRACE").and_then(|path| std::fs::File::create(path).ok());
     let (trace_from, mut trace_at) = (Instant::now(), Instant::now());
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
@@ -1480,7 +1552,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 NetRequest::Stop => {
                     if login.take().is_some() {
-                        tx.log(Direction::Note, "login: stopped; the terminal is yours again");
+                        tx.log(
+                            Direction::Note,
+                            "login: stopped; the terminal is yours again",
+                        );
                     }
                     if let Some(mut link) = networking.take() {
                         for b in link.stop(&tx) {
@@ -1522,7 +1597,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let online = modem.is_online();
         if online && !was_online {
             let settings = session.dialin();
-            if settings.serve && modem.role() == Role::Answering && networking.is_none() && job.is_none() {
+            if settings.serve
+                && modem.role() == Role::Answering
+                && networking.is_none()
+                && job.is_none()
+            {
                 login = Some(Login::serve(&settings, &tx));
             }
         }
@@ -1547,7 +1626,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 Some(LoginNext::Ppp { user, early }) => {
                     let serving = running.serving();
                     login = None;
-                    let mut link = start_link(&modem, &session, early, serving.then_some(user), &tx);
+                    let mut link =
+                        start_link(&modem, &session, early, serving.then_some(user), &tx);
                     link.hang_up_after = serving;
                     networking = Some(link);
                 }
@@ -1558,7 +1638,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 Some(LoginNext::GiveBack(why)) => {
                     login = None;
-                    tx.log(Direction::Note, format!("login: {why}; the terminal is yours again"));
+                    tx.log(
+                        Direction::Note,
+                        format!("login: {why}; the terminal is yours again"),
+                    );
                 }
             }
         }
@@ -1598,9 +1681,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         // What the file goes out at is this end's sending
                         // rate, which on V.34 need not be the one arriving.
                         let rate = modem.transmit_rate().unwrap_or(2400);
-                        job = Some(Job::Sending(Box::new(
-                            transfer::zmodem::Sender::new(info, data, rate),
-                        )));
+                        job = Some(Job::Sending(Box::new(transfer::zmodem::Sender::new(
+                            info, data, rate,
+                        ))));
                         job_started = Instant::now();
                         meter = crate::speed::Speedometer::new();
                     }
@@ -1645,8 +1728,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             done.0.remaining = done.0.total.and_then(|total| meter.remaining(total));
             // The share of the line a file gets is a share of the direction
             // it is moving in.
-            done.0.line_bps =
-                if done.0.sending { modem.transmit_rate() } else { modem.rate() };
+            done.0.line_bps = if done.0.sending {
+                modem.transmit_rate()
+            } else {
+                modem.rate()
+            };
             session.set_transfer(Some(done.0));
             if done.1 {
                 // The last of it stays on the window: what it came to, and how
@@ -1767,10 +1853,20 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 *p = pinned;
             }
             let said = match pinned {
-                Some(drn) => format!("V.92 start-ups will ask for {} bit/s going up", datapump::v92::up_rate(drn)),
+                Some(drn) => format!(
+                    "V.92 start-ups will ask for {} bit/s going up",
+                    datapump::v92::up_rate(drn)
+                ),
                 None => "V.92 start-ups will leave the upstream rate to the server".to_owned(),
             };
-            tx.log(Direction::Note, if retraining { format!("{said}; retraining to take it") } else { said });
+            tx.log(
+                Direction::Note,
+                if retraining {
+                    format!("{said}; retraining to take it")
+                } else {
+                    said
+                },
+            );
         }
         if menu_looked.elapsed() >= Duration::from_millis(250) {
             menu_looked = Instant::now();
@@ -1795,7 +1891,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 // Once every few seconds, not once a keystroke.
                 if refused_typing.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
                     refused_typing = Some(Instant::now());
-                    tx.log(Direction::Note, "not typed: the call is carrying PPP or a login, not the terminal");
+                    tx.log(
+                        Direction::Note,
+                        "not typed: the call is carrying PPP or a login, not the terminal",
+                    );
                 }
             } else {
                 typed_recently = Instant::now();
@@ -1817,7 +1916,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // samples are; see below.
         match (audio.as_ref(), modem.varc_wanted()) {
             (Some(Wire::Audio(two_wire)), Some(mode)) => {
-                let (input, output) = (two_wire.input_device.clone(), two_wire.output_device.clone());
+                let (input, output) = (
+                    two_wire.input_device.clone(),
+                    two_wire.output_device.clone(),
+                );
                 // The old streams have to stop before new ones open on the
                 // same devices.
                 drop(audio.take());
@@ -1834,7 +1936,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                                 wide.output_rate
                             ),
                         );
-                        audio = Some(Wire::Wide { line: Box::new(wide), input, output });
+                        audio = Some(Wire::Wide {
+                            line: Box::new(wide),
+                            input,
+                            output,
+                        });
                         // A new call: whatever the last one was refused for
                         // has been read by now.
                         let mut state = session.state();
@@ -1843,13 +1949,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         }
                     }
                     Err(e) => {
-                        let why = format!("{}: could not open the sound card for it: {e}", mode.name());
+                        let why =
+                            format!("{}: could not open the sound card for it: {e}", mode.name());
                         tx.log(Direction::Note, why.clone());
                         // Where it is seen: the transcript is a tab nobody
                         // has open when a call will not start.
                         refused = Some(why);
                         modem.carrier_lost();
-                        audio = line::Duplex::open(Some(&input), Some(&output), FS).ok().map(|l| Wire::Audio(Box::new(l)));
+                        audio = line::Duplex::open(Some(&input), Some(&output), FS)
+                            .ok()
+                            .map(|l| Wire::Audio(Box::new(l)));
                     }
                 }
             }
@@ -1875,14 +1984,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         let Some(audio) = audio.as_ref() else {
             drain_dte(
-            &mut modem,
-            &tx,
-            &mut rx_bytes,
-            &mut heard_recently,
-            job.as_mut(),
-            networking.as_mut(),
-            login.as_mut(),
-        );
+                &mut modem,
+                &tx,
+                &mut rx_bytes,
+                &mut heard_recently,
+                job.as_mut(),
+                networking.as_mut(),
+                login.as_mut(),
+            );
             thread::sleep(Duration::from_millis(8));
             continue;
         };
@@ -2007,7 +2116,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             for frame in wide_heard.as_chunks::<2>().0 {
                 let mut out = [0.0f64; 2];
                 if apart {
-                    modem.varc_hear(rate, f64::from(wide.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+                    modem.varc_hear(
+                        rate,
+                        f64::from(wide.output_rate),
+                        &[f64::from(frame[0]), f64::from(frame[1])],
+                    );
                     out[0] = f64::from(wide_last);
                 } else {
                     modem.varc_step(rate, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
@@ -2031,7 +2144,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     wide_send.push(out[0] as f32);
                     wide_send.push(out[1] as f32);
                 }
-                wide_last = wide_send.as_chunks::<2>().0.last().map_or(wide_last, |f| f[0]);
+                wide_last = wide_send
+                    .as_chunks::<2>()
+                    .0
+                    .last()
+                    .map_or(wide_last, |f| f[0]);
             }
             wide.transmit(&wide_send);
             for text in modem.take_line_notes() {
@@ -2064,14 +2181,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // displays stops moving is indistinguishable from a display that
             // is right.
             drain_dte(
-            &mut modem,
-            &tx,
-            &mut rx_bytes,
-            &mut heard_recently,
-            job.as_mut(),
-            networking.as_mut(),
-            login.as_mut(),
-        );
+                &mut modem,
+                &tx,
+                &mut rx_bytes,
+                &mut heard_recently,
+                job.as_mut(),
+                networking.as_mut(),
+                login.as_mut(),
+            );
             // And the modem's own state, on a line made of packets. The
             // frame the window draws its lamps, its call card and its
             // timeline from is published past this point, where the samples
@@ -2080,7 +2197,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // minutes after the modem had said NO CARRIER and gone back to
             // its command state. With no audio there is nothing on the line
             // either, and the scopes are told that as well.
-            if audio.sip().is_some() && last_audio.elapsed() >= QUIET_LINE_AFTER && Instant::now() >= next_publish {
+            if audio.sip().is_some()
+                && last_audio.elapsed() >= QUIET_LINE_AFTER
+                && Instant::now() >= next_publish
+            {
                 next_publish = Instant::now() + QUIET_LINE_PUBLISH;
                 tx.publish(|f| {
                     f.state = call_state(modem.state(), modem.off_hook());
@@ -2193,7 +2313,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let drive = session.drive();
         // The PCM scope is every sample against the next, and a dense grid
         // of levels wants the full depth whatever the count of them.
-        let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
+        let depth = if modem.shape() == "PCM" {
+            PCM_DEPTH
+        } else {
+            scope_depth(modem.states())
+        };
         for (n, &s) in from_line.iter().enumerate() {
             let heard = f64::from(s);
             // A V.90 server's samples are codewords, and the far encoder
@@ -2258,7 +2382,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 symbols.clear();
                 points.clear();
             }
-            let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
+            let depth = if modem.shape() == "PCM" {
+                PCM_DEPTH
+            } else {
+                scope_depth(modem.states())
+            };
             for (i, q) in gathered {
                 while points.len() >= depth {
                     points.pop_front();
@@ -2305,7 +2433,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         let recording_now = session.recording();
         // Where this block starts in the recording, if it is going into one.
-        let block_at = if was_recording { recording.len() / 2 } else { 0 };
+        let block_at = if was_recording {
+            recording.len() / 2
+        } else {
+            0
+        };
         if recording_now {
             if !was_recording {
                 recording.clear();
@@ -2340,9 +2472,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             if recording_now {
                 let at = (block_at + n) as f64 / FS;
                 frames.push(format!("{at:9.3}  --  {line}"));
-                tx.log(Direction::Note, format!("{line} ({at:.3} s into the recording)"));
+                tx.log(
+                    Direction::Note,
+                    format!("{line} ({at:.3} s into the recording)"),
+                );
             } else {
-                tx.log(Direction::Note, format!("{line} ({into_call:.3} s into the call)"));
+                tx.log(
+                    Direction::Note,
+                    format!("{line} ({into_call:.3} s into the call)"),
+                );
             }
         }
 
@@ -2353,9 +2491,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // Averaged slowly, and only over blocks that carry something: a mean
         // that includes the gaps is a mean of how much of the time the modem
         // was talking, which is not the question.
-        let mean = |b: &[f32]| {
-            (b.iter().map(|s| s * s).sum::<f32>() / b.len().max(1) as f32).sqrt()
-        };
+        let mean =
+            |b: &[f32]| (b.iter().map(|s| s * s).sum::<f32>() / b.len().max(1) as f32).sqrt();
         let (tx_now, rx_now) = (mean(&to_line), mean(&from_line));
         if let Some((tx, rx)) = both_carrying(tx_now, rx_now) {
             tx_rms = tx_rms * 0.95 + tx * 0.05;
@@ -2382,8 +2519,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // procedure.
         let retraining = modem.retraining();
         if retraining != was_retraining {
-            let rates =
-                (modem.rate().unwrap_or(0), modem.transmit_rate().unwrap_or(0));
+            let rates = (
+                modem.rate().unwrap_or(0),
+                modem.transmit_rate().unwrap_or(0),
+            );
             if retraining {
                 rates_before = rates;
                 tx.log(
@@ -2443,7 +2582,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     ec::stack::UNDECODABLE_RESETS
                 )
             };
-            tx.log(Direction::Note, format!("{name}: what arrived would not decode, {action}"));
+            tx.log(
+                Direction::Note,
+                format!("{name}: what arrived would not decode, {action}"),
+            );
         }
 
         let state = modem.state();
@@ -2503,7 +2645,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
             let level = {
                 let n = waveform.data.len().max(1);
-                (waveform.data.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>()
+                (waveform
+                    .data
+                    .iter()
+                    .map(|v| f64::from(*v) * f64::from(*v))
+                    .sum::<f64>()
                     / n as f64)
                     .sqrt()
             };
@@ -2519,7 +2665,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 f.hz_per_bin = wide_rate.unwrap_or(FS) / FFT_SIZE as f64;
                 // A V.ARC call on a SIP line fills the call's whole 8 kHz.
-                let narrow = if modem.varc_wanted().is_some() { FS / 2.0 } else { crate::scopes::DISPLAY_HZ };
+                let narrow = if modem.varc_wanted().is_some() {
+                    FS / 2.0
+                } else {
+                    crate::scopes::DISPLAY_HZ
+                };
                 f.display_hz = wide_rate.map_or(narrow, |rate| rate / 2.0);
                 f.rx_level_db = (20.0 * (level + 1e-9).log10()) as f32;
                 f.carrier = modem.carrier();
@@ -2534,16 +2684,20 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
                 f.reception = modem.reception();
-                f.pcm = modem.pcm_levels().map(|(levels, sending, (slowest, fastest))| telemetry::PcmLevels {
-                    count: levels.count,
-                    lowest: levels.lowest,
-                    highest: levels.highest,
-                    dbm0: levels.dbm0,
-                    training_dbm0: levels.training_dbm0,
-                    sending,
-                    slowest,
-                    fastest,
-                });
+                f.pcm = modem
+                    .pcm_levels()
+                    .map(
+                        |(levels, sending, (slowest, fastest))| telemetry::PcmLevels {
+                            count: levels.count,
+                            lowest: levels.lowest,
+                            highest: levels.highest,
+                            dbm0: levels.dbm0,
+                            training_dbm0: levels.training_dbm0,
+                            sending,
+                            slowest,
+                            fastest,
+                        },
+                    );
                 f.fax_class = modem.is_fax_class();
                 if let Some(call) = modem.fax_call() {
                     f.fax_phase = Some(call.phase_name());
@@ -2578,20 +2732,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     )
                 }));
                 f.echo.clear();
-                f.echo.extend(modem.varc_echo_response().iter().map(|t| *t as f32));
+                f.echo
+                    .extend(modem.varc_echo_response().iter().map(|t| *t as f32));
                 // Below nought for a canceller that has found nothing yet.
                 f.echo_delay_ms = match modem.varc_echo().first() {
                     None => 0.0,
                     Some((_, None)) => -1.0,
-                    Some((_, Some(delay))) => wide_rate.map_or(0.0, |rate| 1000.0 * *delay as f64 / rate) as f32,
+                    Some((_, Some(delay))) => {
+                        wide_rate.map_or(0.0, |rate| 1000.0 * *delay as f64 / rate) as f32
+                    }
                 };
-                f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
-                    level_db: report.level_db as f32,
-                    peak_db: report.peak_db as f32,
-                    clipped: report.clipped,
-                    snr_db: report.snr_db as f32,
-                    trim_db: trim as f32,
-                });
+                f.far_end = modem
+                    .varc_far_end()
+                    .map(|(report, trim)| telemetry::FarEnd {
+                        level_db: report.level_db as f32,
+                        peak_db: report.peak_db as f32,
+                        clipped: report.clipped,
+                        snr_db: report.snr_db as f32,
+                        trim_db: trim as f32,
+                    });
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();
@@ -2637,13 +2796,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 state.tx_peak = tx_peak;
                 state.tx_rms = tx_rms;
                 state.rx_rms = rx_rms;
-                state.recording = recording_now
-                    .then(|| recording.len() as f64 / 2.0 / FS);
+                state.recording = recording_now.then(|| recording.len() as f64 / 2.0 / FS);
                 let errors = modem.framing_errors();
                 let since = errors_at.elapsed().as_secs_f64();
                 if since >= 1.0 {
-                    state.framing_errors_per_second =
-                        (errors - errors_before) as f64 / since;
+                    state.framing_errors_per_second = (errors - errors_before) as f64 / since;
                     errors_before = errors;
                     errors_at = Instant::now();
                 }
@@ -2692,23 +2849,28 @@ fn frame_line(at: f64, f: &ec::stack::Crossed) -> String {
         (false, true) => "rx",
         (false, false) => "!!",
     };
-    let hex: String =
-        f.body.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let hex: String = f
+        .body
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let text: String = f
         .body
         .iter()
-        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect();
     format!("{at:9.3}  {way}  {:3}  {hex}  |{text}|", f.body.len())
 }
 
 /// Write a recording out and say so, wherever the decision to keep it was made.
-fn keep(
-    recording: &[f32],
-    frames: &[String],
-    tx: &Publisher,
-    session: &Arc<Session>,
-) {
+fn keep(recording: &[f32], frames: &[String], tx: &Publisher, session: &Arc<Session>) {
     if recording.is_empty() {
         return;
     }
@@ -2720,18 +2882,22 @@ fn keep(
                 let beside = format!("{path}.frames.txt");
                 let head = "        s  way  len  frame
 ";
-                let body: String = frames.join("
-");
-                match std::fs::write(&beside, format!("{head}{body}
-")) {
+                let body: String = frames.join(
+                    "
+",
+                );
+                match std::fs::write(
+                    &beside,
+                    format!(
+                        "{head}{body}
+"
+                    ),
+                ) {
                     Ok(()) => tx.log(
                         Direction::Note,
                         format!("{} frames as {beside}", frames.len()),
                     ),
-                    Err(e) => tx.log(
-                        Direction::Note,
-                        format!("could not write the frames: {e}"),
-                    ),
+                    Err(e) => tx.log(Direction::Note, format!("could not write the frames: {e}")),
                 }
             }
             if let Ok(mut state) = session.state.lock() {
@@ -2784,7 +2950,15 @@ fn read_to_send(path: &std::path::Path) -> Result<(transfer::zmodem::FileInfo, V
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
     let length = Some(data.len() as u64);
-    Ok((transfer::zmodem::FileInfo { name, length, modified, mode: 0 }, data))
+    Ok((
+        transfer::zmodem::FileInfo {
+            name,
+            length,
+            modified,
+            mode: 0,
+        },
+        data,
+    ))
 }
 
 /// One round of a transfer: what it wants to say, and where it has got to.
@@ -2837,7 +3011,11 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                         (Some(std::path::Component::Normal(_)), None)
                     )
                 };
-                let name = if one_part { name } else { "received".to_owned() };
+                let name = if one_part {
+                    name
+                } else {
+                    "received".to_owned()
+                };
                 let path = into.join(name);
                 let _ = std::fs::create_dir_all(&*into);
                 match std::fs::write(&path, &got.data) {
@@ -2884,8 +3062,8 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
 
 /// What to show for a state, in words rather than in its own terms.
 fn describe(state: transfer::zmodem::State) -> String {
-    use transfer::zmodem::send::Failure;
     use transfer::zmodem::State;
+    use transfer::zmodem::send::Failure;
     match state {
         State::Greeting => "starting".to_owned(),
         State::Offering => "offering the file".to_owned(),
@@ -2980,7 +3158,6 @@ fn start_link(
     link
 }
 
-
 #[cfg(test)]
 mod reconciliation_tests {
     use super::{Between, DIAL_GIVES_UP, Reconcile, reconcile};
@@ -3007,7 +3184,12 @@ mod reconciliation_tests {
             // ATD: the modem goes off hook at once, and for a turn or two the
             // agent has not caught up. Nothing is wrong yet.
             (false, true, Some(Duration::ZERO), Reconcile::Nothing),
-            (false, true, Some(Duration::from_millis(20)), Reconcile::Nothing),
+            (
+                false,
+                true,
+                Some(Duration::from_millis(20)),
+                Reconcile::Nothing,
+            ),
             // The agent reports the call, and the far end answers it.
             (true, true, None, Reconcile::Nothing),
             (true, true, None, Reconcile::Nothing),
@@ -3074,7 +3256,11 @@ mod reconciliation_tests {
             told_to_hang_up: false,
             dialled_ago: Some(Duration::from_secs(1)),
         };
-        assert_eq!(reconcile(just_now), Reconcile::Nothing, "too soon to give up");
+        assert_eq!(
+            reconcile(just_now),
+            Reconcile::Nothing,
+            "too soon to give up"
+        );
 
         let waited = Between {
             dialled_ago: Some(DIAL_GIVES_UP),

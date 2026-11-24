@@ -158,12 +158,16 @@ fn a_web_server(body: Vec<u8>) -> (String, thread::JoinHandle<Option<String>>) {
 /// Ask the proxy for a tunnel (RFC 9112 3.2.3) and read its answer's head.
 fn tunnel(socket: &mut TcpStream, target: &str) -> Result<String, String> {
     let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-    socket.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    socket
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
     // One octet at a time, so nothing after the head is taken with it.
     let mut head = Vec::new();
     let mut octet = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        socket.read_exact(&mut octet).map_err(|e| format!("{e} after {:?}", String::from_utf8_lossy(&head)))?;
+        socket
+            .read_exact(&mut octet)
+            .map_err(|e| format!("{e} after {:?}", String::from_utf8_lossy(&head)))?;
         head.push(octet[0]);
     }
     Ok(String::from_utf8_lossy(&head).into_owned())
@@ -217,9 +221,16 @@ fn a_page_comes_back_through_the_proxy() {
         println!("  server: {line}");
     }
 
-    let page = waiter.join().expect("the waiting thread panicked").expect("no page");
+    let page = waiter
+        .join()
+        .expect("the waiting thread panicked")
+        .expect("no page");
     let text = String::from_utf8_lossy(&page);
-    assert!(text.starts_with("HTTP/1.0 200 OK"), "not a page: {:?}", &text[..60.min(text.len())]);
+    assert!(
+        text.starts_with("HTTP/1.0 200 OK"),
+        "not a page: {:?}",
+        &text[..60.min(text.len())]
+    );
     let split = text.find("\r\n\r\n").expect("no end of headers");
     assert_eq!(
         page[split + 4..],
@@ -229,7 +240,10 @@ fn a_page_comes_back_through_the_proxy() {
 
     let request = web_thread.join().expect("the web thread panicked");
     let request = request.expect("the web server saw nothing");
-    assert!(request.starts_with("GET /page HTTP/1.0"), "asked for {request:?}");
+    assert!(
+        request.starts_with("GET /page HTTP/1.0"),
+        "asked for {request:?}"
+    );
 }
 
 /// The same, over a link that loses one segment in eleven -- which is what the
@@ -254,7 +268,10 @@ fn a_page_comes_back_over_a_line_that_loses_things() {
     let started = Instant::now();
     let done = finished.clone();
     link.run_until(180, || done.load(std::sync::atomic::Ordering::SeqCst));
-    let page = waiter.join().expect("the waiting thread panicked").expect("no page");
+    let page = waiter
+        .join()
+        .expect("the waiting thread panicked")
+        .expect("no page");
     let split = page
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -302,11 +319,18 @@ fn a_destination_that_is_not_there_is_refused() {
     let reply = waiter.join().expect("the waiting thread panicked");
     // RFC 9110 15.6.3: a gateway that could not reach the server it was sent
     // to says 502.
-    assert!(reply.starts_with("HTTP/1.1 502"), "it was not told: {reply:?}");
+    assert!(
+        reply.starts_with("HTTP/1.1 502"),
+        "it was not told: {reply:?}"
+    );
 }
 
 /// A browser that asks and then takes its time reading the answer.
-fn a_slow_browser(proxy: String, target: String, wait: Duration) -> thread::JoinHandle<Result<Vec<u8>, String>> {
+fn a_slow_browser(
+    proxy: String,
+    target: String,
+    wait: Duration,
+) -> thread::JoinHandle<Result<Vec<u8>, String>> {
     thread::spawn(move || {
         let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
         socket
@@ -354,10 +378,16 @@ fn a_page_still_arrives_when_the_browser_is_slow_to_read_it() {
     let done = finished.clone();
     link.run_until(600, || done.load(std::sync::atomic::Ordering::SeqCst));
 
-    let page = waiter.join().expect("the waiting thread panicked").expect("no page");
+    let page = waiter
+        .join()
+        .expect("the waiting thread panicked")
+        .expect("no page");
     let text = String::from_utf8_lossy(&page[..60.min(page.len())]);
     assert!(text.starts_with("HTTP/1.0 200 OK"), "not a page: {text:?}");
-    let split = page.windows(4).position(|w| w == b"\r\n\r\n").expect("no end of headers");
+    let split = page
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("no end of headers");
     assert_eq!(
         page[split + 4..].len(),
         body.len(),
@@ -424,7 +454,10 @@ fn a_patient_web_server(
 
 /// The browser's side of an http page: no handshake at all, just the request
 /// with the whole target in it (RFC 9112 3.2.2).
-fn an_http_browser(proxy: String, asks: Vec<String>) -> thread::JoinHandle<Result<Vec<String>, String>> {
+fn an_http_browser(
+    proxy: String,
+    asks: Vec<String>,
+) -> thread::JoinHandle<Result<Vec<String>, String>> {
     thread::spawn(move || {
         let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
         socket
@@ -468,11 +501,7 @@ fn an_http_browser(proxy: String, asks: Vec<String>) -> thread::JoinHandle<Resul
 }
 
 /// Run a browser thread against the link until it is done.
-fn alongside<T: Send + 'static>(
-    link: &mut Link,
-    seconds: u32,
-    work: thread::JoinHandle<T>,
-) -> T {
+fn alongside<T: Send + 'static>(link: &mut Link, seconds: u32, work: thread::JoinHandle<T>) -> T {
     let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watching = finished.clone();
     let waiter = thread::spawn(move || {
@@ -501,7 +530,11 @@ fn a_page_comes_back_through_the_http_proxy() {
 
     let got = alongside(&mut link, 120, browser).expect("no page");
     assert_eq!(got.len(), 1);
-    assert!(got[0].starts_with("HTTP/1.1 200 OK"), "not a page: {}", got[0]);
+    assert!(
+        got[0].starts_with("HTTP/1.1 200 OK"),
+        "not a page: {}",
+        got[0]
+    );
     assert!(got[0].ends_with("this is the page"), "{}", got[0]);
 
     drop(link);
@@ -509,9 +542,15 @@ fn a_page_comes_back_through_the_http_proxy() {
     assert_eq!(seen.len(), 1, "the web server saw {seen:?}");
     // 3.2.2 in, 3.2.1 out: the origin server is sent a path, and a Host taken
     // from the request-target rather than the one the browser wrote.
-    assert!(seen[0].starts_with("GET /page HTTP/1.1\r\n"), "asked for {:?}", seen[0]);
     assert!(
-        seen[0].to_ascii_lowercase().contains(&format!("host: {target}\r\n").to_ascii_lowercase()),
+        seen[0].starts_with("GET /page HTTP/1.1\r\n"),
+        "asked for {:?}",
+        seen[0]
+    );
+    assert!(
+        seen[0]
+            .to_ascii_lowercase()
+            .contains(&format!("host: {target}\r\n").to_ascii_lowercase()),
         "the wrong Host reached the origin: {:?}",
         seen[0]
     );
@@ -538,7 +577,10 @@ fn a_second_page_from_the_same_host_opens_no_second_socket() {
 
     let got = alongside(&mut link, 120, browser).expect("no pages");
     assert_eq!(got.len(), 2, "{got:?}");
-    assert!(got.iter().all(|g| g.starts_with("HTTP/1.1 200 OK")), "{got:?}");
+    assert!(
+        got.iter().all(|g| g.starts_with("HTTP/1.1 200 OK")),
+        "{got:?}"
+    );
 
     drop(link);
     let seen = web_thread.join().expect("the web thread panicked");
@@ -580,7 +622,9 @@ fn one_browser_connection_can_visit_two_different_hosts() {
     let seen = first_thread.join().expect("the first web thread panicked");
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert!(seen[0].starts_with("GET /a HTTP/1.1"), "{:?}", seen[0]);
-    let seen = second_thread.join().expect("the second web thread panicked");
+    let seen = second_thread
+        .join()
+        .expect("the second web thread panicked");
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert!(seen[0].starts_with("GET /b HTTP/1.1"), "{:?}", seen[0]);
 }
@@ -596,7 +640,10 @@ fn an_http_page_comes_back_over_a_line_that_loses_things() {
 
     let got = alongside(&mut link, 240, browser).expect("no page");
     assert!(got[0].ends_with("this is the page"), "{}", got[0]);
-    assert!(link.crossed > 0, "nothing crossed, so nothing was lost either");
+    assert!(
+        link.crossed > 0,
+        "nothing crossed, so nothing was lost either"
+    );
     drop(link);
     let seen = web_thread.join().expect("the web thread panicked");
     assert_eq!(seen.len(), 1, "{seen:?}");
@@ -624,13 +671,20 @@ fn the_answering_machine_itself_is_off_limits() {
     });
     let reply = alongside(&mut link, 60, browser).expect("no answer to the tunnel");
     // RFC 9110 15.5.4: understood, and refused.
-    assert!(reply.starts_with("HTTP/1.1 403"), "a tunnel to this machine was not refused: {reply:?}");
+    assert!(
+        reply.starts_with("HTTP/1.1 403"),
+        "a tunnel to this machine was not refused: {reply:?}"
+    );
 
     let proxy = link.client.bound().to_string();
     let by_name = local.replace("127.0.0.1", "localhost");
     let browser = an_http_browser(proxy, vec![format!("http://{by_name}/secret")]);
     let got = alongside(&mut link, 60, browser).expect("no answer to the request");
-    assert!(got[0].starts_with("HTTP/1.1 403"), "a request to this machine was not refused: {}", got[0]);
+    assert!(
+        got[0].starts_with("HTTP/1.1 403"),
+        "a request to this machine was not refused: {}",
+        got[0]
+    );
 
     listener.set_nonblocking(true).expect("nonblocking");
     assert!(

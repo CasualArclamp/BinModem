@@ -188,7 +188,9 @@ impl Constellation {
     /// The scale of those words is not this module's business: G normalises
     /// the power, so the chain works in whatever units the design chose.
     pub fn new(points: &[u16]) -> Self {
-        Self { positives: points.iter().map(|&p| f64::from(p)).collect() }
+        Self {
+            positives: points.iter().map(|&p| f64::from(p)).collect(),
+        }
     }
 
     /// LC, "the number of positive points in the constellation set" (Table 30).
@@ -224,7 +226,11 @@ impl Constellation {
 
     /// a(eta) for an index already known to be in range.
     fn at(&self, eta: i32) -> f64 {
-        if eta >= 0 { self.positives[eta as usize] } else { -self.positives[(-eta - 1) as usize] }
+        if eta >= 0 {
+            self.positives[eta as usize]
+        } else {
+            -self.positives[(-eta - 1) as usize]
+        }
     }
 
     /// The index whose level is nearest `target`, ignoring equivalence classes.
@@ -271,7 +277,9 @@ impl Constellation {
         // The class member nearest in *index* to the level-nearest index is
         // the one nearest in level as well, because the levels rise with the
         // index; its two neighbours cover the clamping at either end.
-        let middle = class.step_at_or_below(self.nearest(target)).clamp(first, last);
+        let middle = class
+            .step_at_or_below(self.nearest(target))
+            .clamp(first, last);
         let mut best: Option<(f64, i32)> = None;
         for step in [middle - 1, middle, middle + 1] {
             if step < first || step > last {
@@ -323,11 +331,20 @@ impl Class {
         let ki = i64::from(ki);
         let modulus = i64::from(modulus.max(1));
         if k == TRELLIS_FRAME - 1 {
-            Self { base: 2 * ki + i64::from(parity), step: 2 * modulus }
+            Self {
+                base: 2 * ki + i64::from(parity),
+                step: 2 * modulus,
+            }
         } else if opens_a_pair(k) {
-            Self { base: ki + pair_first_index_offset(), step: modulus }
+            Self {
+                base: ki + pair_first_index_offset(),
+                step: modulus,
+            }
         } else {
-            Self { base: ki, step: modulus }
+            Self {
+                base: ki,
+                step: modulus,
+            }
         }
     }
 
@@ -386,7 +403,8 @@ pub fn index_to_ki(eta: i32, modulus: u8, k: usize) -> u8 {
     } else if opens_a_pair(k) {
         // The pair's first index is measured from Ki + the offset the far end
         // uses; see `PAIR_FIRST_INDEX_OFFSET`.
-        (i32::try_from(i64::from(eta) - pair_first_index_offset()).unwrap_or(eta)
+        (i32::try_from(i64::from(eta) - pair_first_index_offset())
+            .unwrap_or(eta)
             .rem_euclid(modulus)) as u8
     } else {
         eta.rem_euclid(modulus) as u8
@@ -446,14 +464,20 @@ struct Delay {
 
 impl Delay {
     fn new(taps: usize) -> Self {
-        Self { line: vec![0.0; taps], head: 0 }
+        Self {
+            line: vec![0.0; taps],
+            head: 0,
+        }
     }
 
     fn back(&self, kappa: usize) -> f64 {
         if self.line.is_empty() {
             return 0.0;
         }
-        debug_assert!(kappa <= self.line.len(), "the delay line is shorter than the tap asking of it");
+        debug_assert!(
+            kappa <= self.line.len(),
+            "the delay line is shorter than the tap asking of it"
+        );
         self.line[(self.head + self.line.len() - kappa) % self.line.len()]
     }
 
@@ -505,9 +529,18 @@ impl Precoder {
     /// contribute. Choosing the level nearest -c(n) is choosing the smallest
     /// |x(n)|.
     pub fn tail(&self) -> f64 {
-        let feed_forward: f64 =
-            self.z1.iter().enumerate().map(|(index, &z)| z * self.u_back.back(index + 1)).sum();
-        let feedback: f64 = self.p1.iter().enumerate().map(|(index, &p)| p * self.x_back.back(index + 1)).sum();
+        let feed_forward: f64 = self
+            .z1
+            .iter()
+            .enumerate()
+            .map(|(index, &z)| z * self.u_back.back(index + 1))
+            .sum();
+        let feedback: f64 = self
+            .p1
+            .iter()
+            .enumerate()
+            .map(|(index, &p)| p * self.x_back.back(index + 1))
+            .sum();
         feed_forward + feedback
     }
 
@@ -561,9 +594,20 @@ impl Prefilter {
             .z2
             .iter()
             .enumerate()
-            .map(|(kappa, &z)| z * if kappa == 0 { x } else { self.x_back.back(kappa) })
+            .map(|(kappa, &z)| {
+                z * if kappa == 0 {
+                    x
+                } else {
+                    self.x_back.back(kappa)
+                }
+            })
             .sum();
-        let feedback: f64 = self.p2.iter().enumerate().map(|(index, &p)| p * self.v_back.back(index + 1)).sum();
+        let feedback: f64 = self
+            .p2
+            .iter()
+            .enumerate()
+            .map(|(index, &p)| p * self.v_back.back(index + 1))
+            .sum();
         let v = feed_forward + feedback;
         self.x_back.push(x);
         self.v_back.push(v);
@@ -663,14 +707,23 @@ impl Chain {
             // k = 3, so it has a member inside -N/2..N/2 for every Ki only if
             // N is at least that step.
             let levels = 2 * points.len();
-            let step = usize::from(parameters.modulus(i)) * if i % TRELLIS_FRAME == TRELLIS_FRAME - 1 { 2 } else { 1 };
+            let step = usize::from(parameters.modulus(i))
+                * if i % TRELLIS_FRAME == TRELLIS_FRAME - 1 {
+                    2
+                } else {
+                    1
+                };
             if levels < step {
                 return Err("an interval's constellation is too small for its modulus");
             }
         }
         Ok(Self {
             moduli: parameters.moduli,
-            sets: parameters.sets.iter().map(|points| Constellation::new(points)).collect(),
+            sets: parameters
+                .sets
+                .iter()
+                .map(|points| Constellation::new(points))
+                .collect(),
             indices: parameters.indices,
             gain: parameters.gain,
             code: code_for(parameters.trellis),
@@ -725,7 +778,15 @@ impl Chain {
             self.state = self.code.next(self.state, y);
         }
         self.n += 1;
-        Symbol { n, eta, u, x, v, out: (self.gain * v).clamp(-OUTPUT_LIMIT, OUTPUT_LIMIT), y0: self.y0 }
+        Symbol {
+            n,
+            eta,
+            u,
+            x,
+            v,
+            out: (self.gain * v).clamp(-OUTPUT_LIMIT, OUTPUT_LIMIT),
+            y0: self.y0,
+        }
     }
 
     /// Back to the state before B1u: "the ... convolutional encoder, precoder
@@ -828,7 +889,10 @@ mod tests {
 
     /// A prefilter that passes x straight through: z2 = [1], nothing else.
     fn flat() -> Filters {
-        Filters { z2: vec![1.0], ..Filters::default() }
+        Filters {
+            z2: vec![1.0],
+            ..Filters::default()
+        }
     }
 
     /// 6.4.2 with nothing in the way: x(n) = u(n), v(n) = x(n), and the output
@@ -840,16 +904,26 @@ mod tests {
     /// units.
     #[test]
     fn with_no_filters_the_output_is_the_chosen_level() {
-        let mut chain = Chain::new(&parameters(vec![1, 2, 3, 4], 4, flat(), 1.0)).expect("the parameters are feasible");
+        let mut chain = Chain::new(&parameters(vec![1, 2, 3, 4], 4, flat(), 1.0))
+            .expect("the parameters are feasible");
         let mut random = Random::new(7);
         for _ in 0..600 {
             let interval = chain.interval();
             let k = chain.trellis_position();
             let ki = random.below(4);
             let symbol = chain.step(ki);
-            assert_eq!(symbol.x, symbol.u, "x(n) is u(n) when the precoder has no taps");
-            assert_eq!(symbol.v, symbol.x, "v(n) is x(n) when z2 is the single tap 1");
-            assert_eq!(symbol.out, symbol.u, "G = 1, so the output is the level itself");
+            assert_eq!(
+                symbol.x, symbol.u,
+                "x(n) is u(n) when the precoder has no taps"
+            );
+            assert_eq!(
+                symbol.v, symbol.x,
+                "v(n) is x(n) when z2 is the single tap 1"
+            );
+            assert_eq!(
+                symbol.out, symbol.u,
+                "G = 1, so the output is the level itself"
+            );
             let set = chain.constellation(interval);
             assert_eq!(set.level(symbol.eta), Some(symbol.u), "the level is a(eta)");
             assert_eq!(index_to_ki(symbol.eta, 4, k), ki, "the index is in E(Ki)");
@@ -866,21 +940,38 @@ mod tests {
         let mut now = Chain::new(&parameters(ladder(16), 1, flat(), 1.0)).expect("feasible");
         let first = now.step(0);
         assert_eq!(first.v, first.x, "z2(0) multiplies x(n) itself");
-        assert_ne!(first.v, 0.0, "the prefilter answers on its very first symbol");
+        assert_ne!(
+            first.v, 0.0,
+            "the prefilter answers on its very first symbol"
+        );
 
         // Two z2 taps with the first zero delay by exactly one symbol.
-        let delayed = Filters { z2: vec![0.0, 1.0], ..Filters::default() };
+        let delayed = Filters {
+            z2: vec![0.0, 1.0],
+            ..Filters::default()
+        };
         let mut later = Chain::new(&parameters(ladder(16), 1, delayed, 1.0)).expect("feasible");
         let one = later.step(0);
         let two = later.step(0);
-        assert_eq!(one.v, 0.0, "z2(1) has nothing behind it on the first symbol");
+        assert_eq!(
+            one.v, 0.0,
+            "z2(1) has nothing behind it on the first symbol"
+        );
         assert_eq!(two.v, one.x, "and on the second it is x(n-1)");
 
         // One z1 tap is z1(1), so it contributes nothing on the first symbol.
-        let feed_forward = Filters { z1: vec![0.5], z2: vec![1.0], ..Filters::default() };
-        let mut precoded = Chain::new(&parameters(ladder(16), 1, feed_forward, 1.0)).expect("feasible");
+        let feed_forward = Filters {
+            z1: vec![0.5],
+            z2: vec![1.0],
+            ..Filters::default()
+        };
+        let mut precoded =
+            Chain::new(&parameters(ladder(16), 1, feed_forward, 1.0)).expect("feasible");
         let one = precoded.step(0);
-        assert_eq!(one.x, one.u, "z1 starts at kappa = 1, so u(n) stands alone at n = 0");
+        assert_eq!(
+            one.x, one.u,
+            "z1 starts at kappa = 1, so u(n) stands alone at n = 0"
+        );
         let two = precoded.step(0);
         assert!(
             (two.x - (two.u + 0.5 * one.u)).abs() < 1e-12,
@@ -909,11 +1000,17 @@ mod tests {
                 let mut etas = [0i32; TRELLIS_FRAME];
                 for eta in &mut etas {
                     let symbol = chain.step(random.below(8));
-                    assert_eq!(symbol.y0, expected, "frame {frame} of the {trellis:?} code disagrees on Y0");
+                    assert_eq!(
+                        symbol.y0, expected,
+                        "frame {frame} of the {trellis:?} code disagrees on Y0"
+                    );
                     *eta = symbol.eta;
                 }
                 let sum = etas.iter().sum::<i32>().rem_euclid(2) == 1;
-                assert_eq!(sum, expected, "frame {frame}: the indices {etas:?} do not carry Y0");
+                assert_eq!(
+                    sum, expected,
+                    "frame {frame}: the indices {etas:?} do not carry Y0"
+                );
                 state = code.next(state, inverse_map(etas) & code.inputs());
             }
         }
@@ -942,7 +1039,11 @@ mod tests {
     /// constellation's own top level.
     #[test]
     fn the_precoder_output_stays_bounded_over_a_long_run() {
-        let filters = Filters { p1: vec![0.6, -0.2, 0.1], z2: vec![1.0], ..Filters::default() };
+        let filters = Filters {
+            p1: vec![0.6, -0.2, 0.1],
+            z2: vec![1.0],
+            ..Filters::default()
+        };
         let mut chain = Chain::new(&parameters(ladder(16), 8, filters, 1.0)).expect("feasible");
         let mut random = Random::new(13);
         let top = 31.0; // P[15] of the test set: levels 1, 3, ... 31.
@@ -956,8 +1057,14 @@ mod tests {
         // either side of -c(n). The widest class here is the k = 3 one, 2 x Mi
         // = 16 indices apart, and the levels step by two, so half the spacing
         // is 16 -- which is what the run measures, to six figures.
-        assert!(worst < 0.6 * top, "the precoder output reached {worst}, over 0.6 of the top level {top}");
-        assert!(worst > 0.4 * top, "the precoder output only reached {worst}: the run is not exercising it");
+        assert!(
+            worst < 0.6 * top,
+            "the precoder output reached {worst}, over 0.6 of the top level {top}"
+        );
+        assert!(
+            worst > 0.4 * top,
+            "the precoder output only reached {worst}: the run is not exercising it"
+        );
     }
 
     /// 6.4.2 states neither rule, but a class with no member inside
@@ -985,14 +1092,23 @@ mod tests {
         for i in [3, 7, 11] {
             edge.moduli[i] = 4;
         }
-        assert!(Chain::new(&edge).is_ok(), "N = 8 carries Mi = 8 at k < 3 and Mi = 4 at k = 3");
+        assert!(
+            Chain::new(&edge).is_ok(),
+            "N = 8 carries Mi = 8 at k < 3 and Mi = 4 at k = 3"
+        );
 
         // A set index past the sets, and a prefilter that would make v zero.
         let mut astray = parameters(ladder(16), 8, flat(), 1.0);
         astray.indices[2] = 3;
-        assert_eq!(Chain::new(&astray).unwrap_err(), "a constellation index points past the sets");
+        assert_eq!(
+            Chain::new(&astray).unwrap_err(),
+            "a constellation index points past the sets"
+        );
         let silent = parameters(ladder(16), 8, Filters::default(), 1.0);
-        assert_eq!(Chain::new(&silent).unwrap_err(), "the prefilter has no feed-forward section");
+        assert_eq!(
+            Chain::new(&silent).unwrap_err(),
+            "the prefilter has no feed-forward section"
+        );
     }
 
     /// The digital modem's half of 6.4.2, all the way back: run both filters
@@ -1006,7 +1122,12 @@ mod tests {
     /// again, which is pitfall P-5's whole point.
     #[test]
     fn an_inverse_channel_gives_back_every_k_as_eta_mod_m() {
-        let filters = Filters { z1: vec![0.2], p1: vec![0.5, -0.25], z2: vec![1.0, 0.3], p2: vec![0.1] };
+        let filters = Filters {
+            z1: vec![0.2],
+            p1: vec![0.5, -0.25],
+            z2: vec![1.0, 0.3],
+            p2: vec![0.1],
+        };
         let moduli = [7u8, 8, 9, 6, 5, 8, 8, 4, 9, 9, 7, 3];
         let mut settings = parameters(ladder(16), 8, filters.clone(), 1.0);
         settings.moduli = moduli;
@@ -1015,7 +1136,8 @@ mod tests {
 
         // The receiver's own memories, most recent first. It is handed v(n)
         // alone and everything else is what it has worked out for itself.
-        let back = |history: &Vec<f64>, kappa: usize| history.get(kappa - 1).copied().unwrap_or(0.0);
+        let back =
+            |history: &Vec<f64>, kappa: usize| history.get(kappa - 1).copied().unwrap_or(0.0);
         let keep = |history: &mut Vec<f64>, value: f64| {
             history.insert(0, value);
             history.truncate(4);
@@ -1030,13 +1152,34 @@ mod tests {
 
             // Undo the prefilter. z2(0) is the only tap on the current x(n),
             // so everything else moves to the other side and is divided out.
-            let known: f64 = filters.z2.iter().enumerate().skip(1).map(|(kappa, &z)| z * back(&x_back, kappa)).sum::<f64>()
-                + filters.p2.iter().enumerate().map(|(index, &p)| p * back(&v_back, index + 1)).sum::<f64>();
+            let known: f64 = filters
+                .z2
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(kappa, &z)| z * back(&x_back, kappa))
+                .sum::<f64>()
+                + filters
+                    .p2
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &p)| p * back(&v_back, index + 1))
+                    .sum::<f64>();
             let x = (symbol.v - known) / filters.z2[0];
             // Undo the precoder: u(n) = x(n) - c(n), with c(n) built from the
             // recovered history rather than from the transmitter's.
-            let c: f64 = filters.z1.iter().enumerate().map(|(index, &z)| z * back(&u_back, index + 1)).sum::<f64>()
-                + filters.p1.iter().enumerate().map(|(index, &p)| p * back(&x_back, index + 1)).sum::<f64>();
+            let c: f64 = filters
+                .z1
+                .iter()
+                .enumerate()
+                .map(|(index, &z)| z * back(&u_back, index + 1))
+                .sum::<f64>()
+                + filters
+                    .p1
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &p)| p * back(&x_back, index + 1))
+                    .sum::<f64>();
             let u = x - c;
 
             // Slice u back to an index, as the receiver's decisions do.
@@ -1047,7 +1190,10 @@ mod tests {
                     distance(a).total_cmp(&distance(b))
                 })
                 .expect("the set is not empty");
-            assert_eq!(eta, symbol.eta, "the inverse channel lost the index at interval {interval}, k = {k}");
+            assert_eq!(
+                eta, symbol.eta,
+                "the inverse channel lost the index at interval {interval}, k = {k}"
+            );
             assert_eq!(
                 index_to_ki(eta, moduli[interval], k),
                 ki,
@@ -1067,13 +1213,22 @@ mod tests {
     /// would otherwise pass unnoticed until a live call.
     #[test]
     fn the_memories_are_zero_before_b1u() {
-        let filters = Filters { z1: vec![0.2], p1: vec![0.5, -0.25], z2: vec![1.0, 0.3], p2: vec![0.1] };
+        let filters = Filters {
+            z1: vec![0.2],
+            p1: vec![0.5, -0.25],
+            z2: vec![1.0, 0.3],
+            p2: vec![0.1],
+        };
         let mut chain = Chain::new(&parameters(ladder(16), 4, filters, 1.0)).expect("feasible");
         // Ki = 1 in every interval stands for B1u's scrambled ones reaching the
         // modulus encoder: what matters is that the run is the same every time.
         // v(n) is pinned rather than G x v(n), because v(n) is the last filter
         // memory and nothing clamps it.
-        let run = |chain: &mut Chain| (0..UP_INTERVALS).map(|_| chain.step(1).v).collect::<Vec<_>>();
+        let run = |chain: &mut Chain| {
+            (0..UP_INTERVALS)
+                .map(|_| chain.step(1).v)
+                .collect::<Vec<_>>()
+        };
 
         let first = run(&mut chain);
         // Worked through by hand for the first two. At n = 0 (k = 0, the first
@@ -1098,7 +1253,10 @@ mod tests {
             6.39732455388,
         ];
         for (got, want) in first.iter().zip(pinned.iter()) {
-            assert!((got - want).abs() < 1e-9, "the first twelve prefilter outputs after a reset: {first:?}");
+            assert!(
+                (got - want).abs() < 1e-9,
+                "the first twelve prefilter outputs after a reset: {first:?}"
+            );
         }
 
         // Running on and resetting reproduces it exactly.
@@ -1106,8 +1264,16 @@ mod tests {
             chain.step(2);
         }
         chain.reset();
-        assert_eq!(run(&mut chain), first, "a reset puts every memory back to zero");
-        assert_eq!(chain.symbols(), UP_INTERVALS as u64, "and n counts from zero again");
+        assert_eq!(
+            run(&mut chain),
+            first,
+            "a reset puts every memory back to zero"
+        );
+        assert_eq!(
+            chain.symbols(),
+            UP_INTERVALS as u64,
+            "and n counts from zero again"
+        );
     }
 
     /// P-12: "keep x and v in f64 ... and saturate the final D/A value, but
@@ -1115,8 +1281,13 @@ mod tests {
     /// leaves x(n) and v(n) exactly where a sane gain would have left them.
     #[test]
     fn the_state_is_never_saturated_only_the_output() {
-        let filters = Filters { p1: vec![0.6, -0.2], z2: vec![1.0, 0.25], ..Filters::default() };
-        let mut quiet = Chain::new(&parameters(ladder(16), 8, filters.clone(), 0.01)).expect("feasible");
+        let filters = Filters {
+            p1: vec![0.6, -0.2],
+            z2: vec![1.0, 0.25],
+            ..Filters::default()
+        };
+        let mut quiet =
+            Chain::new(&parameters(ladder(16), 8, filters.clone(), 0.01)).expect("feasible");
         let mut loud = Chain::new(&parameters(ladder(16), 8, filters, 1000.0)).expect("feasible");
         let mut random = Random::new(19);
         let mut clamped = 0;
@@ -1124,14 +1295,24 @@ mod tests {
             let ki = random.below(8);
             let soft = quiet.step(ki);
             let hard = loud.step(ki);
-            assert_eq!(soft.eta, hard.eta, "the gain must not change which point is chosen");
+            assert_eq!(
+                soft.eta, hard.eta,
+                "the gain must not change which point is chosen"
+            );
             assert_eq!(soft.x, hard.x, "x(n) is the same whatever G is");
             assert_eq!(soft.v, hard.v, "and so is v(n)");
-            assert_eq!(soft.out, 0.01 * soft.v, "a small gain never reaches the limit");
+            assert_eq!(
+                soft.out,
+                0.01 * soft.v,
+                "a small gain never reaches the limit"
+            );
             assert!(hard.out.abs() <= OUTPUT_LIMIT, "the output is bounded");
             if hard.v.abs() > 0.0 {
                 clamped += 1;
-                assert_eq!(hard.out, (1000.0 * hard.v).clamp(-OUTPUT_LIMIT, OUTPUT_LIMIT));
+                assert_eq!(
+                    hard.out,
+                    (1000.0 * hard.v).clamp(-OUTPUT_LIMIT, OUTPUT_LIMIT)
+                );
             }
         }
         assert!(clamped > 4000, "only {clamped} symbols exercised the clamp");
@@ -1147,7 +1328,10 @@ mod tests {
                 assert_eq!(class.spacing(), 14, "k = 3 steps by 2 x Mi");
                 assert_eq!(class.index(0), 7, "2 x Ki + parity");
                 assert!(class.holds(7 - 14) && class.holds(7 + 14));
-                assert!(!class.holds(8), "the parity fixes which half the index is in");
+                assert!(
+                    !class.holds(8),
+                    "the parity fixes which half the index is in"
+                );
             } else if opens_a_pair(k) {
                 assert_eq!(class.spacing(), 7, "k = {k} steps by Mi");
                 assert_eq!(
@@ -1173,12 +1357,27 @@ mod tests {
         // Mi = 1, so every index is in the class and -1 and 0 both sit at
         // distance P[0] from a target of zero.
         let every = Class::for_interval(0, 1, 0, false);
-        assert_eq!(set.choose(every, 0.0), Some(if TIE_TO_SMALLER_INDEX { 0 } else { -1 }));
+        assert_eq!(
+            set.choose(every, 0.0),
+            Some(if TIE_TO_SMALLER_INDEX { 0 } else { -1 })
+        );
         // Away from the tie the nearest level wins outright.
         assert_eq!(set.choose(every, 2.9), Some(1), "a(1) = 3 is nearest 2.9");
-        assert_eq!(set.choose(every, -6.0), Some(-3), "a(-3) = -5 is nearer than a(-4) = -7");
-        assert_eq!(set.choose(every, 900.0), Some(3), "a target past the top clamps to it");
-        assert_eq!(set.choose(every, -900.0), Some(-4), "and past the bottom to -N/2");
+        assert_eq!(
+            set.choose(every, -6.0),
+            Some(-3),
+            "a(-3) = -5 is nearer than a(-4) = -7"
+        );
+        assert_eq!(
+            set.choose(every, 900.0),
+            Some(3),
+            "a target past the top clamps to it"
+        );
+        assert_eq!(
+            set.choose(every, -900.0),
+            Some(-4),
+            "and past the bottom to -N/2"
+        );
     }
 
     /// 6.4.2's indexing: "negative points have negative indices, and positive
@@ -1192,9 +1391,14 @@ mod tests {
         assert_eq!(set.highest(), 2);
         assert_eq!(set.level(-4), None, "there is no index below -N/2");
         assert_eq!(set.level(3), None, "nor one at N/2");
-        let levels: Vec<f64> = (-3..=2).map(|eta| set.level(eta).expect("in range")).collect();
+        let levels: Vec<f64> = (-3..=2)
+            .map(|eta| set.level(eta).expect("in range"))
+            .collect();
         assert_eq!(levels, vec![-11.0, -6.0, -2.0, 2.0, 6.0, 11.0]);
-        assert!(levels.windows(2).all(|pair| pair[0] < pair[1]), "the levels rise with the index");
+        assert!(
+            levels.windows(2).all(|pair| pair[0] < pair[1]),
+            "the levels rise with the index"
+        );
     }
 
     /// Table 30 bits 27:28 pick the code, and 6.4.4 clocks it once per trellis

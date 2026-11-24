@@ -95,7 +95,8 @@ impl Layout {
     /// Where on the line each octet of each codeword goes: `order[w][i]` is
     /// the place of octet `i` of codeword `w`.
     fn order(&self) -> Vec<Vec<usize>> {
-        let mut order: Vec<Vec<usize>> = self.words.iter().map(|&n| Vec::with_capacity(n)).collect();
+        let mut order: Vec<Vec<usize>> =
+            self.words.iter().map(|&n| Vec::with_capacity(n)).collect();
         let longest = self.words.iter().copied().max().unwrap_or(0);
         let mut at = 0;
         for i in 0..longest {
@@ -159,7 +160,10 @@ impl Packer {
     /// A packer whose filler is its own. Two lines in one lead want
     /// different ones, for the reason the filler is there at all.
     pub fn seeded(seed: u32) -> Self {
-        Self { filler: seed, ..Self::default() }
+        Self {
+            filler: seed,
+            ..Self::default()
+        }
     }
 
     /// Queue a frame behind whatever is already waiting.
@@ -194,7 +198,11 @@ impl Packer {
         payload.extend(self.carried.drain(..take));
         let mut pointer = NO_FRAME;
         while self.carried.is_empty() && payload.len() < room {
-            let Some(frame) = self.urgent.pop_front().or_else(|| self.ordinary.pop_front()) else {
+            let Some(frame) = self
+                .urgent
+                .pop_front()
+                .or_else(|| self.ordinary.pop_front())
+            else {
                 break;
             };
             if pointer == NO_FRAME {
@@ -209,7 +217,10 @@ impl Packer {
             payload.push(0);
         }
         while payload.len() < room {
-            self.filler = self.filler.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            self.filler = self
+                .filler
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
             payload.push((self.filler >> 24) as u8);
         }
 
@@ -305,7 +316,10 @@ impl Unpacker {
         let code = (layout.parity > 0).then(|| code_for(&mut self.codes, layout.parity).clone());
         let order = layout.order();
         let mut payload = Vec::with_capacity(layout.payload());
-        let mut report = Decoded { words: layout.words.len(), ..Decoded::default() };
+        let mut report = Decoded {
+            words: layout.words.len(),
+            ..Decoded::default()
+        };
         // How much of the payload can be trusted: up to the first codeword
         // that would not decode.
         let mut good = usize::MAX;
@@ -342,7 +356,11 @@ impl Unpacker {
         let count = payload[0];
         let pointer = u16::from_le_bytes([payload[1], payload[2]]);
         let body = &payload[HEADER..good];
-        let fresh = if pointer == NO_FRAME { usize::MAX } else { usize::from(pointer) };
+        let fresh = if pointer == NO_FRAME {
+            usize::MAX
+        } else {
+            usize::from(pointer)
+        };
         let mut at = 0;
         if self.expect == Some(count) && !self.partial.is_empty() {
             // A frame running on from the last superframe, which ends where
@@ -399,7 +417,8 @@ impl Unpacker {
                 if len <= MAX_BODY && self.partial.len() == len + FRAME_OVERHEAD {
                     let frame = std::mem::take(&mut self.partial);
                     if fcs_ok(&frame, Fcs::Bits32) {
-                        self.frames.push_back((frame[0], frame[3..3 + len].to_vec()));
+                        self.frames
+                            .push_back((frame[0], frame[3..3 + len].to_vec()));
                     } else {
                         self.bad_frames += 1;
                     }
@@ -416,7 +435,9 @@ mod tests {
     use super::*;
 
     fn body(seed: usize, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 31 + seed * 7 + (i >> 3)) as u8).collect()
+        (0..len)
+            .map(|i| (i * 31 + seed * 7 + (i >> 3)) as u8)
+            .collect()
     }
 
     #[test]
@@ -439,8 +460,14 @@ mod tests {
         let layout = Layout::new(300, 16).unwrap();
         let mut packer = Packer::new();
         let mut unpacker = Unpacker::new();
-        let sent: Vec<(u8, Vec<u8>)> =
-            (0..40).map(|i| (1 + (i % 5) as u8, body(i, [0, 1, 17, 250, 700, 2000][i % 6]))).collect();
+        let sent: Vec<(u8, Vec<u8>)> = (0..40)
+            .map(|i| {
+                (
+                    1 + (i % 5) as u8,
+                    body(i, [0, 1, 17, 250, 700, 2000][i % 6]),
+                )
+            })
+            .collect();
         for (kind, b) in &sent {
             packer.push(*kind, b);
         }

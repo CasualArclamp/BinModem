@@ -52,7 +52,9 @@ pub struct CallPrompt {
 
 impl Default for CallPrompt {
     fn default() -> Self {
-        Self { prompt: Prompt::Quiet }
+        Self {
+            prompt: Prompt::Quiet,
+        }
     }
 }
 
@@ -62,10 +64,18 @@ impl CallPrompt {
     /// that was ringing stopped without a choice.
     pub fn observe(&mut self, call: Option<&str>, caller: Option<&str>, now: f64) -> Option<Ended> {
         let here = call == Some(state::RINGING_HERE);
-        let named = || caller.filter(|c| !c.is_empty()).unwrap_or("someone").to_owned();
+        let named = || {
+            caller
+                .filter(|c| !c.is_empty())
+                .unwrap_or("someone")
+                .to_owned()
+        };
         match &mut self.prompt {
             Prompt::Quiet if here => {
-                self.prompt = Prompt::Ringing { caller: named(), since: now };
+                self.prompt = Prompt::Ringing {
+                    caller: named(),
+                    since: now,
+                };
                 None
             }
             Prompt::Quiet => None,
@@ -87,7 +97,10 @@ impl CallPrompt {
             Prompt::Handled { caller: who, at } if here => {
                 if now - *at > HANDLED_FOR {
                     let who = std::mem::take(who);
-                    self.prompt = Prompt::Ringing { caller: who, since: now };
+                    self.prompt = Prompt::Ringing {
+                        caller: who,
+                        since: now,
+                    };
                 }
                 None
             }
@@ -140,14 +153,19 @@ const MOST_AT_ONCE: f64 = 0.2;
 
 impl Ringer {
     pub fn new(rate: f64) -> Self {
-        Self { rate, made: 0, last: None }
+        Self {
+            rate,
+            made: 0,
+            last: None,
+        }
     }
 
     /// Whether the bell is sounding `t` seconds into the ringing.
     pub fn sounding(t: f64) -> bool {
         let cycle: f64 = CADENCE.iter().sum();
         let t = t.rem_euclid(cycle);
-        t < CADENCE[0] || (CADENCE[0] + CADENCE[1]..CADENCE[0] + CADENCE[1] + CADENCE[2]).contains(&t)
+        t < CADENCE[0]
+            || (CADENCE[0] + CADENCE[1]..CADENCE[0] + CADENCE[1] + CADENCE[2]).contains(&t)
     }
 
     /// The sample at `t` seconds in.
@@ -161,7 +179,9 @@ impl Ringer {
 
     /// The samples owed since the last call, by the window's clock.
     pub fn fill(&mut self, now: f64, out: &mut Vec<f32>) {
-        let since = self.last.map_or(MOST_AT_ONCE, |last| (now - last).clamp(0.0, MOST_AT_ONCE));
+        let since = self
+            .last
+            .map_or(MOST_AT_ONCE, |last| (now - last).clamp(0.0, MOST_AT_ONCE));
         self.last = Some(now);
         let n = (since * self.rate).round() as u64;
         out.extend((self.made..self.made + n).map(|i| Self::sample(i as f64 / self.rate)));
@@ -175,10 +195,19 @@ impl Ringer {
 ///
 /// Clicking outside it or pressing Escape does nothing: a call is answered
 /// or declined, not dismissed and left ringing.
-pub fn dialog(ctx: &egui::Context, caller: &str, ringing_for: f64, fax_class: bool) -> Option<Choice> {
+pub fn dialog(
+    ctx: &egui::Context,
+    caller: &str,
+    ringing_for: f64,
+    fax_class: bool,
+) -> Option<Choice> {
     use egui::{Color32, RichText};
     let lit = Ringer::sounding(ringing_for);
-    let edge = if lit { Color32::from_rgb(90, 220, 130) } else { Color32::from_rgb(58, 62, 72) };
+    let edge = if lit {
+        Color32::from_rgb(90, 220, 130)
+    } else {
+        Color32::from_rgb(58, 62, 72)
+    };
     let frame = egui::Frame::popup(&ctx.global_style())
         .stroke(egui::Stroke::new(3.0, edge))
         .inner_margin(egui::Margin::same(20));
@@ -194,7 +223,13 @@ pub fn dialog(ctx: &egui::Context, caller: &str, ringing_for: f64, fax_class: bo
                         .color(Color32::from_rgb(140, 150, 165)),
                 );
                 ui.add_space(4.0);
-                ui.label(RichText::new(caller).monospace().size(26.0).strong().color(Color32::from_rgb(235, 240, 245)));
+                ui.label(
+                    RichText::new(caller)
+                        .monospace()
+                        .size(26.0)
+                        .strong()
+                        .color(Color32::from_rgb(235, 240, 245)),
+                );
                 ui.label(
                     RichText::new(format!("ringing for {:.0} s", ringing_for.max(0.0)))
                         .small()
@@ -209,7 +244,11 @@ pub fn dialog(ctx: &egui::Context, caller: &str, ringing_for: f64, fax_class: bo
                     } else {
                         "A data call: ATA, in the mode the mode box has set"
                     };
-                    if ui.add(egui::Button::new("Answer as modem").min_size(size)).on_hover_text(modem_tip).clicked() {
+                    if ui
+                        .add(egui::Button::new("Answer as modem").min_size(size))
+                        .on_hover_text(modem_tip)
+                        .clicked()
+                    {
                         chosen = Some(Choice::Modem);
                     }
                     if ui
@@ -223,7 +262,11 @@ pub fn dialog(ctx: &egui::Context, caller: &str, ringing_for: f64, fax_class: bo
                         chosen = Some(Choice::Fax);
                     }
                     if ui
-                        .add(egui::Button::new("Decline").min_size(size).fill(Color32::from_rgb(112, 46, 42)))
+                        .add(
+                            egui::Button::new("Decline")
+                                .min_size(size)
+                                .fill(Color32::from_rgb(112, 46, 42)),
+                        )
                         .on_hover_text("Turn the call away: 603 Decline")
                         .clicked()
                     {
@@ -268,7 +311,11 @@ mod tests {
             // Still ringing here for a moment: no question, no ring.
             ringing(&mut p, "0412345678", 1.2);
             assert_eq!(p.ringing(), None);
-            let next = if choice == Choice::Decline { state::IDLE } else { state::ANSWERED };
+            let next = if choice == Choice::Decline {
+                state::IDLE
+            } else {
+                state::ANSWERED
+            };
             assert_eq!(p.observe(Some(next), None, 1.3), None);
             assert_eq!(p.prompt, Prompt::Quiet);
         }
@@ -278,16 +325,26 @@ mod tests {
     fn a_caller_who_hangs_up_first_stops_the_ringing_and_is_a_missed_call() {
         let mut p = CallPrompt::default();
         ringing(&mut p, "0412345678", 0.0);
-        assert_eq!(p.observe(Some(state::IDLE), None, 4.0), Some(Ended::Missed("0412345678".to_owned())));
+        assert_eq!(
+            p.observe(Some(state::IDLE), None, 4.0),
+            Some(Ended::Missed("0412345678".to_owned()))
+        );
         assert_eq!(p.ringing(), None);
-        assert_eq!(p.choose(Choice::Fax, 4.1), None, "a press after the caller gave up");
+        assert_eq!(
+            p.choose(Choice::Fax, 4.1),
+            None,
+            "a press after the caller gave up"
+        );
     }
 
     #[test]
     fn a_call_answered_at_the_terminal_is_not_missed() {
         let mut p = CallPrompt::default();
         ringing(&mut p, "0412345678", 0.0);
-        assert_eq!(p.observe(Some(state::ANSWERED), None, 2.0), Some(Ended::AnsweredElsewhere));
+        assert_eq!(
+            p.observe(Some(state::ANSWERED), None, 2.0),
+            Some(Ended::AnsweredElsewhere)
+        );
     }
 
     #[test]
@@ -318,7 +375,9 @@ mod tests {
         assert!(!Ringer::sounding(1.5));
         assert!(Ringer::sounding(3.1), "the next cycle");
         assert_eq!(Ringer::sample(1.5), 0.0);
-        let loudest = (0..8000).map(|i| Ringer::sample(f64::from(i) / 8000.0).abs()).fold(0.0, f32::max);
+        let loudest = (0..8000)
+            .map(|i| Ringer::sample(f64::from(i) / 8000.0).abs())
+            .fold(0.0, f32::max);
         assert!(loudest > 0.2 && loudest <= 0.4, "{loudest}");
     }
 
@@ -327,7 +386,11 @@ mod tests {
         let mut r = Ringer::new(8000.0);
         let mut out = Vec::new();
         r.fill(10.0, &mut out);
-        assert_eq!(out.len(), 1600, "a first call makes a little to start the monitor");
+        assert_eq!(
+            out.len(),
+            1600,
+            "a first call makes a little to start the monitor"
+        );
         r.fill(10.05, &mut out);
         assert_eq!(out.len(), 2000);
         r.fill(30.0, &mut out);

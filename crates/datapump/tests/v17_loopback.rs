@@ -48,7 +48,9 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 }
+        Self {
+            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -100,7 +102,14 @@ impl Shifter {
             let w = 0.54 - 0.46 * (TAU * d as f64 / (N - 1) as f64).cos();
             *tap = 2.0 / (PI * k as f64) * w;
         }
-        Self { taps, hist: vec![0.0; N], pos: 0, centre: m, phase: 0.0, step: hz / FS }
+        Self {
+            taps,
+            hist: vec![0.0; N],
+            pos: 0,
+            centre: m,
+            phase: 0.0,
+            step: hz / FS,
+        }
     }
 
     fn process(&mut self, x: f64) -> f64 {
@@ -169,7 +178,11 @@ fn insert(line: &mut Vec<f64>, at: usize, fill: Fill, seed: u64) {
                 .enumerate()
                 .map(|(i, &x)| {
                     let edge = i.min(n - 1 - i);
-                    x * if edge < fade { edge as f64 / fade as f64 } else { 1.0 }
+                    x * if edge < fade {
+                        edge as f64 / fade as f64
+                    } else {
+                        1.0
+                    }
                 })
                 .collect()
         }
@@ -217,7 +230,13 @@ struct Layout {
 /// A long train with `first` after it, three quarters of a second of
 /// nothing -- the V.21 exchange of a real call -- and a resync with `second`,
 /// with `quiet` samples in front.
-fn pair(rate: Rate, first: &[u8], second: &[u8], quiet: usize, echo_protection: bool) -> (Vec<f64>, Layout) {
+fn pair(
+    rate: Rate,
+    first: &[u8],
+    second: &[u8],
+    quiet: usize,
+    echo_protection: bool,
+) -> (Vec<f64>, Layout) {
     let mut tx = Transmitter::new(FS);
     tx.set_echo_protection(echo_protection);
     let mut line = vec![0.0; 1600 + quiet];
@@ -229,7 +248,13 @@ fn pair(rate: Rate, first: &[u8], second: &[u8], quiet: usize, echo_protection: 
     line.extend(burst(&mut tx, rate, Training::Resync, second));
     let d = line.len();
     line.extend(vec![0.0; 3200]);
-    (line, Layout { long: (a, b), resync: (c, d) })
+    (
+        line,
+        Layout {
+            long: (a, b),
+            resync: (c, d),
+        },
+    )
 }
 
 /// The power the bursts arrive at, for the noise to be set against: segment
@@ -281,7 +306,9 @@ fn listen(rate: Rate, line: &[f64]) -> Heard {
                 heard.trained_snr.push(rx.trained_snr_db());
             } else {
                 heard.bursts.push((rx.heard(), std::mem::take(&mut bits)));
-                heard.snr.push(snr.len().checked_sub(10).map_or(f64::NAN, |k| snr[k]));
+                heard
+                    .snr
+                    .push(snr.len().checked_sub(10).map_or(f64::NAN, |k| snr[k]));
                 snr.clear();
             }
         }
@@ -290,7 +317,10 @@ fn listen(rate: Rate, line: &[f64]) -> Heard {
 }
 
 fn bits_of(bytes: &[u8]) -> Vec<bool> {
-    bytes.iter().flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 != 0)).collect()
+    bytes
+        .iter()
+        .flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 != 0))
+        .collect()
 }
 
 /// Where `needle` sits in `hay` exactly, if it does.
@@ -306,15 +336,32 @@ fn errors(got: &[bool], payload: &[bool]) -> Option<usize> {
         return None;
     }
     let (offset, _) = (0..got.len().saturating_sub(payload.len()) + 1)
-        .map(|o| (o, got[o..o + probe].iter().zip(&payload[..probe]).filter(|(a, b)| a != b).count()))
+        .map(|o| {
+            (
+                o,
+                got[o..o + probe]
+                    .iter()
+                    .zip(&payload[..probe])
+                    .filter(|(a, b)| a != b)
+                    .count(),
+            )
+        })
         .min_by_key(|(_, e)| *e)?;
-    Some(got[offset..].iter().zip(payload).filter(|(a, b)| a != b).count())
+    Some(
+        got[offset..]
+            .iter()
+            .zip(payload)
+            .filter(|(a, b)| a != b)
+            .count(),
+    )
 }
 
 /// How many of the payload's `chunks` pieces arrived exactly, anywhere.
 fn chunks_arrived(got: &[bool], payload: &[bool], chunks: usize) -> usize {
     let size = payload.len() / chunks;
-    (0..chunks).filter(|c| find(got, &payload[c * size..(c + 1) * size]).is_some()).count()
+    (0..chunks)
+        .filter(|c| find(got, &payload[c * size..(c + 1) * size]).is_some())
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -330,13 +377,27 @@ fn every_rate_carries_a_long_train_and_a_resync_at_every_arrival_phase() {
             let (line, _) = pair(rate, &first, &second, quiet, false);
             let heard = listen(rate, &line);
             let case = format!("{rate:?}, {quiet} samples in");
-            assert_eq!(heard.bursts.len(), 2, "{case}: {} bursts", heard.bursts.len());
+            assert_eq!(
+                heard.bursts.len(),
+                2,
+                "{case}: {} bursts",
+                heard.bursts.len()
+            );
             assert_eq!(heard.bursts[0].0, Some(Training::Long), "{case}");
             assert_eq!(heard.bursts[1].0, Some(Training::Resync), "{case}");
-            assert!(find(&heard.bursts[0].1, &bits_of(&first)).is_some(), "{case}: the long train's data");
-            assert!(find(&heard.bursts[1].1, &bits_of(&second)).is_some(), "{case}: the resync's data");
+            assert!(
+                find(&heard.bursts[0].1, &bits_of(&first)).is_some(),
+                "{case}: the long train's data"
+            );
+            assert!(
+                find(&heard.bursts[1].1, &bits_of(&second)).is_some(),
+                "{case}: the resync's data"
+            );
             if quiet == 0 {
-                eprintln!("{rate:?}: trained {:.1} dB on the long train, {:.1} dB on the resync", heard.trained_snr[0], heard.trained_snr[1]);
+                eprintln!(
+                    "{rate:?}: trained {:.1} dB on the long train, {:.1} dB on the resync",
+                    heard.trained_snr[0], heard.trained_snr[1]
+                );
             }
         }
     }
@@ -358,9 +419,19 @@ fn a_long_train_after_a_long_train_is_solved_afresh() {
         line.extend(vec![0.0; 3200]);
         let heard = listen(rate, &line);
         assert_eq!(heard.bursts.len(), 2, "{rate:?}");
-        assert_eq!(heard.bursts[1].0, Some(Training::Long), "{rate:?}: the second heard as a resync");
-        assert!(find(&heard.bursts[1].1, &bits_of(&second)).is_some(), "{rate:?}: the second long train's data");
-        eprintln!("{rate:?}: second long train trained {:.1} dB", heard.trained_snr[1]);
+        assert_eq!(
+            heard.bursts[1].0,
+            Some(Training::Long),
+            "{rate:?}: the second heard as a resync"
+        );
+        assert!(
+            find(&heard.bursts[1].1, &bits_of(&second)).is_some(),
+            "{rate:?}: the second long train's data"
+        );
+        eprintln!(
+            "{rate:?}: second long train trained {:.1} dB",
+            heard.trained_snr[1]
+        );
     }
 }
 
@@ -375,17 +446,30 @@ fn circuit_109_is_on_from_segment_4_and_off_30_to_50_ms_after_the_signal() {
         let heard = listen(Rate::R14400, &line);
         assert_eq!(heard.carrier.len(), 4, "echo {echo}: {:?}", heard.carrier);
         let echo_symbols = if echo { 462 + 54 } else { 0 };
-        for (k, (from, to), training) in [(0, layout.long, Training::Long), (2, layout.resync, Training::Resync)] {
+        for (k, (from, to), training) in [
+            (0, layout.long, Training::Long),
+            (2, layout.resync, Training::Resync),
+        ] {
             let symbol = |n: u64| from + ((echo_symbols + n) as f64 * FS / BAUD) as usize;
             let segment_4 = 256 + training.before_segment_four();
             let (on, off) = (heard.carrier[k].0, heard.carrier[k + 1].0);
-            assert!(on >= symbol(segment_4) && on < symbol(segment_4 + 48), "echo {echo} {training:?}: on at {on}, segment 4 from {}", symbol(segment_4));
+            assert!(
+                on >= symbol(segment_4) && on < symbol(segment_4 + 48),
+                "echo {echo} {training:?}: on at {on}, segment 4 from {}",
+                symbol(segment_4)
+            );
             // The energy ends with Table 7's 32 symbols of ones; its 48 of
             // nothing follow.
             let energy_ends = to - (48.0 * FS / BAUD) as usize;
             let after = (off - energy_ends) as f64 / FS * 1000.0;
-            eprintln!("echo {echo} {training:?}: on {:.1} ms into segment 4, off {after:.1} ms after the signal", (on - symbol(segment_4)) as f64 / 16.0);
-            assert!((30.0..=50.0).contains(&after), "echo {echo} {training:?}: off {after:.1} ms after");
+            eprintln!(
+                "echo {echo} {training:?}: on {:.1} ms into segment 4, off {after:.1} ms after the signal",
+                (on - symbol(segment_4)) as f64 / 16.0
+            );
+            assert!(
+                (30.0..=50.0).contains(&after),
+                "echo {echo} {training:?}: off {after:.1} ms after"
+            );
         }
     }
 }
@@ -398,7 +482,14 @@ fn every_rate_holds_at_its_working_snr() {
         let bytes = (2.0 * f64::from(rate.bits_per_second()) / 8.0) as usize;
         let (first, second) = (rng.bytes(bytes), rng.bytes(bytes));
         let (clean, layout) = pair(rate, &first, &second, 3, false);
-        let line = through(&clean, 0.0, 0.0, working_snr(rate), burst_power(&clean, layout), 99);
+        let line = through(
+            &clean,
+            0.0,
+            0.0,
+            working_snr(rate),
+            burst_power(&clean, layout),
+            99,
+        );
         let heard = listen(rate, &line);
         assert_eq!(heard.bursts.len(), 2, "{rate:?}");
         let e1 = errors(&heard.bursts[0].1, &bits_of(&first)).expect("the long train's data");
@@ -428,14 +519,24 @@ fn seven_hertz_and_two_hundred_ppm_either_way() {
             let bytes = (1.5 * f64::from(rate.bits_per_second()) / 8.0) as usize;
             let (first, second) = (rng.bytes(bytes), rng.bytes(bytes));
             let (clean, layout) = pair(rate, &first, &second, 5, false);
-            let line = through(&clean, hz, ppm, working_snr(rate), burst_power(&clean, layout), 5);
+            let line = through(
+                &clean,
+                hz,
+                ppm,
+                working_snr(rate),
+                burst_power(&clean, layout),
+                5,
+            );
             let heard = listen(rate, &line);
             let case = format!("{rate:?} {hz:+} Hz {ppm:+} ppm");
             assert_eq!(heard.bursts.len(), 2, "{case}");
             let e1 = errors(&heard.bursts[0].1, &bits_of(&first)).expect("the long train's data");
             let e2 = errors(&heard.bursts[1].1, &bits_of(&second)).expect("the resync's data");
             let ber = (e1 + e2) as f64 / (2 * bytes * 8) as f64;
-            eprintln!("{case}: {e1} + {e2} errors, BER {ber:.1e}, trained {:.1} / {:.1} dB", heard.trained_snr[0], heard.trained_snr[1]);
+            eprintln!(
+                "{case}: {e1} + {e2} errors, BER {ber:.1e}, trained {:.1} / {:.1} dB",
+                heard.trained_snr[0], heard.trained_snr[1]
+            );
             assert!(ber <= 1e-4, "{case}: BER {ber:.1e}");
         }
     }
@@ -449,7 +550,12 @@ fn a_concealment_slip_in_the_data_costs_only_the_symbols_inside_it() {
     // to noise plus three: the payload in 64 pieces, and at most three lost
     // to each slip.
     for rate in [Rate::R14400, Rate::R9600] {
-        for slip in [Some(Fill::Repeat), Some(Fill::Comfort), Some(Fill::Silence), None] {
+        for slip in [
+            Some(Fill::Repeat),
+            Some(Fill::Comfort),
+            Some(Fill::Silence),
+            None,
+        ] {
             let mut rng = Rng::new(20);
             let bytes = (1.5 * f64::from(rate.bits_per_second()) / 8.0) as usize;
             let (first, second) = (rng.bytes(bytes), rng.bytes(bytes));
@@ -457,7 +563,10 @@ fn a_concealment_slip_in_the_data_costs_only_the_symbols_inside_it() {
             let power = burst_power(&clean, layout);
             let mut line = through(&clean, 0.0, 0.0, working_snr(rate) + 3.0, power, 11);
             // The later burst first, so the earlier one's place holds.
-            for (from, training) in [(layout.resync.0, Training::Resync), (layout.long.0, Training::Long)] {
+            for (from, training) in [
+                (layout.resync.0, Training::Resync),
+                (layout.long.0, Training::Long),
+            ] {
                 let at = from + ((training.symbols() as f64 + 0.5 * BAUD) * FS / BAUD) as usize;
                 match slip {
                     Some(fill) => insert(&mut line, at, fill, 3),
@@ -481,7 +590,12 @@ fn a_concealment_slip_in_segment_1_still_trains() {
     // more than a hundred symbols of it to spare; the reversal into segment 2
     // is where it always was. Both trainings, every fill, at 14 400.
     let rate = Rate::R14400;
-    for slip in [Some(Fill::Repeat), Some(Fill::Comfort), Some(Fill::Silence), None] {
+    for slip in [
+        Some(Fill::Repeat),
+        Some(Fill::Comfort),
+        Some(Fill::Silence),
+        None,
+    ] {
         let mut rng = Rng::new(21);
         let (first, second) = (rng.bytes(1500), rng.bytes(1500));
         let (clean, layout) = pair(rate, &first, &second, 2, false);
@@ -499,8 +613,15 @@ fn a_concealment_slip_in_segment_1_still_trains() {
         assert_eq!(heard.bursts.len(), 2, "{case}");
         let e1 = errors(&heard.bursts[0].1, &bits_of(&first)).expect("the long train's data");
         let e2 = errors(&heard.bursts[1].1, &bits_of(&second)).expect("the resync's data");
-        eprintln!("{case}: {e1} and {e2} errors, trained {:.1} / {:.1} dB, heard {:?} / {:?}", heard.trained_snr[0], heard.trained_snr[1], heard.bursts[0].0, heard.bursts[1].0);
-        assert_eq!((heard.bursts[0].0, heard.bursts[1].0), (Some(Training::Long), Some(Training::Resync)), "{case}");
+        eprintln!(
+            "{case}: {e1} and {e2} errors, trained {:.1} / {:.1} dB, heard {:?} / {:?}",
+            heard.trained_snr[0], heard.trained_snr[1], heard.bursts[0].0, heard.bursts[1].0
+        );
+        assert_eq!(
+            (heard.bursts[0].0, heard.bursts[1].0),
+            (Some(Training::Long), Some(Training::Resync)),
+            "{case}"
+        );
         assert!(e1 + e2 <= 2, "{case}: {e1} and {e2} errors");
     }
 }
@@ -515,7 +636,14 @@ fn a_line_thirty_decibels_down_is_read_the_same() {
         let (first, second) = (rng.bytes(500), rng.bytes(500));
         let (clean, layout) = pair(rate, &first, &second, 4, false);
         let quiet: Vec<f64> = clean.iter().map(|x| x * 0.0316).collect();
-        let line = through(&quiet, 0.0, 0.0, working_snr(rate) + 3.0, burst_power(&quiet, layout), 30);
+        let line = through(
+            &quiet,
+            0.0,
+            0.0,
+            working_snr(rate) + 3.0,
+            burst_power(&quiet, layout),
+            30,
+        );
         let heard = listen(rate, &line);
         assert_eq!(heard.bursts.len(), 2, "{rate:?}");
         let e1 = errors(&heard.bursts[0].1, &bits_of(&first)).expect("the long train's data");
@@ -532,6 +660,9 @@ fn a_whole_burst_is_as_long_as_table_3_and_table_7_say() {
         let mut tx = Transmitter::new(FS);
         let samples = burst(&mut tx, Rate::R9600, training, &[]).len();
         let want = ((symbols + 32 + 48) as f64 * FS / BAUD).round() as usize;
-        assert!(samples.abs_diff(want) <= 7, "{training:?}: {samples} samples, Table 3 and Table 7 make {want}");
+        assert!(
+            samples.abs_diff(want) <= 7,
+            "{training:?}: {samples} samples, Table 3 and Table 7 make {want}"
+        );
     }
 }

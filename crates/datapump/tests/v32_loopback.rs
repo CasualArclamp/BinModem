@@ -227,7 +227,11 @@ fn through_a_hybrid(cancel: bool) -> (Vec<u8>, f64) {
     for _ in 0..samples as usize {
         let sent = near.next_sample();
         let heard = far.next_sample() * FAR + sent * ECHO;
-        let left = if cancel { ec.process(sent, heard) } else { heard };
+        let left = if cancel {
+            ec.process(sent, heard)
+        } else {
+            heard
+        };
         rx.feed(left);
         out.extend(rx.take_bytes());
     }

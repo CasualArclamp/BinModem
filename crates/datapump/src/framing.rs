@@ -116,7 +116,6 @@ impl AsyncFramer {
             return out;
         }
 
-
         match self.state {
             State::Idle => {
                 // A start bit is a mark-to-space transition on an idle line.
@@ -167,11 +166,18 @@ impl AsyncFramer {
                     // other bit reading out of band is a line's own business
                     // and is taken as it comes.
                     let last = self.next_bit + 1 == self.data_bits;
-                    let ringing = RING_COAST && last && self.char_peak > 0.0 && level.abs() > RINGING * self.char_peak;
+                    let ringing = RING_COAST
+                        && last
+                        && self.char_peak > 0.0
+                        && level.abs() > RINGING * self.char_peak;
                     if tracing() {
-                        eprintln!("framer: bit {} at {:.3} bits level {:+.3}{}",
-                                  self.next_bit, self.since_edge / self.sps, level,
-                                  if ringing { " (ringing)" } else { "" });
+                        eprintln!(
+                            "framer: bit {} at {:.3} bits level {:+.3}{}",
+                            self.next_bit,
+                            self.since_edge / self.sps,
+                            level,
+                            if ringing { " (ringing)" } else { "" }
+                        );
                     }
                     self.sampled = Some(if ringing { 0.0 } else { level });
                     if ringing {
@@ -197,7 +203,11 @@ impl AsyncFramer {
                     // at space, which is what a framing error or a break looks
                     // like; a line with nothing on it is idle, and idle is
                     // mark.
-                    let scale = if self.char_peak > 0.0 { self.char_peak } else { 1.0 };
+                    let scale = if self.char_peak > 0.0 {
+                        self.char_peak
+                    } else {
+                        1.0
+                    };
                     if level > 0.0 {
                         out = Some(self.value as u8);
                     } else {

@@ -328,7 +328,8 @@ impl Telnet {
         // list stops when a name repeats.
         if let [TERMINAL_TYPE, TT_SEND, ..] = body.as_slice() {
             let name = self.terminal_type.clone();
-            self.reply.extend_from_slice(&[IAC, SB, TERMINAL_TYPE, TT_IS]);
+            self.reply
+                .extend_from_slice(&[IAC, SB, TERMINAL_TYPE, TT_IS]);
             self.reply.extend_from_slice(name.as_bytes());
             self.reply.extend_from_slice(&[IAC, SE]);
         }
@@ -441,7 +442,10 @@ mod tests {
     #[test]
     fn plain_text_passes_through_untouched() {
         let mut t = client();
-        assert_eq!(data(&mut t, b"Welcome to the board\r\n"), b"Welcome to the board\r\n");
+        assert_eq!(
+            data(&mut t, b"Welcome to the board\r\n"),
+            b"Welcome to the board\r\n"
+        );
         assert!(t.take_reply().is_empty(), "answered something nobody asked");
     }
 
@@ -518,7 +522,9 @@ mod tests {
         let mut t = Telnet::new("ANSI", 80, 24);
         let greeting = t.take_reply();
         assert!(
-            greeting.windows(3).any(|w| w == [IAC, WILL, SUPPRESS_GO_AHEAD]),
+            greeting
+                .windows(3)
+                .any(|w| w == [IAC, WILL, SUPPRESS_GO_AHEAD]),
             "did not open the negotiation: {greeting:?}"
         );
         data(&mut t, &[IAC, DO, SUPPRESS_GO_AHEAD]);
@@ -587,7 +593,10 @@ mod tests {
     fn a_resize_is_reported_only_once_and_only_if_agreed() {
         let mut t = client();
         t.resize(132, 43);
-        assert!(t.take_reply().is_empty(), "reported a size nobody agreed to hear");
+        assert!(
+            t.take_reply().is_empty(),
+            "reported a size nobody agreed to hear"
+        );
 
         data(&mut t, &[IAC, DO, NAWS]);
         t.take_reply();
@@ -598,7 +607,10 @@ mod tests {
         assert_eq!(t.take_reply(), want);
 
         t.resize(132, 50);
-        assert!(t.take_reply().is_empty(), "reported a size that had not changed");
+        assert!(
+            t.take_reply().is_empty(),
+            "reported a size that had not changed"
+        );
     }
 
     #[test]
@@ -624,7 +636,18 @@ mod tests {
         t.take_reply();
         let out = data(
             &mut t,
-            &[IAC, SB, TERMINAL_TYPE, TT_SEND, IAC, IAC, IAC, SE, b'h', b'i'],
+            &[
+                IAC,
+                SB,
+                TERMINAL_TYPE,
+                TT_SEND,
+                IAC,
+                IAC,
+                IAC,
+                SE,
+                b'h',
+                b'i',
+            ],
         );
         assert_eq!(out, b"hi", "lost its place inside a subnegotiation");
         assert!(!t.take_reply().is_empty(), "did not answer the request");

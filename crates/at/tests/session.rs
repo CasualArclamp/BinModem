@@ -9,7 +9,10 @@ fn send(it: &mut Interpreter, line: &str) -> (String, Vec<Action>) {
     for b in line.bytes() {
         it.feed(b);
     }
-    (String::from_utf8(it.take_output()).unwrap(), it.take_actions())
+    (
+        String::from_utf8(it.take_output()).unwrap(),
+        it.take_actions(),
+    )
 }
 
 /// An interpreter with echo off, so tests read the responses alone.
@@ -103,7 +106,11 @@ fn v0_switches_to_numeric_result_codes() {
 #[test]
 fn q1_suppresses_result_codes_but_not_information_text() {
     let mut it = quiet_dce();
-    assert_eq!(send(&mut it, "ATQ1\r").0, "", "the OK for ATQ1 is itself suppressed");
+    assert_eq!(
+        send(&mut it, "ATQ1\r").0,
+        "",
+        "the OK for ATQ1 is itself suppressed"
+    );
     assert_eq!(send(&mut it, "AT\r").0, "");
     assert_eq!(
         send(&mut it, "ATS7?\r").0,
@@ -151,7 +158,10 @@ fn dial_yields_an_action_and_no_ok() {
     let mut it = quiet_dce();
     let (out, actions) = send(&mut it, "ATDT5551234\r");
     assert_eq!(actions, vec![Action::Dial("T5551234".into())]);
-    assert_eq!(out, "", "the result code comes later, when the call resolves");
+    assert_eq!(
+        out, "",
+        "the result code comes later, when the call resolves"
+    );
 }
 
 #[test]
@@ -253,7 +263,10 @@ fn a_failed_command_discards_actions_queued_earlier_on_the_line() {
     let mut it = quiet_dce();
     let (out, actions) = send(&mut it, "AT&FX9\r");
     assert_eq!(out, "\r\nERROR\r\n");
-    assert!(actions.is_empty(), "the line failed, so nothing should be acted on");
+    assert!(
+        actions.is_empty(),
+        "the line failed, so nothing should be acted on"
+    );
 }
 
 #[test]
@@ -297,7 +310,15 @@ fn identification_commands_answer() {
 fn windows_dial_up_networking_init_string_is_accepted() {
     // The sequence Windows DUN and most terminal software actually send.
     let mut it = Interpreter::new();
-    for line in ["AT&F\r", "ATE0\r", "ATV1\r", "AT&C1\r", "AT&D2\r", "ATS0=0\r", "ATS7=60\r"] {
+    for line in [
+        "AT&F\r",
+        "ATE0\r",
+        "ATV1\r",
+        "AT&C1\r",
+        "AT&D2\r",
+        "ATS0=0\r",
+        "ATS7=60\r",
+    ] {
         let (out, _) = send(&mut it, line);
         assert!(out.ends_with("OK\r\n"), "{line} produced {out:?}");
     }
@@ -396,7 +417,9 @@ fn a_modulation_that_is_not_offered_is_refused() {
     // V.90 with V.92's phase 2, which is built, and PCM upstream, which Data
     // mode does not reach yet: it is offered because the exchange it names is
     // real.
-    for offered in ["B103", "B212", "B202", "V21", "V22B", "V32", "V34", "V90", "V92"] {
+    for offered in [
+        "B103", "B212", "B202", "V21", "V22B", "V32", "V34", "V90", "V92",
+    ] {
         let (out, _) = send(&mut it, &format!("AT+MS={offered}{CR}"));
         assert!(out.contains("OK"), "+MS={offered} answered {out:?}");
     }
@@ -482,7 +505,10 @@ fn fclass_offers_data_and_facsimile() {
 fn fclass_switches_the_dce_between_a_modem_and_a_fax() {
     let mut it = quiet_dce();
     let (out, _) = send(&mut it, &format!("AT+FCLASS?{CR}"));
-    assert!(out.contains("+FCLASS: 0"), "did not start as a modem: {out:?}");
+    assert!(
+        out.contains("+FCLASS: 0"),
+        "did not start as a modem: {out:?}"
+    );
 
     let (out, actions) = send(&mut it, &format!("AT+FCLASS=1{CR}"));
     assert!(out.contains("OK"), "{out:?}");
@@ -531,7 +557,10 @@ fn a_reporting_value_that_does_not_exist_is_refused() {
     let mut it = quiet_dce();
     send(&mut it, "AT+ER=1\r");
     assert_eq!(send(&mut it, "AT+ER=2\r").0, "\r\nERROR\r\n");
-    assert!(it.config.report_error_control, "a refused set changes nothing");
+    assert!(
+        it.config.report_error_control,
+        "a refused set changes nothing"
+    );
 }
 
 #[test]
@@ -555,7 +584,10 @@ fn the_capability_list_names_what_is_answered() {
     for name in ["+FCLASS", "+MS", "+ES", "+ER", "+DS", "+DS44", "+DR"] {
         assert!(out.contains(name), "{name} is missing from +GCAP");
         let (answer, _) = send(&mut it, &format!("AT{name}=?\r"));
-        assert!(!answer.contains("ERROR"), "{name} is listed but not answered");
+        assert!(
+            !answer.contains("ERROR"),
+            "{name} is listed but not answered"
+        );
     }
 }
 
@@ -565,14 +597,23 @@ fn the_compression_parameters_are_all_four_of_them() {
     // [,<max_string>]]]]. Three of the four used to be read and thrown away,
     // and the read-back reported values the modem had stopped using.
     let mut it = quiet_dce();
-    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n");
+    assert_eq!(
+        send(&mut it, "AT+DS?\r").0,
+        "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n"
+    );
 
     send(&mut it, "AT+DS=3,1,1024,32\r");
-    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,1,1024,32\r\n\r\nOK\r\n");
+    assert_eq!(
+        send(&mut it, "AT+DS?\r").0,
+        "\r\n+DS: 3,1,1024,32\r\n\r\nOK\r\n"
+    );
 
     // V.250 5.4.2.1: an omitted subparameter keeps what it had.
     send(&mut it, "AT+DS=,,4096\r");
-    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,1,4096,32\r\n\r\nOK\r\n");
+    assert_eq!(
+        send(&mut it, "AT+DS?\r").0,
+        "\r\n+DS: 3,1,4096,32\r\n\r\nOK\r\n"
+    );
 }
 
 #[test]
@@ -601,7 +642,10 @@ fn the_v44_parameters_are_all_nine_of_them() {
     send(&mut it, "AT&F\r");
     assert_eq!(it.v44, at::V44::default());
     let (test, _) = send(&mut it, "AT+DS44=?\r");
-    assert!(test.contains("+DS44: (0,3),(0,1),(0),(256-65535)"), "{test:?}");
+    assert!(
+        test.contains("+DS44: (0,3),(0,1),(0),(256-65535)"),
+        "{test:?}"
+    );
 }
 
 #[test]
@@ -622,7 +666,11 @@ fn v44_values_outside_table_28_are_refused() {
         let (out, _) = send(&mut it, &format!("{bad}\r"));
         assert!(out.contains("ERROR"), "{bad} was accepted: {out:?}");
     }
-    assert_eq!(it.v44, at::V44::default(), "a refused line changed something");
+    assert_eq!(
+        it.v44,
+        at::V44::default(),
+        "a refused line changed something"
+    );
 }
 
 #[test]
@@ -631,13 +679,20 @@ fn a_dictionary_outside_the_permitted_range_is_refused() {
     // shall be considered a procedural error"; and on P2: "the permitted range
     // is from 6 to 250. The values outside this range are invalid".
     let mut it = quiet_dce();
-    for bad in ["AT+DS=3,0,256\r", "AT+DS=3,0,2048,5\r", "AT+DS=3,0,2048,251\r"] {
+    for bad in [
+        "AT+DS=3,0,256\r",
+        "AT+DS=3,0,2048,5\r",
+        "AT+DS=3,0,2048,251\r",
+    ] {
         assert_eq!(send(&mut it, bad).0, "\r\nERROR\r\n", "accepted {bad:?}");
     }
     // And a direction this DCE cannot honour, since V.42bis is negotiated as a
     // pair and offering half of it would be a promise it cannot keep.
     assert_eq!(send(&mut it, "AT+DS=1\r").0, "\r\nERROR\r\n");
-    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n");
+    assert_eq!(
+        send(&mut it, "AT+DS?\r").0,
+        "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n"
+    );
 }
 
 #[test]

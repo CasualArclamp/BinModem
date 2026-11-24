@@ -104,7 +104,10 @@ pub struct Params {
 
 impl Params {
     /// RFC 1332 Appendix A: "at least 4 slots, usually 16 slots".
-    pub const DEFAULT: Self = Self { max_slot: 15, compress_slot: true };
+    pub const DEFAULT: Self = Self {
+        max_slot: 15,
+        compress_slot: true,
+    };
 }
 
 /// The IP header and the TCP header after it, as octet offsets.
@@ -398,7 +401,9 @@ impl Compressor {
         let ports = &d[at.tcp..at.tcp + 4];
         for (i, slot) in self.slots.iter_mut().enumerate() {
             let Some(saved) = slot else { continue };
-            let Some(old) = layout_of_header(&saved.header) else { continue };
+            let Some(old) = layout_of_header(&saved.header) else {
+                continue;
+            };
             if saved.header[12..20] == d[12..20] && saved.header[old.tcp..old.tcp + 4] == *ports {
                 saved.used = self.clock;
                 return Some(i as u8);
@@ -579,7 +584,11 @@ impl Decompressor {
         put32(saved, h.tcp + 8, ack);
         // "If the I bit is set... decoded and added to the IP ID field of the
         // saved packet. Otherwise, one is added to the IP ID."
-        let di = if mask & I != 0 { decode(packet, &mut at)? } else { 1 };
+        let di = if mask & I != 0 {
+            decode(packet, &mut at)?
+        } else {
+            1
+        };
         let id = be16(saved, 4).wrapping_add(di);
         put16(saved, 4, id);
 

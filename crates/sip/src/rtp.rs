@@ -94,7 +94,10 @@ impl Packet {
             if datagram.len() < start + 4 {
                 return None;
             }
-            let words = usize::from(u16::from_be_bytes([datagram[start + 2], datagram[start + 3]]));
+            let words = usize::from(u16::from_be_bytes([
+                datagram[start + 2],
+                datagram[start + 3],
+            ]));
             start += 4 + words * 4;
             if datagram.len() < start {
                 return None;
@@ -288,12 +291,21 @@ mod tests {
     #[test]
     fn the_marker_bit_is_not_part_of_the_payload_type() {
         let mut bytes = Vec::new();
-        Packet { marker: false, ..sample_packet() }.write(&mut bytes);
+        Packet {
+            marker: false,
+            ..sample_packet()
+        }
+        .write(&mut bytes);
         assert_eq!(bytes[1], PCMU, "a quiet marker still set a bit");
         assert!(!Packet::parse(&bytes).unwrap().marker);
 
         let mut loud = Vec::new();
-        Packet { marker: true, payload_type: PCMA, ..sample_packet() }.write(&mut loud);
+        Packet {
+            marker: true,
+            payload_type: PCMA,
+            ..sample_packet()
+        }
+        .write(&mut loud);
         assert_eq!(loud[1], 0x80 | PCMA);
         let read = Packet::parse(&loud).unwrap();
         assert!(read.marker);
@@ -304,7 +316,11 @@ mod tests {
     #[test]
     fn padding_is_trimmed_off_the_payload() {
         let mut bytes = Vec::new();
-        Packet { payload: vec![1, 2, 3], ..sample_packet() }.write(&mut bytes);
+        Packet {
+            payload: vec![1, 2, 3],
+            ..sample_packet()
+        }
+        .write(&mut bytes);
         bytes[0] |= 0x20;
         bytes.extend_from_slice(&[0, 0, 0, 4]);
         let read = Packet::parse(&bytes).expect("did not read back");
@@ -328,7 +344,11 @@ mod tests {
     #[test]
     fn a_contributing_source_list_is_skipped() {
         let mut bytes = Vec::new();
-        Packet { payload: vec![9, 9, 9], ..sample_packet() }.write(&mut bytes);
+        Packet {
+            payload: vec![9, 9, 9],
+            ..sample_packet()
+        }
+        .write(&mut bytes);
         let mut with_csrc = bytes[..HEADER_LEN].to_vec();
         with_csrc[0] = (VERSION << 6) | 2;
         with_csrc.extend_from_slice(&[0xaa; 4]);
@@ -346,7 +366,11 @@ mod tests {
     #[test]
     fn a_header_extension_is_skipped() {
         let mut bytes = Vec::new();
-        Packet { payload: vec![7, 7], ..sample_packet() }.write(&mut bytes);
+        Packet {
+            payload: vec![7, 7],
+            ..sample_packet()
+        }
+        .write(&mut bytes);
         let mut with_ext = bytes[..HEADER_LEN].to_vec();
         with_ext[0] = (VERSION << 6) | 0x10;
         with_ext.extend_from_slice(&[0xbe, 0xde, 0x00, 0x02]);
@@ -389,7 +413,10 @@ mod tests {
             let mut bytes = Vec::new();
             sample_packet().write(&mut bytes);
             bytes[0] = version << 6;
-            assert!(Packet::parse(&bytes).is_none(), "version {version} was read as RTP");
+            assert!(
+                Packet::parse(&bytes).is_none(),
+                "version {version} was read as RTP"
+            );
         }
     }
 
@@ -458,7 +485,11 @@ mod tests {
         let mut bytes = Vec::new();
         sample_packet().write(&mut bytes);
         assert!(!is_rtcp(&bytes));
-        Packet { payload_type: PCMA, ..sample_packet() }.write(&mut bytes);
+        Packet {
+            payload_type: PCMA,
+            ..sample_packet()
+        }
+        .write(&mut bytes);
         assert!(!is_rtcp(&bytes));
         // Nor is anything too short to be either.
         assert!(!is_rtcp(&[0x80, 200]));

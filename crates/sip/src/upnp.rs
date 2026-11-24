@@ -68,7 +68,9 @@ impl Mapping {
 
     /// The same of a router whose description is at `location`.
     pub fn through(location: &str, ports: &[u16]) -> Result<Self, String> {
-        let location = Url::parse(location).ok_or_else(|| format!("UPnP: the router gave {location:?} as its description, which is not a URL"))?;
+        let location = Url::parse(location).ok_or_else(|| {
+            format!("UPnP: the router gave {location:?} as its description, which is not a URL")
+        })?;
         let (description, local) = get(&location)?;
         let (service, control) = control_of(&description, &location)
             .ok_or("UPnP: the router's description has no WANIPConnection or WANPPPConnection service in it")?;
@@ -81,7 +83,13 @@ impl Mapping {
                 "UPnP: the router's outside address is {external}, which is not a public one: it is behind another router, or the provider's, and a port opened on it is not open to the internet"
             ));
         }
-        let mut mapping = Self { control, service, ports: Vec::new(), external, local };
+        let mut mapping = Self {
+            control,
+            service,
+            ports: Vec::new(),
+            external,
+            local,
+        };
         for &port in ports {
             mapping.add(port)?;
         }
@@ -134,7 +142,11 @@ impl Drop for Mapping {
                 &self.control,
                 &self.service,
                 "DeletePortMapping",
-                &[("NewRemoteHost", ""), ("NewExternalPort", &port.to_string()), ("NewProtocol", "UDP")],
+                &[
+                    ("NewRemoteHost", ""),
+                    ("NewExternalPort", &port.to_string()),
+                    ("NewProtocol", "UDP"),
+                ],
             );
         }
     }
@@ -157,7 +169,12 @@ pub fn is_public(address: IpAddr) -> bool {
                 || a.is_broadcast()
                 || (o[0] == 100 && (64..128).contains(&o[1])))
         }
-        IpAddr::V6(a) => !(a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80),
+        IpAddr::V6(a) => {
+            !(a.is_loopback()
+                || a.is_unspecified()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80)
+        }
     }
 }
 
@@ -169,7 +186,8 @@ fn discover(patience: Duration) -> Result<String, String> {
     // virtual adapter or two sends a search from nowhere in particular
     // otherwise, and the router never hears it.
     let from = outward().map_or_else(|| "0.0.0.0".to_owned(), |a| a.to_string());
-    let socket = UdpSocket::bind((from.as_str(), 0)).map_err(|e| format!("UPnP: no socket to search with: {e}"))?;
+    let socket = UdpSocket::bind((from.as_str(), 0))
+        .map_err(|e| format!("UPnP: no socket to search with: {e}"))?;
     let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
     // And to where a home router usually is as well as to everybody, since
     // some answer a search sent to them that they ignore when it is sent to
@@ -197,7 +215,9 @@ fn discover(patience: Duration) -> Result<String, String> {
     let began = Instant::now();
     let mut buffer = [0u8; 2048];
     while began.elapsed() < patience {
-        let Ok((n, _)) = socket.recv_from(&mut buffer) else { continue };
+        let Ok((n, _)) = socket.recv_from(&mut buffer) else {
+            continue;
+        };
         let text = String::from_utf8_lossy(&buffer[..n]);
         if let Some(location) = location_of(&text) {
             return Ok(location);
@@ -219,12 +239,17 @@ fn outward() -> Option<IpAddr> {
 /// The LOCATION of an SSDP answer that is about a gateway.
 fn location_of(answer: &str) -> Option<String> {
     let about = answer.to_ascii_lowercase();
-    if !(about.contains("internetgatewaydevice") || about.contains("wanipconnection") || about.contains("wanpppconnection")) {
+    if !(about.contains("internetgatewaydevice")
+        || about.contains("wanipconnection")
+        || about.contains("wanpppconnection"))
+    {
         return None;
     }
     answer.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
-        name.trim().eq_ignore_ascii_case("location").then(|| value.trim().to_owned())
+        name.trim()
+            .eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_owned())
     })
 }
 
@@ -244,7 +269,11 @@ impl Url {
             Some((host, port)) => (host, port.parse().ok()?),
             None => (authority, 80),
         };
-        (!host.is_empty()).then(|| Self { host: host.to_owned(), port, path: path.to_owned() })
+        (!host.is_empty()).then(|| Self {
+            host: host.to_owned(),
+            port,
+            path: path.to_owned(),
+        })
     }
 
     /// A URL found in this one's document: whole, or a path on this host.
@@ -253,8 +282,15 @@ impl Url {
         if found.starts_with("http://") {
             return Self::parse(found);
         }
-        let path = if found.starts_with('/') { found.to_owned() } else { format!("/{found}") };
-        Some(Self { path, ..self.clone() })
+        let path = if found.starts_with('/') {
+            found.to_owned()
+        } else {
+            format!("/{found}")
+        };
+        Some(Self {
+            path,
+            ..self.clone()
+        })
     }
 
     fn address(&self) -> Result<SocketAddr, String> {
@@ -269,7 +305,12 @@ impl Url {
 /// One HTTP exchange: the body of the answer, the status, and the address
 /// this machine was speaking from.
 fn exchange(url: &Url, request: &str) -> Result<(u16, String, IpAddr), String> {
-    let failed = |e: std::io::Error| format!("UPnP: talking to the router at {}:{}: {e}", url.host, url.port);
+    let failed = |e: std::io::Error| {
+        format!(
+            "UPnP: talking to the router at {}:{}: {e}",
+            url.host, url.port
+        )
+    };
     let mut stream = TcpStream::connect_timeout(&url.address()?, PATIENCE).map_err(failed)?;
     let _ = stream.set_read_timeout(Some(PATIENCE));
     let _ = stream.set_write_timeout(Some(PATIENCE));
@@ -280,10 +321,26 @@ fn exchange(url: &Url, request: &str) -> Result<(u16, String, IpAddr), String> {
     // until it times out, and what arrived by then is the answer.
     let _ = stream.read_to_end(&mut raw);
     let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text.split_once("\r\n\r\n").ok_or("UPnP: the router's answer was not HTTP")?;
-    let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("UPnP: the router's answer had no status")?;
-    let chunked = head.to_ascii_lowercase().contains("transfer-encoding: chunked");
-    Ok((status, if chunked { unchunk(body) } else { body.to_owned() }, local))
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or("UPnP: the router's answer was not HTTP")?;
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("UPnP: the router's answer had no status")?;
+    let chunked = head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    Ok((
+        status,
+        if chunked {
+            unchunk(body)
+        } else {
+            body.to_owned()
+        },
+        local,
+    ))
 }
 
 /// A body sent in chunks (RFC 9112 7.1), put back together.
@@ -291,7 +348,10 @@ fn unchunk(body: &str) -> String {
     let mut out = String::new();
     let mut rest = body;
     while let Some((size, after)) = rest.split_once("\r\n") {
-        let Ok(size) = usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16) else { break };
+        let Ok(size) = usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16)
+        else {
+            break;
+        };
         if size == 0 || size > after.len() || !after.is_char_boundary(size) {
             break;
         }
@@ -302,16 +362,26 @@ fn unchunk(body: &str) -> String {
 }
 
 fn get(url: &Url) -> Result<(String, IpAddr), String> {
-    let request = format!("GET {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n", url.path, url.host, url.port);
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+        url.path, url.host, url.port
+    );
     let (status, body, local) = exchange(url, &request)?;
     if status != 200 {
-        return Err(format!("UPnP: the router answered {status} when asked for its description"));
+        return Err(format!(
+            "UPnP: the router answered {status} when asked for its description"
+        ));
     }
     Ok((body, local))
 }
 
 /// One action of the service, and the body of what came back.
-fn soap(control: &Url, service: &str, action: &str, arguments: &[(&str, &str)]) -> Result<String, String> {
+fn soap(
+    control: &Url,
+    service: &str,
+    action: &str,
+    arguments: &[(&str, &str)],
+) -> Result<String, String> {
     let body = envelope(service, action, arguments);
     let request = format!(
         "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{service}#{action}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -326,7 +396,11 @@ fn soap(control: &Url, service: &str, action: &str, arguments: &[(&str, &str)]) 
     }
     let code = value_of(&answer, "errorCode").unwrap_or_default();
     let said = value_of(&answer, "errorDescription").unwrap_or_default();
-    Err(format!("UPnP: the router refused {action}: {status} {code} {said}").trim_end().to_owned())
+    Err(
+        format!("UPnP: the router refused {action}: {status} {code} {said}")
+            .trim_end()
+            .to_owned(),
+    )
 }
 
 fn envelope(service: &str, action: &str, arguments: &[(&str, &str)]) -> String {
@@ -340,7 +414,9 @@ fn envelope(service: &str, action: &str, arguments: &[(&str, &str)]) -> String {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The text inside the first `<name>` element, whatever prefix it has.
@@ -355,7 +431,9 @@ fn value_of(document: &str, name: &str) -> Option<String> {
         if !(prefix.is_empty() || (prefix.ends_with(':') && !prefix.contains(['/', ' ', '>']))) {
             continue;
         }
-        let Some(rest) = document[from..].strip_prefix('>') else { continue };
+        let Some(rest) = document[from..].strip_prefix('>') else {
+            continue;
+        };
         let end = rest.find('<')?;
         return Some(rest[..end].trim().to_owned());
     }
@@ -365,13 +443,17 @@ fn value_of(document: &str, name: &str) -> Option<String> {
 /// The service that maps ports, and where it is controlled, out of a
 /// gateway's description.
 fn control_of(description: &str, location: &Url) -> Option<(String, Url)> {
-    let base = value_of(description, "URLBase").and_then(|b| Url::parse(&b)).unwrap_or_else(|| location.clone());
+    let base = value_of(description, "URLBase")
+        .and_then(|b| Url::parse(&b))
+        .unwrap_or_else(|| location.clone());
     // IP before PPP: a router with both has the one in use first in
     // practice, and the IP one is what a cable or fibre line has.
     for wanted in ["WANIPConnection", "WANPPPConnection"] {
         for service in description.split("<service>").skip(1) {
             let service = service.split("</service>").next().unwrap_or("");
-            let Some(kind) = value_of(service, "serviceType") else { continue };
+            let Some(kind) = value_of(service, "serviceType") else {
+                continue;
+            };
             if !kind.contains(wanted) {
                 continue;
             }
@@ -407,14 +489,30 @@ mod tests {
         let location = Url::parse("http://192.168.1.1:5000/rootDesc.xml").unwrap();
         let (service, control) = control_of(DESCRIPTION_XML, &location).unwrap();
         assert_eq!(service, "urn:schemas-upnp-org:service:WANIPConnection:1");
-        assert_eq!(control, Url { host: "192.168.1.1".to_owned(), port: 5000, path: "/ctl/IPConn".to_owned() });
-        assert!(control_of("<root><service><serviceType>x</serviceType></service></root>", &location).is_none());
+        assert_eq!(
+            control,
+            Url {
+                host: "192.168.1.1".to_owned(),
+                port: 5000,
+                path: "/ctl/IPConn".to_owned()
+            }
+        );
+        assert!(
+            control_of(
+                "<root><service><serviceType>x</serviceType></service></root>",
+                &location
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn a_search_answer_gives_its_location_only_if_it_is_a_gateway_s() {
         let gateway = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nLocation: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n";
-        assert_eq!(location_of(gateway).as_deref(), Some("http://192.168.1.1:5000/rootDesc.xml"));
+        assert_eq!(
+            location_of(gateway).as_deref(),
+            Some("http://192.168.1.1:5000/rootDesc.xml")
+        );
         let television = "HTTP/1.1 200 OK\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\nLOCATION: http://192.168.1.9/tv.xml\r\n\r\n";
         assert_eq!(location_of(television), None);
     }
@@ -422,10 +520,16 @@ mod tests {
     #[test]
     fn values_are_read_whatever_their_prefix_and_chunks_are_joined() {
         let answer = "<s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>203.0.113.7</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body>";
-        assert_eq!(value_of(answer, "NewExternalIPAddress").as_deref(), Some("203.0.113.7"));
+        assert_eq!(
+            value_of(answer, "NewExternalIPAddress").as_deref(),
+            Some("203.0.113.7")
+        );
         let fault = "<s:Fault><detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>718</errorCode><errorDescription>ConflictInMappingEntry</errorDescription></UPnPError></detail></s:Fault>";
         assert_eq!(value_of(fault, "errorCode").as_deref(), Some("718"));
-        assert_eq!(unchunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"), "hello world");
+        assert_eq!(
+            unchunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
+            "hello world"
+        );
     }
 
     #[test]
@@ -458,13 +562,19 @@ mod tests {
                 let mut buffer = [0u8; 4096];
                 // Read the head, then as much body as it says there is.
                 let request = loop {
-                    let Ok(n) = stream.read(&mut buffer) else { break String::new() };
+                    let Ok(n) = stream.read(&mut buffer) else {
+                        break String::new();
+                    };
                     raw.extend_from_slice(&buffer[..n]);
                     let text = String::from_utf8_lossy(&raw).into_owned();
                     if let Some((head, body)) = text.split_once("\r\n\r\n") {
                         let length = head
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
                             .unwrap_or(0);
                         if body.len() >= length {
                             break text;
@@ -477,18 +587,27 @@ mod tests {
                 let (status, body) = if request.starts_with("GET ") {
                     ("200 OK", DESCRIPTION_XML.to_owned())
                 } else if request.contains("#GetExternalIPAddress") {
-                    ("200 OK", format!("<NewExternalIPAddress>{external}</NewExternalIPAddress>"))
+                    (
+                        "200 OK",
+                        format!("<NewExternalIPAddress>{external}</NewExternalIPAddress>"),
+                    )
                 } else if request.contains("#AddPortMapping") {
                     let port = value_of(&request, "NewExternalPort").unwrap_or_default();
                     let lease = value_of(&request, "NewLeaseDuration").unwrap_or_default();
                     if refuse_leases && lease != "0" {
                         ("500 Internal Server Error", "<errorCode>725</errorCode><errorDescription>OnlyPermanentLeasesSupported</errorDescription>".to_owned())
                     } else {
-                        log.lock().unwrap().push(format!("add {port} to {} lease {lease}", value_of(&request, "NewInternalClient").unwrap_or_default()));
+                        log.lock().unwrap().push(format!(
+                            "add {port} to {} lease {lease}",
+                            value_of(&request, "NewInternalClient").unwrap_or_default()
+                        ));
                         ("200 OK", String::new())
                     }
                 } else if request.contains("#DeletePortMapping") {
-                    log.lock().unwrap().push(format!("delete {}", value_of(&request, "NewExternalPort").unwrap_or_default()));
+                    log.lock().unwrap().push(format!(
+                        "delete {}",
+                        value_of(&request, "NewExternalPort").unwrap_or_default()
+                    ));
                     ("200 OK", String::new())
                 } else {
                     ("404 Not Found", String::new())
@@ -508,7 +627,12 @@ mod tests {
         drop(mapping);
         assert_eq!(
             *asked.lock().unwrap(),
-            ["add 5060 to 127.0.0.1 lease 86400", "add 16504 to 127.0.0.1 lease 86400", "delete 5060", "delete 16504"]
+            [
+                "add 5060 to 127.0.0.1 lease 86400",
+                "add 16504 to 127.0.0.1 lease 86400",
+                "delete 5060",
+                "delete 16504"
+            ]
         );
     }
 
@@ -535,14 +659,32 @@ mod tests {
                 }
                 let (control, service) = (mapping.control.clone(), mapping.service.clone());
                 let entry = |port: &str| {
-                    soap(&control, &service, "GetSpecificPortMappingEntry", &[("NewRemoteHost", ""), ("NewExternalPort", port), ("NewProtocol", "UDP")])
+                    soap(
+                        &control,
+                        &service,
+                        "GetSpecificPortMappingEntry",
+                        &[
+                            ("NewRemoteHost", ""),
+                            ("NewExternalPort", port),
+                            ("NewProtocol", "UDP"),
+                        ],
+                    )
                 };
-                assert!(entry("45062").is_ok(), "the router does not list the port it said it opened");
+                assert!(
+                    entry("45062").is_ok(),
+                    "the router does not list the port it said it opened"
+                );
                 drop(mapping);
-                assert!(entry("45062").is_err(), "the port is still open after it was closed");
+                assert!(
+                    entry("45062").is_err(),
+                    "the port is still open after it was closed"
+                );
                 println!("UPNP the port was listed while open and gone once closed");
             }
-            Err(why) => println!("UPNP failed in {:.1} s: {why}", began.elapsed().as_secs_f64()),
+            Err(why) => println!(
+                "UPNP failed in {:.1} s: {why}",
+                began.elapsed().as_secs_f64()
+            ),
         }
     }
 

@@ -46,7 +46,9 @@ impl End {
     /// Feed line bits in, decoding and dispatching any frames they carry.
     fn receive(&mut self, bits: &[bool]) {
         for &bit in bits {
-            let Some(result) = self.decoder.feed(bit) else { continue };
+            let Some(result) = self.decoder.feed(bit) else {
+                continue;
+            };
             let Ok(body) = result else { continue }; // damaged frames are dropped
             let Ok((address, frame)) = Frame::decode(&body, self.role) else {
                 continue;
@@ -76,7 +78,9 @@ impl End {
         let mut decoder = Decoder::new(Fcs::Bits16);
         let mut out = Vec::new();
         for bit in bits {
-            let Some(Ok(body)) = decoder.feed(bit) else { continue };
+            let Some(Ok(body)) = decoder.feed(bit) else {
+                continue;
+            };
             if let Ok((address, frame)) = Frame::decode(&body, self.role.peer()) {
                 out.push((address.kind, frame));
             }
@@ -363,7 +367,9 @@ impl FullStack {
             return;
         }
         let wire = std::mem::take(&mut self.end.received);
-        self.decoder.decode(&wire, &mut self.plain).expect("decompression failed");
+        self.decoder
+            .decode(&wire, &mut self.plain)
+            .expect("decompression failed");
     }
 }
 
@@ -420,7 +426,10 @@ fn compression_survives_a_damaged_link() {
     });
     a.collect();
     b.collect();
-    assert_eq!(b.plain, text, "a damaged link corrupted the compressed stream");
+    assert_eq!(
+        b.plain, text,
+        "a damaged link corrupted the compressed stream"
+    );
 }
 
 #[test]
@@ -476,14 +485,23 @@ fn negotiation_settles_the_parameters_both_ends_use() {
     a.end.lapm.connect();
     settle_stack(&mut a, &mut b);
 
-    let text: Vec<u8> = b"negotiated parameters ".iter().copied().cycle().take(12_000).collect();
+    let text: Vec<u8> = b"negotiated parameters "
+        .iter()
+        .copied()
+        .cycle()
+        .take(12_000)
+        .collect();
     a.send(&text);
     settle_stack(&mut a, &mut b);
     assert_eq!(b.plain, text);
     // V.42bis 6.4: "the lower value shall be selected and assigned to N2 in
     // both DCEs". Which here is this end's own proposal, not the minimum --
     // and that is the point of proposing something above the minimum.
-    assert_eq!(params.n2, ec::v42bis::OFFERED_N2, "the lower value should win");
+    assert_eq!(
+        params.n2,
+        ec::v42bis::OFFERED_N2,
+        "the lower value should win"
+    );
     assert_eq!(params.n7, 32, "and for the string length too");
 }
 
@@ -498,9 +516,19 @@ fn a_parameter_nobody_sent_is_the_one_its_recommendation_gives() {
     // agreement would build a dictionary of 2048 entries against one of 512,
     // and every codeword above 512 would decode to something else entirely.
     let ours = Xid::proposal(Compression::Both);
-    let silent = Xid { compression: Some(Compression::Both), ..Xid::default() };
-    let params = ours.resolve(&silent).v42bis_params().expect("compression is on");
-    assert_eq!(params.n2, ec::v42bis::DEFAULT_N2, "512 is what silence means");
+    let silent = Xid {
+        compression: Some(Compression::Both),
+        ..Xid::default()
+    };
+    let params = ours
+        .resolve(&silent)
+        .v42bis_params()
+        .expect("compression is on");
+    assert_eq!(
+        params.n2,
+        ec::v42bis::DEFAULT_N2,
+        "512 is what silence means"
+    );
     assert_eq!(params.n7, ec::v42bis::DEFAULT_N7);
 
     // And the same for the parameters of the link underneath it.
@@ -715,11 +743,7 @@ fn the_protocol_phase_opens_with_sixteen_flags() {
         32,
         "sixteen flags carry thirty-two zeros, at any alignment"
     );
-    let longest = sent
-        .split(|b| !*b)
-        .map(<[bool]>::len)
-        .max()
-        .unwrap_or(0);
+    let longest = sent.split(|b| !*b).map(<[bool]>::len).max().unwrap_or(0);
     assert!(longest <= 6, "a run of {longest} ones is not flags");
 }
 
@@ -764,10 +788,17 @@ fn every_repeated_xid_command_is_answered() {
         // bit arriving or the clock, and the clock has already run.
         stack.feed_bit(true);
     }
-    assert_eq!(stack.phase(), ec::stack::Phase::Negotiating, "never left detection");
+    assert_eq!(
+        stack.phase(),
+        ec::stack::Phase::Negotiating,
+        "never left detection"
+    );
 
-    let command = Frame::Xid { pf: false, info: Xid::proposal(Compression::Both).encode(Kind::Command) }
-        .encode(DLCI_DATA, Role::Originator, Kind::Command);
+    let command = Frame::Xid {
+        pf: false,
+        info: Xid::proposal(Compression::Both).encode(Kind::Command),
+    }
+    .encode(DLCI_DATA, Role::Originator, Kind::Command);
     let mut encoder = Encoder::new(Fcs::Bits16);
     let mut answers = 0;
     for round in 0..3 {
@@ -780,8 +811,13 @@ fn every_repeated_xid_command_is_answered() {
                 // Responses only. This end sends XID *commands* of its own
                 // while it is negotiating, and counting those would make the
                 // test pass on a stack that never replied at all.
-                if let Ok((Address { kind: Kind::Response, .. }, Frame::Xid { .. })) =
-                    Frame::decode(&body, Role::Originator)
+                if let Ok((
+                    Address {
+                        kind: Kind::Response,
+                        ..
+                    },
+                    Frame::Xid { .. },
+                )) = Frame::decode(&body, Role::Originator)
                 {
                     answers += 1;
                 }
@@ -791,8 +827,13 @@ fn every_repeated_xid_command_is_answered() {
         // Drain the reply, which is queued behind whatever was already going.
         for _ in 0..4096 {
             if let Some(Ok(body)) = decoder.feed(stack.next_bit())
-                && let Ok((Address { kind: Kind::Response, .. }, Frame::Xid { .. })) =
-                    Frame::decode(&body, Role::Originator)
+                && let Ok((
+                    Address {
+                        kind: Kind::Response,
+                        ..
+                    },
+                    Frame::Xid { .. },
+                )) = Frame::decode(&body, Role::Originator)
             {
                 answers += 1;
             }
@@ -824,7 +865,11 @@ fn a_connection_that_agreed_thirty_two_bits_uses_them() {
         }
     }
     assert!(a.is_connected() && b.is_connected(), "never established");
-    assert_eq!(a.fcs(), ec::hdlc::Fcs::Bits32, "the originator stayed at 16");
+    assert_eq!(
+        a.fcs(),
+        ec::hdlc::Fcs::Bits32,
+        "the originator stayed at 16"
+    );
     assert_eq!(b.fcs(), ec::hdlc::Fcs::Bits32, "the answerer stayed at 16");
 
     // And it still carries data, which is the only thing that proves both ends
@@ -879,13 +924,15 @@ fn thirty_two_bits_needs_both_ends_to_have_asked() {
     // two does not carry anything at all.
     use ec::xid::{Compression, Xid};
     let asking = Xid::proposal(Compression::Both);
-    let silent = Xid { fcs32: false, ..Xid::proposal(Compression::Both) };
+    let silent = Xid {
+        fcs32: false,
+        ..Xid::proposal(Compression::Both)
+    };
     assert!(asking.fcs32, "this end should be asking for it");
     assert!(asking.resolve(&asking).fcs32, "both asked");
     assert!(!asking.resolve(&silent).fcs32, "the far end did not");
     assert!(!silent.resolve(&asking).fcs32, "this end did not");
 }
-
 
 #[test]
 fn an_originator_that_skips_detection_is_still_answered() {
@@ -967,7 +1014,10 @@ fn a_terminals_ceiling_on_the_dictionary_reaches_the_far_end() {
             break;
         }
     }
-    assert!(a.compressing() && b.compressing(), "compression never came up");
+    assert!(
+        a.compressing() && b.compressing(),
+        "compression never came up"
+    );
 
     // Both ends have to have built the same dictionary, and the only way to
     // show that is to put something through it.
@@ -1028,7 +1078,10 @@ fn the_acknowledgement_timer_follows_the_line_rate() {
     // command frame it sends -- and three seconds a try, which is what this
     // was, is nine seconds of a terminal being told nothing on a connection
     // that is up and working.
-    assert!(t401_for(2400) > 1280, "shorter than a real line's round trip");
+    assert!(
+        t401_for(2400) > 1280,
+        "shorter than a real line's round trip"
+    );
     assert!(
         t401_for(2400) * 3 < 5000,
         "three attempts at 2400 should not take five seconds"
@@ -1042,7 +1095,10 @@ fn the_acknowledgement_timer_allows_for_a_line_it_has_measured() {
     // The call this is from: V.34 put the line at 1125 ms and the far end took
     // 1.19 s to answer a SABME at 28 800 bit/s. The unmeasured timer sent the
     // SABME again before the answer could arrive; the measured one must not.
-    assert!(t401_for(28_800) < 1190, "the unmeasured timer was long enough after all");
+    assert!(
+        t401_for(28_800) < 1190,
+        "the unmeasured timer was long enough after all"
+    );
     assert!(
         t401_for_line(28_800, 1125) > 1190,
         "{} ms still sends the SABME twice",
@@ -1084,7 +1140,10 @@ fn compression_survives_being_handed_data_a_byte_at_a_time() {
             break;
         }
     }
-    assert!(a.compressing() && b.compressing(), "compression never came up");
+    assert!(
+        a.compressing() && b.compressing(),
+        "compression never came up"
+    );
 
     let text: Vec<u8> = b"MAIN MENU\r\n[1] Messages\r\n[2] Files\r\n[3] Doors\r\n"
         .iter()

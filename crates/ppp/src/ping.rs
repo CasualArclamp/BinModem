@@ -164,7 +164,10 @@ impl Pinger {
             return false;
         }
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.outstanding.push(Outstanding { sequence, sent_at: self.clock });
+        self.outstanding.push(Outstanding {
+            sequence,
+            sent_at: self.clock,
+        });
         self.stats.sent += 1;
         self.since_sent = 0;
         self.waiting = false;
@@ -221,7 +224,10 @@ impl Pinger {
         let sent_at = self.outstanding.remove(at).sent_at;
         let round_trip_ms = self.clock.saturating_sub(sent_at);
         self.stats.answered(round_trip_ms);
-        self.events.push(Event::Reply { sequence: arrived.echo.sequence, round_trip_ms });
+        self.events.push(Event::Reply {
+            sequence: arrived.echo.sequence,
+            round_trip_ms,
+        });
         true
     }
 
@@ -271,7 +277,12 @@ mod tests {
         b.open();
         let mut idle = Pinger::new(0);
         together(&mut a, &mut b, &mut idle, 200);
-        assert!(a.up() && b.up(), "the link did not come up: {:?} {:?}", a.phase(), b.phase());
+        assert!(
+            a.up() && b.up(),
+            "the link did not come up: {:?} {:?}",
+            a.phase(),
+            b.phase()
+        );
         (a, b)
     }
 
@@ -287,7 +298,10 @@ mod tests {
 
         // One straight away and one every hundred milliseconds after it.
         assert_eq!(pinger.stats.sent, 10, "sent {}", pinger.stats.sent);
-        assert_eq!(pinger.stats.received, pinger.stats.sent, "not all came back");
+        assert_eq!(
+            pinger.stats.received, pinger.stats.sent,
+            "not all came back"
+        );
         assert_eq!(pinger.stats.lost, 0);
         assert_eq!(pinger.stats.loss(), 0.0);
     }
@@ -302,7 +316,11 @@ mod tests {
         // The two ends here are wired together with nothing in between, so a
         // round trip is a round of the loop each way. What matters is that it
         // is measured at all and comes out small rather than absurd.
-        assert!(pinger.stats.last_ms <= 4, "took {} ms", pinger.stats.last_ms);
+        assert!(
+            pinger.stats.last_ms <= 4,
+            "took {} ms",
+            pinger.stats.last_ms
+        );
         assert_eq!(pinger.stats.best_ms, pinger.stats.last_ms);
         assert_eq!(pinger.stats.average_ms(), Some(pinger.stats.last_ms as f64));
     }

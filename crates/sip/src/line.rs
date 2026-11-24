@@ -445,7 +445,10 @@ impl Line {
             ));
         }
         if stats.clock_ppm.abs() >= 1.0 {
-            said.push(format!("sip: the far end's clock ran {:+.0} ppm from ours", stats.clock_ppm));
+            said.push(format!(
+                "sip: the far end's clock ran {:+.0} ppm from ours",
+                stats.clock_ppm
+            ));
         }
         if stats.jitter.overflowed > 0 {
             said.push(format!(
@@ -508,13 +511,19 @@ impl Line {
                 negotiated.channels,
             );
         } else {
-            self.media.connect(remote, negotiated.law, negotiated.payload_type, negotiated.ptime_ms);
+            self.media.connect(
+                remote,
+                negotiated.law,
+                negotiated.payload_type,
+                negotiated.ptime_ms,
+            );
         }
         // `Negotiated::direction` is ours, not theirs -- `sdp` has already
         // flipped it -- so receive-only here means the far end will not
         // listen, and inactive means neither end will. Either way our
         // transmitter has no business being on.
-        self.sending.store(may_send(negotiated.direction), Ordering::Relaxed);
+        self.sending
+            .store(may_send(negotiated.direction), Ordering::Relaxed);
         Ok(remote)
     }
 
@@ -602,11 +611,11 @@ impl Line {
             underruns_mid_call: stats.underruns_mid_call,
             inserted: stats.inserted,
             starved: stats.jitter.starved,
-            last_error: self
-                .error
-                .lock()
-                .ok()
-                .and_then(|e| e.as_ref().filter(|(_, at)| at.elapsed() < ERROR_SHOWN).map(|(text, _)| text.clone())),
+            last_error: self.error.lock().ok().and_then(|e| {
+                e.as_ref()
+                    .filter(|(_, at)| at.elapsed() < ERROR_SHOWN)
+                    .map(|(text, _)| text.clone())
+            }),
         }
     }
 }
@@ -670,7 +679,9 @@ fn resolve_media(address: &str, port: u16) -> Result<SocketAddr, String> {
     }
     match resolved.first() {
         Some(only) => Err(ipv4_only(address, Some(*only))),
-        None => Err(format!("the far end's media address {address:?} resolved to nothing")),
+        None => Err(format!(
+            "the far end's media address {address:?} resolved to nothing"
+        )),
     }
 }
 
@@ -704,7 +715,10 @@ mod tests {
     #[test]
     fn a_host_name_is_looked_up_rather_than_refused() {
         let found = resolve_media("localhost", 40000).expect("localhost did not resolve");
-        assert!(found.is_ipv4(), "the IPv4 answer was not preferred: {found}");
+        assert!(
+            found.is_ipv4(),
+            "the IPv4 answer was not preferred: {found}"
+        );
         assert!(found.ip().is_loopback(), "that is not localhost: {found}");
         assert_eq!(found.port(), 40000);
     }

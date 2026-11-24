@@ -41,7 +41,10 @@ impl ReedSolomon {
     /// `parity` erasures or any mixture where twice the errors plus the
     /// erasures is no more than `parity`.
     pub fn new(parity: usize) -> Self {
-        assert!((2..MAX_BLOCK).contains(&parity), "check octets out of range");
+        assert!(
+            (2..MAX_BLOCK).contains(&parity),
+            "check octets out of range"
+        );
         let mut exp = [0u8; 512];
         let mut log = [0u8; 256];
         let mut x: u16 = 1;
@@ -56,7 +59,12 @@ impl ReedSolomon {
         for i in 255..512 {
             exp[i] = exp[i - 255];
         }
-        let mut code = Self { parity, exp, log, generator: Vec::new() };
+        let mut code = Self {
+            parity,
+            exp,
+            log,
+            generator: Vec::new(),
+        };
         // g(x) = (x - a^0)(x - a^1)...(x - a^(2t-1)), built lowest power
         // first and then turned round.
         let mut g = vec![1u8];
@@ -264,7 +272,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) as u32
         }
         fn below(&mut self, n: usize) -> usize {
@@ -314,7 +325,10 @@ mod tests {
                     for p in positions(&mut rng, n, errors.min(n)) {
                         got[p] ^= 1 + rng.below(255) as u8;
                     }
-                    assert!(code.decode(&mut got, &[]).is_ok(), "parity {parity} n {n} errors {errors}");
+                    assert!(
+                        code.decode(&mut got, &[]).is_ok(),
+                        "parity {parity} n {n} errors {errors}"
+                    );
                     assert_eq!(got, sent, "parity {parity} n {n} errors {errors}");
                 }
             }
@@ -355,7 +369,10 @@ mod tests {
                 for &p in wrong {
                     got[p] ^= 1 + rng.below(255) as u8;
                 }
-                assert!(code.decode(&mut got, gone).is_ok(), "{erased} erased, {errors} wrong");
+                assert!(
+                    code.decode(&mut got, gone).is_ok(),
+                    "{erased} erased, {errors} wrong"
+                );
                 assert_eq!(got, sent, "{erased} erased, {errors} wrong");
             }
         }

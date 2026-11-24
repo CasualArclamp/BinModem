@@ -21,7 +21,9 @@ use std::path::PathBuf;
 pub fn path() -> PathBuf {
     let name = "crashes.txt";
     match std::env::current_exe() {
-        Ok(exe) => exe.parent().map_or_else(|| PathBuf::from(name), |d| d.join(name)),
+        Ok(exe) => exe
+            .parent()
+            .map_or_else(|| PathBuf::from(name), |d| d.join(name)),
         Err(_) => PathBuf::from(name),
     }
 }

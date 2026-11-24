@@ -245,7 +245,11 @@ impl V44Offer {
     /// Everything this implementation will do.
     pub fn proposal(compression: Compression) -> Self {
         let params = v44::Params::of(v44::OFFERED_N2, v44::OFFERED_N7);
-        Self { compression, transmit: params, receive: params }
+        Self {
+            compression,
+            transmit: params,
+            receive: params,
+        }
     }
 
     /// Settle this end's proposal against the far end's.
@@ -267,7 +271,11 @@ impl V44Offer {
         if !transmit.valid() || !receive.valid() {
             return None;
         }
-        Some(Self { compression, transmit, receive })
+        Some(Self {
+            compression,
+            transmit,
+            receive,
+        })
     }
 }
 
@@ -348,7 +356,11 @@ impl Xid {
             let mut private = Vec::new();
             // Note 2: the parameter set identifier always comes first.
             push_param(&mut private, private_pi::PARAMETER_SET, &PARAMETER_SET_V42);
-            push_param(&mut private, private_pi::COMPRESSION_REQUEST, &[compression.to_bits()]);
+            push_param(
+                &mut private,
+                private_pi::COMPRESSION_REQUEST,
+                &[compression.to_bits()],
+            );
             if let Some(n2) = self.codewords {
                 push_param(&mut private, private_pi::CODEWORDS, &n2.to_be_bytes());
             }
@@ -365,12 +377,28 @@ impl Xid {
             push_param(&mut user, user_pi::PARAMETER_SET, &PARAMETER_SET_V44);
             push_param(&mut user, user_pi::CAPABILITY, &[CAPABILITY_MODEM]);
             push_param(&mut user, user_pi::REQUEST, &[v44.compression.to_bits()]);
-            push_param(&mut user, user_pi::CODEWORDS_TRANSMIT, &v44.transmit.n2.to_be_bytes());
-            push_param(&mut user, user_pi::CODEWORDS_RECEIVE, &v44.receive.n2.to_be_bytes());
+            push_param(
+                &mut user,
+                user_pi::CODEWORDS_TRANSMIT,
+                &v44.transmit.n2.to_be_bytes(),
+            );
+            push_param(
+                &mut user,
+                user_pi::CODEWORDS_RECEIVE,
+                &v44.receive.n2.to_be_bytes(),
+            );
             push_param(&mut user, user_pi::MAX_STRING_TRANSMIT, &[v44.transmit.n7]);
             push_param(&mut user, user_pi::MAX_STRING_RECEIVE, &[v44.receive.n7]);
-            push_param(&mut user, user_pi::HISTORY_TRANSMIT, &v44.transmit.n8.to_be_bytes());
-            push_param(&mut user, user_pi::HISTORY_RECEIVE, &v44.receive.n8.to_be_bytes());
+            push_param(
+                &mut user,
+                user_pi::HISTORY_TRANSMIT,
+                &v44.transmit.n8.to_be_bytes(),
+            );
+            push_param(
+                &mut user,
+                user_pi::HISTORY_RECEIVE,
+                &v44.receive.n8.to_be_bytes(),
+            );
             // No group length. With one, a far end reading this as V.42
             // describes saw a parameter 0x00 of 33 octets, which is to say
             // nothing at all, and never learnt that V.44 was on offer.
@@ -801,7 +829,10 @@ mod tests {
     #[test]
     fn n401_is_carried_in_bits_not_octets() {
         // V.42 12.2.2 Note 3.
-        let xid = Xid { n401_transmit: Some(128), ..Default::default() };
+        let xid = Xid {
+            n401_transmit: Some(128),
+            ..Default::default()
+        };
         let bytes = xid.encode(Kind::Command);
         let at = bytes
             .windows(2)
@@ -861,7 +892,11 @@ mod tests {
     #[test]
     fn the_hdlc_mask_sets_the_positions_the_encoding_rules_demand() {
         // V.42 12.2.2 Note 1.
-        let mask = Xid { test_frame: false, ..Default::default() }.hdlc_mask(Kind::Command);
+        let mask = Xid {
+            test_frame: false,
+            ..Default::default()
+        }
+        .hdlc_mask(Kind::Command);
         for bit in hdlc_bit::REQUIRED {
             assert!(mask & (1 << (bit - 1)) != 0, "bit {bit} should be set");
         }
@@ -877,14 +912,27 @@ mod tests {
         // has agreed to 32 bits: this end cleared the bit in its commands as
         // well, so a command asking for 32 went out looking like an answer
         // agreeing to them.
-        let wide = Xid { fcs32: true, ..Default::default() };
+        let wide = Xid {
+            fcs32: true,
+            ..Default::default()
+        };
         let response = wide.hdlc_mask(Kind::Response);
         assert!(response & (1 << 16) != 0, "bit 17 should be set");
         assert!(response & (1 << 15) == 0, "bit 16 should have been cleared");
         let command = wide.hdlc_mask(Kind::Command);
-        assert!(command & (1 << 16) != 0, "bit 17 should be set in a command too");
-        assert!(command & (1 << 15) != 0, "a command asking for 32 bits cleared bit 16");
-        let narrow = Xid { fcs32: false, ..Default::default() }.hdlc_mask(Kind::Response);
+        assert!(
+            command & (1 << 16) != 0,
+            "bit 17 should be set in a command too"
+        );
+        assert!(
+            command & (1 << 15) != 0,
+            "a command asking for 32 bits cleared bit 16"
+        );
+        let narrow = Xid {
+            fcs32: false,
+            ..Default::default()
+        }
+        .hdlc_mask(Kind::Response);
         assert!(narrow & (1 << 15) != 0, "bit 16 cleared without bit 17");
     }
 
@@ -894,10 +942,15 @@ mod tests {
         let command = xid.encode(Kind::Command);
         let response = xid.encode(Kind::Response);
         assert_eq!(Xid::decode(&command), Xid::decode(&response));
-        let differing: Vec<usize> =
-            (0..command.len()).filter(|&i| command[i] != response[i]).collect();
+        let differing: Vec<usize> = (0..command.len())
+            .filter(|&i| command[i] != response[i])
+            .collect();
         assert_eq!(differing.len(), 1, "{command:02x?} against {response:02x?}");
-        assert_eq!(command[differing[0]] ^ response[differing[0]], 0x80, "not bit 16");
+        assert_eq!(
+            command[differing[0]] ^ response[differing[0]],
+            0x80,
+            "not bit 16"
+        );
     }
 
     #[test]
@@ -940,8 +993,16 @@ mod tests {
 
     #[test]
     fn a_capability_needs_both_ends() {
-        let mine = Xid { fcs32: true, test_frame: true, ..Default::default() };
-        let theirs = Xid { fcs32: false, test_frame: true, ..Default::default() };
+        let mine = Xid {
+            fcs32: true,
+            test_frame: true,
+            ..Default::default()
+        };
+        let theirs = Xid {
+            fcs32: false,
+            test_frame: true,
+            ..Default::default()
+        };
         let agreed = mine.resolve(&theirs);
         assert!(!agreed.fcs32, "one end declining should settle it");
         assert!(agreed.test_frame);
@@ -953,7 +1014,10 @@ mod tests {
             compression: Some(Compression::InitiatorToResponder),
             ..Default::default()
         };
-        let both = Xid { compression: Some(Compression::Both), ..Default::default() };
+        let both = Xid {
+            compression: Some(Compression::Both),
+            ..Default::default()
+        };
         assert_eq!(
             one_way.resolve(&both).compression,
             Some(Compression::InitiatorToResponder)
@@ -982,7 +1046,10 @@ mod tests {
         assert_eq!(params.n2, 1024);
         assert_eq!(params.n7, 16);
 
-        let off = Xid { compression: Some(Compression::Neither), ..Default::default() };
+        let off = Xid {
+            compression: Some(Compression::Neither),
+            ..Default::default()
+        };
         assert!(off.v42bis_params().is_none());
     }
 
@@ -1031,7 +1098,10 @@ mod tests {
         push_subfield(&mut bytes, GI_PRIVATE, &private);
 
         let decoded = Xid::decode(&bytes).unwrap();
-        assert_eq!(decoded.codewords, None, "another standard's value was taken");
+        assert_eq!(
+            decoded.codewords, None,
+            "another standard's value was taken"
+        );
     }
 
     #[test]
@@ -1065,7 +1135,11 @@ mod tests {
         // to set positions 2, 4, 8, 9, 12 and 16 whatever it supports, and 3
         // is the one gap in that run -- the position left for the option the
         // note is describing.
-        let mask = Xid { srej_single: true, ..Default::default() }.hdlc_mask(Kind::Command);
+        let mask = Xid {
+            srej_single: true,
+            ..Default::default()
+        }
+        .hdlc_mask(Kind::Command);
         assert_eq!(mask & !required_mask(), 1 << 2, "bit 3 counting from one");
     }
 
@@ -1076,7 +1150,10 @@ mod tests {
         // the connection. Sending one uninvited does not degrade the link, it
         // drops it.
         let asking = Xid::proposal(Compression::Both);
-        let silent = Xid { srej_single: false, ..Xid::proposal(Compression::Both) };
+        let silent = Xid {
+            srej_single: false,
+            ..Xid::proposal(Compression::Both)
+        };
         assert!(asking.srej_single, "this end should be offering it");
         assert!(asking.resolve(&asking).srej_single, "both offered");
         assert!(!asking.resolve(&silent).srej_single, "the far end did not");
@@ -1121,16 +1198,29 @@ mod tests {
             }
         );
         let caller = Xid::decode(CALLER_XID).expect("the caller's XID was refused");
-        let offer = v44::Params { n2: 2048, n7: 142, n8: 8192 };
+        let offer = v44::Params {
+            n2: 2048,
+            n7: 142,
+            n8: 8192,
+        };
         assert_eq!(
             caller,
             Xid {
-                v44: Some(V44Offer { compression: Compression::Both, transmit: offer, receive: offer }),
+                v44: Some(V44Offer {
+                    compression: Compression::Both,
+                    transmit: offer,
+                    receive: offer
+                }),
                 ..host
             }
         );
         // And answered, this end would have agreed V.44 with it.
-        assert!(Xid::proposal(Compression::Both).resolve(&caller).v44.is_some());
+        assert!(
+            Xid::proposal(Compression::Both)
+                .resolve(&caller)
+                .v44
+                .is_some()
+        );
     }
 
     #[test]
@@ -1150,7 +1240,11 @@ mod tests {
         // which by 12.2.2 is ignored: the XID is still an XID, and the far end
         // has asked for none of the options.
         let empty = field(&[]).expect("an empty option mask was refused");
-        assert_eq!(empty, Xid::default(), "an empty mask was read as saying something");
+        assert_eq!(
+            empty,
+            Xid::default(),
+            "an empty mask was read as saying something"
+        );
     }
 
     /// And a longer one for the four octets Table 11a Note 1 defines.
@@ -1176,8 +1270,15 @@ mod tests {
         assert!(heard.fcs32, "bit 17 was not read");
         // Nothing past the fourth octet reaches anything: bit 24 is the last
         // position the note gives a meaning, and it is in the third.
-        assert!(!heard.srej_multiple, "a bit past the mask was read as bit 24");
-        assert_eq!(heard, field(&[0x04, 0, 0x01, 0]), "the extra octets changed the reading");
+        assert!(
+            !heard.srej_multiple,
+            "a bit past the mask was read as bit 24"
+        );
+        assert_eq!(
+            heard,
+            field(&[0x04, 0, 0x01, 0]),
+            "the extra octets changed the reading"
+        );
     }
 
     /// An item in a width its own entry does not allow costs only itself.
@@ -1201,10 +1302,23 @@ mod tests {
         push_subfield(&mut bytes, GI_PARAMETER, &params);
         let heard = Xid::decode(&bytes).expect("one odd parameter refused the whole XID");
 
-        assert_eq!(heard.n401_transmit, None, "a three-octet N401 was read anyway");
-        assert_eq!(heard.window_receive, None, "a four-octet window size was read anyway");
-        assert_eq!(heard.n401_receive, Some(128), "the parameter beside them was lost with them");
-        assert!(heard.fcs32, "the option mask beside them was lost with them");
+        assert_eq!(
+            heard.n401_transmit, None,
+            "a three-octet N401 was read anyway"
+        );
+        assert_eq!(
+            heard.window_receive, None,
+            "a four-octet window size was read anyway"
+        );
+        assert_eq!(
+            heard.n401_receive,
+            Some(128),
+            "the parameter beside them was lost with them"
+        );
+        assert!(
+            heard.fcs32,
+            "the option mask beside them was lost with them"
+        );
 
         // And what was not conveyed settles at the Recommendation's default
         // rather than at whatever this end proposed.
@@ -1222,7 +1336,10 @@ mod tests {
     fn an_absent_parameter_stays_absent() {
         // V.42 12.2.2 Note 3: absence leaves a previously negotiated value
         // unchanged, so it must be distinguishable from a value of zero.
-        let sparse = Xid { window_receive: Some(7), ..Default::default() };
+        let sparse = Xid {
+            window_receive: Some(7),
+            ..Default::default()
+        };
         let back = Xid::decode(&sparse.encode(Kind::Command)).unwrap();
         assert_eq!(back.window_receive, Some(7));
         assert_eq!(back.window_transmit, None);
@@ -1279,15 +1396,9 @@ mod v44_negotiation {
         push_subfield(&mut bytes, GI_PARAMETER, &params);
         bytes.extend_from_slice(&[
             0xff, // GI 11111111
-            0x40, 0x03, b'V', b'4', b'4',
-            0x41, 0x01, 0x00,
-            0x42, 0x01, 0x03,
-            0x43, 0x02, 0x08, 0x00,
-            0x44, 0x02, 0x04, 0x00,
-            0x45, 0x01, 0xff,
-            0x46, 0x01, 0x40,
-            0x47, 0x02, 0x18, 0x00,
-            0x48, 0x02, 0x0c, 0x00,
+            0x40, 0x03, b'V', b'4', b'4', 0x41, 0x01, 0x00, 0x42, 0x01, 0x03, 0x43, 0x02, 0x08,
+            0x00, 0x44, 0x02, 0x04, 0x00, 0x45, 0x01, 0xff, 0x46, 0x01, 0x40, 0x47, 0x02, 0x18,
+            0x00, 0x48, 0x02, 0x0c, 0x00,
         ]);
         let xid = Xid::decode(&bytes).expect("did not decode");
         assert_eq!(xid.window_transmit, Some(15));
@@ -1295,8 +1406,16 @@ mod v44_negotiation {
             xid.v44,
             Some(V44Offer {
                 compression: Compression::Both,
-                transmit: v44::Params { n2: 2048, n7: 255, n8: 6144 },
-                receive: v44::Params { n2: 1024, n7: 64, n8: 3072 },
+                transmit: v44::Params {
+                    n2: 2048,
+                    n7: 255,
+                    n8: 6144
+                },
+                receive: v44::Params {
+                    n2: 1024,
+                    n7: 64,
+                    n8: 3072
+                },
             })
         );
     }
@@ -1320,8 +1439,16 @@ mod v44_negotiation {
         let mut xid = Xid::proposal(Compression::Both);
         xid.v44 = Some(V44Offer {
             compression: Compression::InitiatorToResponder,
-            transmit: v44::Params { n2: 4096, n7: 200, n8: 9000 },
-            receive: v44::Params { n2: 1024, n7: 64, n8: 3072 },
+            transmit: v44::Params {
+                n2: 4096,
+                n7: 200,
+                n8: 9000,
+            },
+            receive: v44::Params {
+                n2: 1024,
+                n7: 64,
+                n8: 3072,
+            },
         });
         let back = Xid::decode(&xid.encode(Kind::Command)).expect("did not decode");
         assert_eq!(back.v44, xid.v44);
@@ -1350,19 +1477,49 @@ mod v44_negotiation {
     fn each_direction_is_settled_against_the_other_ends_opposite() {
         let mine = V44Offer {
             compression: Compression::Both,
-            transmit: v44::Params { n2: 4096, n7: 255, n8: 12288 },
-            receive: v44::Params { n2: 4096, n7: 255, n8: 12288 },
+            transmit: v44::Params {
+                n2: 4096,
+                n7: 255,
+                n8: 12288,
+            },
+            receive: v44::Params {
+                n2: 4096,
+                n7: 255,
+                n8: 12288,
+            },
         };
         let theirs = V44Offer {
             compression: Compression::Both,
             // What they will send, and so what this end must read.
-            transmit: v44::Params { n2: 512, n7: 64, n8: 1536 },
+            transmit: v44::Params {
+                n2: 512,
+                n7: 64,
+                n8: 1536,
+            },
             // What they can read, and so what this end may send.
-            receive: v44::Params { n2: 1024, n7: 100, n8: 3072 },
+            receive: v44::Params {
+                n2: 1024,
+                n7: 100,
+                n8: 3072,
+            },
         };
         let agreed = mine.resolve(theirs).expect("they did not agree");
-        assert_eq!(agreed.transmit, v44::Params { n2: 1024, n7: 100, n8: 3072 });
-        assert_eq!(agreed.receive, v44::Params { n2: 512, n7: 64, n8: 1536 });
+        assert_eq!(
+            agreed.transmit,
+            v44::Params {
+                n2: 1024,
+                n7: 100,
+                n8: 3072
+            }
+        );
+        assert_eq!(
+            agreed.receive,
+            v44::Params {
+                n2: 512,
+                n7: 64,
+                n8: 1536
+            }
+        );
     }
 
     /// A far end that has never heard of V.44 leaves the subfield out, and
@@ -1373,7 +1530,10 @@ mod v44_negotiation {
         let mut theirs = Xid::proposal(Compression::Both);
         theirs.v44 = None;
         let agreed = mine.resolve(&theirs);
-        assert_eq!(agreed.v44, None, "V.44 was agreed with an end that never offered it");
+        assert_eq!(
+            agreed.v44, None,
+            "V.44 was agreed with an end that never offered it"
+        );
         assert!(agreed.v42bis_params().is_some(), "V.42bis was lost as well");
     }
 
@@ -1398,8 +1558,16 @@ mod v44_negotiation {
         let mine = V44Offer::proposal(Compression::Both);
         let theirs = V44Offer {
             compression: Compression::Both,
-            transmit: v44::Params { n2: 64, n7: 8, n8: 16 },
-            receive: v44::Params { n2: 64, n7: 8, n8: 16 },
+            transmit: v44::Params {
+                n2: 64,
+                n7: 8,
+                n8: 16,
+            },
+            receive: v44::Params {
+                n2: 64,
+                n7: 8,
+                n8: 16,
+            },
         };
         assert_eq!(mine.resolve(theirs), None);
     }
@@ -1412,15 +1580,30 @@ mod v44_negotiation {
     #[test]
     fn a_v42bis_proposal_out_of_range_is_declined_and_the_answer_says_so() {
         let mine = Xid::proposal(Compression::Both);
-        for (codewords, max_string) in [(0, 250), (258, 250), (259, 250), (511, 250), (2048, 5), (2048, 0)] {
+        for (codewords, max_string) in [
+            (0, 250),
+            (258, 250),
+            (259, 250),
+            (511, 250),
+            (2048, 5),
+            (2048, 0),
+        ] {
             let mut theirs = Xid::proposal(Compression::Both);
             theirs.v44 = None;
             theirs.codewords = Some(codewords);
             theirs.max_string = Some(max_string);
             let settled = mine.resolve(&theirs);
-            assert_eq!(settled.v42bis_params(), None, "P1 {codewords}, P2 {max_string} was taken");
+            assert_eq!(
+                settled.v42bis_params(),
+                None,
+                "P1 {codewords}, P2 {max_string} was taken"
+            );
             let answer = mine.answering(&settled);
-            assert_eq!(answer.compression, Some(Compression::Neither), "P1 {codewords}, P2 {max_string}");
+            assert_eq!(
+                answer.compression,
+                Some(Compression::Neither),
+                "P1 {codewords}, P2 {max_string}"
+            );
             assert_eq!(answer.v44, None);
         }
 
@@ -1430,8 +1613,14 @@ mod v44_negotiation {
         theirs.codewords = Some(512);
         theirs.max_string = Some(6);
         let settled = mine.resolve(&theirs);
-        assert_eq!(settled.v42bis_params(), Some(v42bis::Params { n2: 512, n7: 6 }));
-        assert_eq!(mine.answering(&settled).compression, Some(Compression::Both));
+        assert_eq!(
+            settled.v42bis_params(),
+            Some(v42bis::Params { n2: 512, n7: 6 })
+        );
+        assert_eq!(
+            mine.answering(&settled).compression,
+            Some(Compression::Both)
+        );
     }
 
     /// The capability byte a modem sends: Table A.1's "neither packet method

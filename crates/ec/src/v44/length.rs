@@ -107,7 +107,12 @@ mod tests {
         write(length, n7, &mut w, &mut out);
         let pending = w.pending();
         w.align(&mut out);
-        let total = out.len() * 8 - if pending == 0 { 0 } else { 8 - pending as usize };
+        let total = out.len() * 8
+            - if pending == 0 {
+                0
+            } else {
+                8 - pending as usize
+            };
         let mut bits = String::new();
         for i in 0..total {
             let octet = out[i / 8];
@@ -198,7 +203,11 @@ mod tests {
 
         let mut r = BitReader::new();
         r.push_octet(out[0]);
-        assert_eq!(read(&mut r, 255), None, "it read a length that was half here");
+        assert_eq!(
+            read(&mut r, 255),
+            None,
+            "it read a length that was half here"
+        );
         r.push_octet(out[1]);
         assert_eq!(read(&mut r, 255), Some(200));
     }

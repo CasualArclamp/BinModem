@@ -415,7 +415,11 @@ impl PcmTransmitter {
     /// not expect, and the far end's equaliser sees that across the kernel's
     /// whole reach; a jump is one disturbed sample and a clean grid after it,
     /// which is what a transmitter that "delays every later symbol" does.
-    pub fn next_sample_stepped(&mut self, clock: SymbolClock, mut next: impl FnMut() -> (f64, f64)) -> f64 {
+    pub fn next_sample_stepped(
+        &mut self,
+        clock: SymbolClock,
+        mut next: impl FnMut() -> (f64, f64),
+    ) -> f64 {
         self.follow(clock);
         let t = self.taken as f64;
         let ahead = t + REACH as f64 * self.period;
@@ -529,7 +533,11 @@ fn kernel_table() -> Vec<f64> {
         .map(|k| {
             let t = k as f64 / PHASES as f64;
             let x = 2.0 * CUTOFF / BAUD * t;
-            let sinc = if x < 1e-12 { 1.0 } else { (PI * x).sin() / (PI * x) };
+            let sinc = if x < 1e-12 {
+                1.0
+            } else {
+                (PI * x).sin() / (PI * x)
+            };
             let window = 0.42 + 0.5 * (PI * t / edge).cos() + 0.08 * (2.0 * PI * t / edge).cos();
             sinc * window
         })
@@ -557,19 +565,38 @@ mod tests {
     /// The receiver's own accuracy is V92-06's question and is settled by its
     /// tests; what is under test here is the transmitter that follows it.
     fn clock(ppm: f64) -> SymbolClock {
-        SymbolClock { period: true_period(ppm), nominal: FS / BAUD, at: 0.0, index: 0, trained: true }
+        SymbolClock {
+            period: true_period(ppm),
+            nominal: FS / BAUD,
+            at: 0.0,
+            index: 0,
+            trained: true,
+        }
     }
 
     /// A clock with nothing to say yet: what a receiver reports until it has
     /// trained, and what makes an upstream free-run (6.2).
     fn untrained() -> SymbolClock {
-        SymbolClock { period: FS / BAUD, nominal: FS / BAUD, at: 0.0, index: 0, trained: false }
+        SymbolClock {
+            period: FS / BAUD,
+            nominal: FS / BAUD,
+            at: 0.0,
+            index: 0,
+            trained: false,
+        }
     }
 
     /// The transmitter's line samples, without a network: `ticks` symbols'
     /// worth at the nominal rate.
-    fn line(tx: &mut PcmTransmitter, clock: SymbolClock, samples: usize, mut next: impl FnMut() -> f64) -> Vec<f64> {
-        (0..samples).map(|_| tx.next_sample(clock, &mut next)).collect()
+    fn line(
+        tx: &mut PcmTransmitter,
+        clock: SymbolClock,
+        samples: usize,
+        mut next: impl FnMut() -> f64,
+    ) -> Vec<f64> {
+        (0..samples)
+            .map(|_| tx.next_sample(clock, &mut next))
+            .collect()
     }
 
     /// The transmitter carried to the far codec's A/D: one network sample per
@@ -614,7 +641,10 @@ mod tests {
     /// is not the transmitter's to answer for, so it is taken out of the way
     /// where the transmitter is what is being measured.
     fn clear() -> Network {
-        Network::new(Law::Mu, FS).unquantised().with_upstream_gain(1.0).with_upstream_cutoff(FS / 2.0)
+        Network::new(Law::Mu, FS)
+            .unquantised()
+            .with_upstream_gain(1.0)
+            .with_upstream_cutoff(FS / 2.0)
     }
 
     /// Four numbers from a counter, in [-1, 1): levels with nothing in common
@@ -665,7 +695,9 @@ mod tests {
     /// rings.
     #[test]
     fn at_twice_the_rate_every_other_sample_is_the_level() {
-        let levels = [1.0, -1.0, 0.5, 0.5, -0.25, 1.0, 0.0, -0.75, 0.25, 1.0, -1.0, 0.5];
+        let levels = [
+            1.0, -1.0, 0.5, 0.5, -0.25, 1.0, 0.0, -0.75, 0.25, 1.0, -1.0, 0.5,
+        ];
         for mode in [Mode::Interpolated, Mode::Straight] {
             let mut tx = PcmTransmitter::new(FS, mode).with_level(0.1);
             let mut k = 0;
@@ -676,14 +708,21 @@ mod tests {
             });
             for (n, &want) in levels.iter().enumerate() {
                 let got = out[2 * n];
-                assert!((got - want * 0.1).abs() < 1e-12, "{mode:?}: symbol {n} came out {got} against {}", want * 0.1);
+                assert!(
+                    (got - want * 0.1).abs() < 1e-12,
+                    "{mode:?}: symbol {n} came out {got} against {}",
+                    want * 0.1
+                );
             }
             // A steady level: then the midpoints are that level as well, and
             // every sample of the line is it.
             let mut steady = PcmTransmitter::new(FS, mode).with_level(0.1);
             let out = line(&mut steady, untrained(), 200, || 1.0);
             for (n, &got) in out.iter().enumerate().skip(2 * REACH) {
-                assert!((got - 0.1).abs() < 1e-4, "{mode:?}: sample {n} of a steady level came out {got}");
+                assert!(
+                    (got - 0.1).abs() < 1e-4,
+                    "{mode:?}: sample {n} of a steady level came out {got}"
+                );
             }
         }
     }
@@ -718,7 +757,10 @@ mod tests {
             }
         }
         println!("the codec read the levels back {best:.1} dB down, {at} codewords behind");
-        assert!(best < -40.0, "the levels came back {best:.1} dB down at a lag of {at}");
+        assert!(
+            best < -40.0,
+            "the levels came back {best:.1} dB down at a lag of {at}"
+        );
     }
 
     /// 9.5.2.1.7: the first S-bar-u is 24.5T, and the half symbol is a lasting
@@ -756,9 +798,17 @@ mod tests {
         };
         let off = run(None);
         let on = run(Some(SU_BAR_HALF));
-        println!("half a symbol out the codec read {off:.1} dB down; shifted to meet it, {on:.1} dB");
-        assert!(off > -10.0, "an A/D half a symbol out still read the levels, {off:.1} dB down");
-        assert!(on < -40.0, "the half symbol shift left the codec {on:.1} dB out");
+        println!(
+            "half a symbol out the codec read {off:.1} dB down; shifted to meet it, {on:.1} dB"
+        );
+        assert!(
+            off > -10.0,
+            "an A/D half a symbol out still read the levels, {off:.1} dB down"
+        );
+        assert!(
+            on < -40.0,
+            "the half symbol shift left the codec {on:.1} dB out"
+        );
     }
 
     /// Table 22 bits 18:33: "Fractional amount that signal S-bar-u
@@ -799,17 +849,30 @@ mod tests {
             lateness(&heard[..4200], 200, TONE)
         };
         let base = measure(0.0, 0.0);
-        for code in [0x0000u32, 0x0001, 0x0100, 0x1000, 0x2000, 0x4000, 0x8000, 0xffff] {
+        for code in [
+            0x0000u32, 0x0001, 0x0100, 0x1000, 0x2000, 0x4000, 0x8000, 0xffff,
+        ] {
             let epsilon = code as f64 / 65_536.0;
             let late = measure(epsilon, 0.0) - base;
             let back = measure(epsilon, epsilon) - base;
-            println!("epsilon {code:#06x} = {epsilon:.6} T: the waveform went {late:+.6} T late, and {back:+.6} T with the A/D moved to meet it");
-            assert!((late - epsilon).abs() < WITHIN, "epsilon {code:#06x} moved the waveform {late:.6} T, not {epsilon:.6} T");
-            assert!(back.abs() < WITHIN, "epsilon {code:#06x} and the same A/D phase left {back:.6} T between them");
+            println!(
+                "epsilon {code:#06x} = {epsilon:.6} T: the waveform went {late:+.6} T late, and {back:+.6} T with the A/D moved to meet it"
+            );
+            assert!(
+                (late - epsilon).abs() < WITHIN,
+                "epsilon {code:#06x} moved the waveform {late:.6} T, not {epsilon:.6} T"
+            );
+            assert!(
+                back.abs() < WITHIN,
+                "epsilon {code:#06x} and the same A/D phase left {back:.6} T between them"
+            );
         }
         // The plan's own figure: a quarter of a symbol, within one per cent.
         let quarter = measure(0.25, 0.0) - base;
-        assert!((quarter / 0.25 - 1.0).abs() < 0.01, "0x4000 moved the waveform {quarter:.6} T, not a quarter");
+        assert!(
+            (quarter / 0.25 - 1.0).abs() < 0.01,
+            "0x4000 moved the waveform {quarter:.6} T, not a quarter"
+        );
     }
 
     /// 6.2 again, over the ten seconds a start-up and its Phase 4 take: the
@@ -855,13 +918,24 @@ mod tests {
                 walked.push(late);
             }
             let first = walked[0];
-            walked.iter().map(|w| w - first).fold(0.0f64, |a, b| a.max(b.abs()))
+            walked
+                .iter()
+                .map(|w| w - first)
+                .fold(0.0f64, |a, b| a.max(b.abs()))
         };
         let slaved = walk(clock(PPM));
         let free = walk(untrained());
-        println!("slaved to the network the instants walked {slaved:.3e} T in ten seconds; free-running, {free:.2} T");
-        assert!(slaved < WITHIN, "the instants walked {slaved:.3e} T in ten seconds");
-        assert!(free > 5.0, "free-running only walked {free:.2} T, so the test saw nothing");
+        println!(
+            "slaved to the network the instants walked {slaved:.3e} T in ten seconds; free-running, {free:.2} T"
+        );
+        assert!(
+            slaved < WITHIN,
+            "the instants walked {slaved:.3e} T in ten seconds"
+        );
+        assert!(
+            free > 5.0,
+            "free-running only walked {free:.2} T, so the test saw nothing"
+        );
     }
 
     /// 9.5.2.1.8 is the last word an upstream's timing ever gets: the digital
@@ -877,20 +951,39 @@ mod tests {
         let before = tx.symbol_at(tx.symbols());
         assert_eq!(tx.shifts(), 0);
         assert_eq!(tx.delay(SU_BAR_HALF), Ok(()));
-        assert!((tx.symbol_at(tx.symbols()) - before - 1.0).abs() < 1e-12, "half a symbol is one line sample at 16 kHz");
+        assert!(
+            (tx.symbol_at(tx.symbols()) - before - 1.0).abs() < 1e-12,
+            "half a symbol is one line sample at 16 kHz"
+        );
         let epsilon = f64::from(0x4000) / 65_536.0;
         assert_eq!(tx.delay(epsilon), Ok(()));
         assert_eq!(tx.shifts(), SHIFTS);
         let after = tx.symbol_at(tx.symbols());
-        assert_eq!(tx.delay(0.25), Err("the upstream has already taken both of s-bar-u's shifts"));
-        assert_eq!(tx.delay(0.0), Err("the upstream has already taken both of s-bar-u's shifts"));
+        assert_eq!(
+            tx.delay(0.25),
+            Err("the upstream has already taken both of s-bar-u's shifts")
+        );
+        assert_eq!(
+            tx.delay(0.0),
+            Err("the upstream has already taken both of s-bar-u's shifts")
+        );
         assert_eq!(tx.shifts(), SHIFTS);
-        assert_eq!(tx.symbol_at(tx.symbols()), after, "a refused shift moved the upstream anyway");
+        assert_eq!(
+            tx.symbol_at(tx.symbols()),
+            after,
+            "a refused shift moved the upstream anyway"
+        );
         // And the shifts themselves have to be a fraction of one symbol:
         // "any fractional amount from 0 to 1 symbol" (9.5.2.1.8).
         let mut fresh = PcmTransmitter::new(FS, Mode::Interpolated);
-        assert_eq!(fresh.delay(1.0), Err("a one-off shift is from 0 to 1 symbol"));
-        assert_eq!(fresh.delay(-0.25), Err("a one-off shift is from 0 to 1 symbol"));
+        assert_eq!(
+            fresh.delay(1.0),
+            Err("a one-off shift is from 0 to 1 symbol")
+        );
+        assert_eq!(
+            fresh.delay(-0.25),
+            Err("a one-off shift is from 0 to 1 symbol")
+        );
         assert_eq!(fresh.shifts(), 0);
     }
 
@@ -908,13 +1001,21 @@ mod tests {
         let was = tx.symbol_at(n - 1);
         tx.delay(0.5).expect("the first shift is always taken");
         assert_eq!(tx.symbols(), n, "a shift asked for a symbol");
-        assert_eq!(tx.symbol_at(n - 1), was, "a shift moved a symbol that had already gone");
+        assert_eq!(
+            tx.symbol_at(n - 1),
+            was,
+            "a shift moved a symbol that had already gone"
+        );
         line(&mut tx, untrained(), 200, &mut ones);
         // Every symbol after the shift is one line sample later than the
         // twelve-symbol grid it would have been on.
         for k in 0..12 {
             let want = was + (k + 1) as f64 * 2.0 + 1.0;
-            assert!((tx.symbol_at(n + k) - want).abs() < 1e-9, "symbol {k} after the shift landed at {}", tx.symbol_at(n + k));
+            assert!(
+                (tx.symbol_at(n + k) - want).abs() < 1e-9,
+                "symbol {k} after the shift landed at {}",
+                tx.symbol_at(n + k)
+            );
         }
     }
 
@@ -930,10 +1031,18 @@ mod tests {
         // Four seconds of line: more than the two seconds of instants kept,
         // so the oldest are carried rather than remembered.
         line(&mut tx, untrained(), 4 * FS as usize, &mut ones);
-        assert_eq!(tx.symbol_at(0), 0.0, "the first symbol is on the first line sample");
+        assert_eq!(
+            tx.symbol_at(0),
+            0.0,
+            "the first symbol is on the first line sample"
+        );
         for n in [1u64, 320, 12_000, 31_000] {
             let want = n as f64 * 2.0;
-            assert!((tx.symbol_at(n) - want).abs() < 1e-9, "symbol {n} landed at {}", tx.symbol_at(n));
+            assert!(
+                (tx.symbol_at(n) - want).abs() < 1e-9,
+                "symbol {n} landed at {}",
+                tx.symbol_at(n)
+            );
         }
         // Forty milliseconds is 320 symbols, and a millisecond either side of
         // it is eight: the turnaround 9.4.1.1.2 asks for is measurable here.
@@ -975,7 +1084,13 @@ mod tests {
         // A clock that has not trained is not to be believed even when it
         // carries a rate: `symbol_clock` holds the period at nominal, and a
         // transmitter must not take one from anywhere else.
-        let stale = SymbolClock { period: 2.5, nominal: FS / BAUD, at: 0.0, index: 0, trained: false };
+        let stale = SymbolClock {
+            period: 2.5,
+            nominal: FS / BAUD,
+            at: 0.0,
+            index: 0,
+            trained: false,
+        };
         line(&mut tx, stale, 4, &mut ones);
         assert!(!tx.slaved());
         assert_eq!(tx.period(), FS / BAUD);
@@ -984,7 +1099,10 @@ mod tests {
         assert!((tx.period() - true_period(120.0)).abs() < 1e-12);
         // The retrain: the same receiver is hunted again.
         line(&mut tx, untrained(), 4, &mut ones);
-        assert!((tx.period() - true_period(120.0)).abs() < 1e-12, "a hunting receiver stepped the rate back to nominal");
+        assert!(
+            (tx.period() - true_period(120.0)).abs() < 1e-12,
+            "a hunting receiver stepped the rate back to nominal"
+        );
     }
 
     /// Taking the network's rate up is a change of rate and not a step of
@@ -999,10 +1117,17 @@ mod tests {
         let next = tx.symbols();
         let due = tx.symbol_at(next);
         line(&mut tx, clock(120.0), 2, &mut ones);
-        assert_eq!(tx.symbol_at(next), due, "the symbol already scheduled moved");
+        assert_eq!(
+            tx.symbol_at(next),
+            due,
+            "the symbol already scheduled moved"
+        );
         // And the ones after it are spaced at the new rate.
         let step = tx.symbol_at(next + 2) - tx.symbol_at(next + 1);
-        assert!((step - true_period(120.0)).abs() < 1e-9, "the symbols after the changeover were {step} apart");
+        assert!(
+            (step - true_period(120.0)).abs() < 1e-9,
+            "the symbols after the changeover were {step} apart"
+        );
     }
 
     /// The two modes are one kernel: [`Mode::Straight`] is the same
@@ -1043,11 +1168,17 @@ mod tests {
         };
         let half = shifted(Mode::Interpolated, 0.5);
         let half_straight = shifted(Mode::Straight, 0.5);
-        assert!(half.iter().zip(&half_straight).all(|(x, y)| (x - y).abs() < 1e-12));
+        assert!(
+            half.iter()
+                .zip(&half_straight)
+                .all(|(x, y)| (x - y).abs() < 1e-12)
+        );
         let third = shifted(Mode::Interpolated, 1.0 / 3.0);
         let third_straight = shifted(Mode::Straight, 1.0 / 3.0);
         let apart = error_db(&third_straight, &third);
-        println!("a third of a symbol out, the straight mode is {apart:.1} dB from the interpolated one");
+        println!(
+            "a third of a symbol out, the straight mode is {apart:.1} dB from the interpolated one"
+        );
         assert!(apart > -20.0, "the straight mode interpolated after all");
     }
 
@@ -1061,11 +1192,16 @@ mod tests {
         let mut worst = 0.0f64;
         for p in 0..64 {
             let phase = p as f64 / 64.0;
-            let sum: f64 = (-(REACH as i64)..=REACH as i64).map(|k| tx.tap(phase - k as f64)).sum();
+            let sum: f64 = (-(REACH as i64)..=REACH as i64)
+                .map(|k| tx.tap(phase - k as f64))
+                .sum();
             worst = worst.max((sum - 1.0).abs());
         }
         println!("the taps came to one within {worst:.3e} over a symbol");
-        assert!(worst < 1e-4, "a steady level came out {worst:.3e} off at some phase");
+        assert!(
+            worst < 1e-4,
+            "a steady level came out {worst:.3e} off at some phase"
+        );
     }
 
     /// 3.8 sets LU from the wanted data-mode power and names no ceiling. This
@@ -1075,12 +1211,34 @@ mod tests {
     /// the transmitter exists to stay clear of.
     #[test]
     fn lu_is_held_under_the_ceiling_the_capture_path_imposes() {
-        assert!((LU_LOUDEST - 0.1).abs() < 1e-12, "the ceiling moved: {LU_LOUDEST}");
+        assert!(
+            (LU_LOUDEST - 0.1).abs() < 1e-12,
+            "the ceiling moved: {LU_LOUDEST}"
+        );
         let tx = PcmTransmitter::new(FS, Mode::Interpolated);
-        assert_eq!(tx.level(), LU_LOUDEST, "an unasked LU is the loudest one allowed");
-        assert_eq!(PcmTransmitter::new(FS, Mode::Interpolated).with_level(1.0).level(), LU_LOUDEST);
-        assert_eq!(PcmTransmitter::new(FS, Mode::Interpolated).with_level(-0.04).level(), 0.04);
-        assert_eq!(PcmTransmitter::new(FS, Mode::Interpolated).with_level(0.02).level(), 0.02);
+        assert_eq!(
+            tx.level(),
+            LU_LOUDEST,
+            "an unasked LU is the loudest one allowed"
+        );
+        assert_eq!(
+            PcmTransmitter::new(FS, Mode::Interpolated)
+                .with_level(1.0)
+                .level(),
+            LU_LOUDEST
+        );
+        assert_eq!(
+            PcmTransmitter::new(FS, Mode::Interpolated)
+                .with_level(-0.04)
+                .level(),
+            0.04
+        );
+        assert_eq!(
+            PcmTransmitter::new(FS, Mode::Interpolated)
+                .with_level(0.02)
+                .level(),
+            0.02
+        );
         // Su is the loudest thing clause 8 names, sqrt(3/2) LU (8.5.6), and it
         // has to fit under the ceiling with the precoder's room to spare.
         let a = (1.5f64).sqrt();
@@ -1092,8 +1250,14 @@ mod tests {
             k += 1;
             v
         });
-        println!("Su peaked at {:.4} of full scale against a ceiling of {PEAK}", tx.peak());
+        println!(
+            "Su peaked at {:.4} of full scale against a ceiling of {PEAK}",
+            tx.peak()
+        );
         assert!(tx.peak() < PEAK, "Su peaked at {} of full scale", tx.peak());
-        assert!(tx.peak() > a * LU_LOUDEST * 0.99, "Su never reached its own level");
+        assert!(
+            tx.peak() > a * LU_LOUDEST * 0.99,
+            "Su never reached its own level"
+        );
     }
 }

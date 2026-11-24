@@ -295,7 +295,12 @@ fn a_ppp_link_survives_a_v34_retrain() {
             before = pinger.stats.received;
             caller.retrain();
         }
-        if asked && retrained_at.is_none() && !caller.retraining() && caller.rate().is_some() && i % per_ms == 0 {
+        if asked
+            && retrained_at.is_none()
+            && !caller.retraining()
+            && caller.rate().is_some()
+            && i % per_ms == 0
+        {
             // Back in data mode, with the retrain behind it.
             if caller.retrains() > 0 {
                 retrained_at = Some(i as f64 / FS);
@@ -313,6 +318,9 @@ fn a_ppp_link_survives_a_v34_retrain() {
     assert!(retrained_at.is_some(), "the retrain never finished");
     assert!(client.up() && server.up(), "PPP went down over the retrain");
     assert_eq!(client.addresses().0, CLIENT, "the address changed");
-    assert!(after_retrain >= 3, "only {after_retrain} echoes crossed after the retrain");
+    assert!(
+        after_retrain >= 3,
+        "only {after_retrain} echoes crossed after the retrain"
+    );
     println!("  retrained and {after_retrain} echoes crossed after it");
 }

@@ -4,9 +4,7 @@
 //! connected, which is exactly the split a real modem makes. The `+++` escape
 //! sequence moves between the two.
 
-use eframe::egui::{
-    Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2,
-};
+use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use at::escape::EscapeDetector;
 use at::result::ResultCode;
@@ -63,9 +61,9 @@ impl Console {
         let mut console = Self::new();
         console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
         console.term.feed_bytes(b"BinModem\r\n");
-        console.term.feed_bytes(
-            b"Open a line above, then AT+MS to choose a modulation and ATD or ATA."
-        );
+        console
+            .term
+            .feed_bytes(b"Open a line above, then AT+MS to choose a modulation and ATD or ATA.");
         console.term.feed_bytes(b"\r\n\r\n");
         console
     }
@@ -78,9 +76,15 @@ impl Console {
     pub fn telnet() -> Self {
         let mut console = Self::new();
         console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
-        console.term.feed_bytes(b"BinModem - terminal over telnet\r\n");
-        console.term.feed_bytes(b"No modem and no line: every byte arrives.\r\n");
-        console.term.feed_bytes(b"Pick a board above and connect.\r\n\r\n");
+        console
+            .term
+            .feed_bytes(b"BinModem - terminal over telnet\r\n");
+        console
+            .term
+            .feed_bytes(b"No modem and no line: every byte arrives.\r\n");
+        console
+            .term
+            .feed_bytes(b"Pick a board above and connect.\r\n\r\n");
         console
     }
 
@@ -230,7 +234,10 @@ pub fn fit(ui: &Ui, term: &Terminal, room: eframe::egui::Vec2) -> f32 {
     let measure = |size: f32| {
         let font = FontId::monospace(size);
         ui.ctx().fonts_mut(|f| {
-            (f.glyph_width(&font, 'M') * cols as f32, f.row_height(&font) * rows as f32)
+            (
+                f.glyph_width(&font, 'M') * cols as f32,
+                f.row_height(&font) * rows as f32,
+            )
         })
     };
     // Near enough in proportion for a first guess; glyphs are placed on
@@ -341,14 +348,7 @@ pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> View {
 /// a board wants is the buttons and the movement underneath them. Everything
 /// outside the screen is dropped here; everything else is handed on, and the
 /// terminal decides which of it the far end actually asked for.
-fn gather(
-    ui: &Ui,
-    rect: Rect,
-    char_w: f32,
-    row_h: f32,
-    cols: usize,
-    rows: usize,
-) -> Vec<Mouse> {
+fn gather(ui: &Ui, rect: Rect, char_w: f32, row_h: f32, cols: usize, rows: usize) -> Vec<Mouse> {
     use eframe::egui::{Event, MouseWheelUnit, PointerButton};
 
     let cell = |pos: Pos2| -> Option<(usize, usize)> {
@@ -386,12 +386,23 @@ fn gather(
         };
         for event in &i.events {
             match event {
-                Event::PointerButton { pos, button: b, pressed, modifiers } => {
+                Event::PointerButton {
+                    pos,
+                    button: b,
+                    pressed,
+                    modifiers,
+                } => {
                     let Some(b) = button(*b) else { continue };
                     held = if *pressed { Some(b) } else { None };
-                    let Some((col, row)) = cell(*pos) else { continue };
+                    let Some((col, row)) = cell(*pos) else {
+                        continue;
+                    };
                     out.push(Mouse {
-                        motion: if *pressed { Motion::Press } else { Motion::Release },
+                        motion: if *pressed {
+                            Motion::Press
+                        } else {
+                            Motion::Release
+                        },
                         button: Some(b),
                         col,
                         row,
@@ -399,7 +410,9 @@ fn gather(
                     });
                 }
                 Event::PointerMoved(pos) => {
-                    let Some((col, row)) = cell(*pos) else { continue };
+                    let Some((col, row)) = cell(*pos) else {
+                        continue;
+                    };
                     out.push(Mouse {
                         motion: Motion::Moved,
                         button: held,
@@ -408,9 +421,18 @@ fn gather(
                         modifiers: mods(&i.modifiers),
                     });
                 }
-                Event::MouseWheel { unit, delta, modifiers, .. } => {
-                    let Some(pos) = i.pointer.hover_pos() else { continue };
-                    let Some((col, row)) = cell(pos) else { continue };
+                Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } => {
+                    let Some(pos) = i.pointer.hover_pos() else {
+                        continue;
+                    };
+                    let Some((col, row)) = cell(pos) else {
+                        continue;
+                    };
                     if delta.y == 0.0 {
                         continue;
                     }
@@ -424,7 +446,11 @@ fn gather(
                         MouseWheelUnit::Point => (delta.y.abs() / row_h).round(),
                     };
                     let notches = (notches as usize).clamp(1, 5);
-                    let b = if delta.y > 0.0 { Button::WheelUp } else { Button::WheelDown };
+                    let b = if delta.y > 0.0 {
+                        Button::WheelUp
+                    } else {
+                        Button::WheelDown
+                    };
                     for _ in 0..notches {
                         out.push(Mouse {
                             motion: Motion::Press,
@@ -500,7 +526,12 @@ pub fn keys_to_bytes(ui: &Ui) -> Vec<u8> {
             match event {
                 Event::Text(t) => out.extend_from_slice(t.as_bytes()),
                 Event::Paste(text) => out.extend_from_slice(&paste_bytes(text)),
-                Event::Key { key, pressed: true, modifiers, .. } => {
+                Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
                     // Ctrl+V is a paste and not a SYN. A terminal would send
                     // 0x16 for it, and egui delivers the paste as well -- so
                     // without this a person pasting into a login prompt sends
@@ -512,7 +543,9 @@ pub fn keys_to_bytes(ui: &Ui) -> Vec<u8> {
                         continue;
                     }
                     // Control codes are not delivered as Text, so build them here.
-                    if modifiers.ctrl && let Some(c) = key.name().chars().next() {
+                    if modifiers.ctrl
+                        && let Some(c) = key.name().chars().next()
+                    {
                         let c = c.to_ascii_uppercase();
                         if c.is_ascii_uppercase() {
                             out.push(c as u8 - b'A' + 1);

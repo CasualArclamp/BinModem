@@ -55,7 +55,10 @@ pub struct Account {
 
 impl Account {
     pub fn new(name: &str, password: &str) -> Self {
-        Self { name: name.to_owned(), password: password.to_owned() }
+        Self {
+            name: name.to_owned(),
+            password: password.to_owned(),
+        }
     }
 }
 
@@ -95,7 +98,12 @@ pub fn methods_for(accounts: &[Account]) -> Vec<Auth> {
 /// One packet of either protocol: 1334 2.2 and 1994 4 give them the same
 /// header as LCP's, Code, Identifier and Length.
 fn packet(code: u8, id: u8, data: Vec<u8>) -> Vec<u8> {
-    Message { code: Code::from_u8(code), id, data }.to_bytes()
+    Message {
+        code: Code::from_u8(code),
+        id,
+        data,
+    }
+    .to_bytes()
 }
 
 /// A length-prefixed field, as PAP's Peer-ID, Password and Message and CHAP's
@@ -136,7 +144,13 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 fn readable(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+        .map(|&b| {
+            if (32..127).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect()
 }
 
@@ -202,7 +216,8 @@ impl Prover {
         let mut data = Vec::new();
         counted(self.account.name.as_bytes(), &mut data);
         counted(self.account.password.as_bytes(), &mut data);
-        self.out.push(packet(pap::AUTHENTICATE_REQUEST, self.id, data));
+        self.out
+            .push(packet(pap::AUTHENTICATE_REQUEST, self.id, data));
     }
 
     pub fn tick(&mut self, ms: u32) {
@@ -240,15 +255,20 @@ impl Prover {
 
     /// One packet of this method's protocol.
     pub fn receive(&mut self, bytes: &[u8]) {
-        let Some(message) = Message::parse(bytes) else { return };
+        let Some(message) = Message::parse(bytes) else {
+            return;
+        };
         let code = message.code.to_u8();
         match self.method {
             Auth::Pap => {
-                let ours = message.id.wrapping_sub(self.first_id) < self.id.wrapping_sub(self.first_id).wrapping_add(1);
+                let ours = message.id.wrapping_sub(self.first_id)
+                    < self.id.wrapping_sub(self.first_id).wrapping_add(1);
                 if !ours || self.outcome != Outcome::Waiting {
                     return;
                 }
-                let text = read_counted(&message.data).map(|(m, _)| readable(m)).unwrap_or_default();
+                let text = read_counted(&message.data)
+                    .map(|(m, _)| readable(m))
+                    .unwrap_or_default();
                 match code {
                     pap::AUTHENTICATE_ACK => self.outcome = Outcome::Passed,
                     pap::AUTHENTICATE_NAK => {
@@ -267,7 +287,9 @@ impl Prover {
                     // peer MUST transmit a CHAP packet with the Code field set
                     // to 2 (Response)" -- including after success, since a
                     // challenger may check again at any time.
-                    let Some((value, _name)) = read_counted(&message.data) else { return };
+                    let Some((value, _name)) = read_counted(&message.data) else {
+                        return;
+                    };
                     if value.is_empty() {
                         return;
                     }
@@ -403,9 +425,8 @@ impl Authenticator {
             // expires."
             Auth::ChapMd5 if self.tries < TRIES => self.challenge(),
             Auth::ChapMd5 => {
-                self.outcome = Outcome::Failed(format!(
-                    "the caller answered none of {TRIES} challenges"
-                ));
+                self.outcome =
+                    Outcome::Failed(format!("the caller answered none of {TRIES} challenges"));
             }
             Auth::Pap => {
                 self.tries += 1;
@@ -419,20 +440,26 @@ impl Authenticator {
 
     /// One packet of this method's protocol.
     pub fn receive(&mut self, bytes: &[u8]) {
-        let Some(message) = Message::parse(bytes) else { return };
+        let Some(message) = Message::parse(bytes) else {
+            return;
+        };
         let code = message.code.to_u8();
         match (self.method, code) {
             (Auth::Pap, pap::AUTHENTICATE_REQUEST) => {
-                let Some((name, rest)) = read_counted(&message.data) else { return };
-                let Some((password, _)) = read_counted(rest) else { return };
+                let Some((name, rest)) = read_counted(&message.data) else {
+                    return;
+                };
+                let Some((password, _)) = read_counted(rest) else {
+                    return;
+                };
                 let verdict = match self.verdict {
                     Some(v) => v,
                     None => {
                         let name = String::from_utf8_lossy(name).into_owned();
-                        let ok = self
-                            .accounts
-                            .iter()
-                            .any(|a| same(a.name.as_bytes(), name.as_bytes()) && same(a.password.as_bytes(), password));
+                        let ok = self.accounts.iter().any(|a| {
+                            same(a.name.as_bytes(), name.as_bytes())
+                                && same(a.password.as_bytes(), password)
+                        });
                         self.settle(ok, name);
                         ok
                     }
@@ -451,17 +478,23 @@ impl Authenticator {
             (Auth::ChapMd5, chap::RESPONSE) => {
                 // An answer to a challenge this end never sent is not one:
                 // 4.1 has any other Response "silently discarded".
-                let Some(&(_, value)) = self.challenges.iter().find(|(id, _)| *id == message.id) else {
+                let Some(&(_, value)) = self.challenges.iter().find(|(id, _)| *id == message.id)
+                else {
                     return;
                 };
-                let Some((answer, name)) = read_counted(&message.data) else { return };
+                let Some((answer, name)) = read_counted(&message.data) else {
+                    return;
+                };
                 let verdict = match self.verdict {
                     Some(v) => v,
                     None => {
                         let name = String::from_utf8_lossy(name).into_owned();
                         let ok = self.accounts.iter().any(|a| {
                             same(a.name.as_bytes(), name.as_bytes())
-                                && same(&chap_response(message.id, a.password.as_bytes(), &value), answer)
+                                && same(
+                                    &chap_response(message.id, a.password.as_bytes(), &value),
+                                    answer,
+                                )
                         });
                         self.settle(ok, name);
                         ok
@@ -488,7 +521,10 @@ impl Authenticator {
         } else {
             // 1334 2.2.2 and 1994 4.2 both follow a refusal with "SHOULD take
             // action to terminate the link", which is the link's to do.
-            self.outcome = Outcome::Failed(format!("the caller gave a name ({}) and password that are not right", readable(name.as_bytes())));
+            self.outcome = Outcome::Failed(format!(
+                "the caller gave a name ({}) and password that are not right",
+                readable(name.as_bytes())
+            ));
         }
     }
 }
@@ -509,7 +545,8 @@ mod tests {
             }
             prover.tick(1);
             authenticator.tick(1);
-            if prover.outcome() != &Outcome::Waiting && authenticator.outcome() != &Outcome::Waiting {
+            if prover.outcome() != &Outcome::Waiting && authenticator.outcome() != &Outcome::Waiting
+            {
                 // One more round, for the replies still in flight.
                 for p in authenticator.take_output() {
                     prover.receive(&p);
@@ -520,7 +557,10 @@ mod tests {
     }
 
     fn accounts() -> Vec<Account> {
-        vec![Account::new("rory", "hunter2"), Account::new("guest", "letmein")]
+        vec![
+            Account::new("rory", "hunter2"),
+            Account::new("guest", "letmein"),
+        ]
     }
 
     #[test]
@@ -538,7 +578,9 @@ mod tests {
         let mut prover = Prover::new(Auth::Pap, Account::new("guest", "hunter2"));
         let mut checker = Authenticator::new(Auth::Pap, accounts(), "binmodem", 1);
         run(&mut prover, &mut checker, 1000);
-        assert!(matches!(prover.outcome(), Outcome::Failed(why) if why.contains("Login incorrect")));
+        assert!(
+            matches!(prover.outcome(), Outcome::Failed(why) if why.contains("Login incorrect"))
+        );
         assert!(matches!(checker.outcome(), Outcome::Failed(_)));
         assert_eq!(checker.who(), None);
     }
@@ -549,7 +591,10 @@ mod tests {
     fn a_pap_request_is_laid_out_as_the_figure_draws_it() {
         let mut prover = Prover::new(Auth::Pap, Account::new("ab", "xyz"));
         let out = prover.take_output();
-        assert_eq!(out, vec![vec![1, 1, 0, 11, 2, b'a', b'b', 3, b'x', b'y', b'z']]);
+        assert_eq!(
+            out,
+            vec![vec![1, 1, 0, 11, 2, b'a', b'b', 3, b'x', b'y', b'z']]
+        );
     }
 
     /// 1334 2.2.1: repeated, with a new Identifier each time, until answered.
@@ -589,15 +634,26 @@ mod tests {
     #[test]
     fn a_verdict_once_given_is_never_changed() {
         let mut checker = Authenticator::new(Auth::Pap, accounts(), "binmodem", 1);
-        let wrong = Prover::new(Auth::Pap, Account::new("guest", "nope")).take_output().remove(0);
-        let mut right = Prover::new(Auth::Pap, Account::new("guest", "letmein")).take_output().remove(0);
+        let wrong = Prover::new(Auth::Pap, Account::new("guest", "nope"))
+            .take_output()
+            .remove(0);
+        let mut right = Prover::new(Auth::Pap, Account::new("guest", "letmein"))
+            .take_output()
+            .remove(0);
         right[1] = 9;
         checker.receive(&wrong);
         checker.receive(&right);
         let replies = checker.take_output();
         assert_eq!(replies[0][0], pap::AUTHENTICATE_NAK);
-        assert_eq!(replies[1][0], pap::AUTHENTICATE_NAK, "a second guess got in");
-        assert_eq!(replies[1][1], 9, "the reply did not copy the request's Identifier");
+        assert_eq!(
+            replies[1][0],
+            pap::AUTHENTICATE_NAK,
+            "a second guess got in"
+        );
+        assert_eq!(
+            replies[1][1], 9,
+            "the reply did not copy the request's Identifier"
+        );
     }
 
     #[test]
@@ -643,10 +699,16 @@ mod tests {
         let mut stream = vec![0x07];
         stream.extend_from_slice(b"secret");
         stream.extend_from_slice(&challenge);
-        assert_eq!(chap_response(7, b"secret", &challenge), crate::md5::digest(&stream));
+        assert_eq!(
+            chap_response(7, b"secret", &challenge),
+            crate::md5::digest(&stream)
+        );
         // And a different Identifier is a different answer, which is what
         // stops an old answer being replayed to a new challenge.
-        assert_ne!(chap_response(8, b"secret", &challenge), chap_response(7, b"secret", &challenge));
+        assert_ne!(
+            chap_response(8, b"secret", &challenge),
+            chap_response(7, b"secret", &challenge)
+        );
     }
 
     /// 4.1: the Identifier and the value both change each time.

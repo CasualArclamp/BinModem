@@ -145,7 +145,10 @@ impl Trn1u {
     /// analogue modem's whatever end dialled, and `Call` is GPC, which is the
     /// digital modem's (6.3/V.92).
     pub fn with_mode(mode: Mode) -> Self {
-        Self { scrambler: Scrambler::new(mode), last: false }
+        Self {
+            scrambler: Scrambler::new(mode),
+            last: false,
+        }
     }
 
     /// Begin another segment, which under [`TRN1U_RESET_EACH_SEGMENT`] zeroes
@@ -295,13 +298,20 @@ impl TwoPointSender {
     /// not reset: no clause says to, and the far end's descrambler is
     /// already locked to it.
     pub fn after(trn1u: Trn1u) -> Self {
-        Self { scrambler: trn1u.scrambler, last: trn1u.last, queue: VecDeque::new() }
+        Self {
+            scrambler: trn1u.scrambler,
+            last: trn1u.last,
+            queue: VecDeque::new(),
+        }
     }
 
     /// Queue the [`PREAMBLE_ONES`] that go before the first sequence of a
     /// group.
     pub fn preamble(&mut self) {
-        self.queue.extend(std::iter::repeat_n((true, PREAMBLE_IS_SCRAMBLED), PREAMBLE_ONES));
+        self.queue.extend(std::iter::repeat_n(
+            (true, PREAMBLE_IS_SCRAMBLED),
+            PREAMBLE_ONES,
+        ));
     }
 
     /// Queue one sequence's bits, bit 0 first, as `v90::sequences` writes
@@ -312,7 +322,8 @@ impl TwoPointSender {
 
     /// Queue E1u, the twelve zeros that end a CPt series (8.5.2).
     pub fn e1u(&mut self) {
-        self.queue.extend(std::iter::repeat_n((false, true), E1U_SYMBOLS));
+        self.queue
+            .extend(std::iter::repeat_n((false, true), E1U_SYMBOLS));
     }
 
     /// How many symbols are still to go: these signals carry one bit each, so
@@ -332,7 +343,11 @@ impl TwoPointSender {
     /// The next symbol in LU units, or `None` when nothing is queued.
     pub fn next_symbol(&mut self) -> Option<f64> {
         let (bit, scramble) = self.queue.pop_front()?;
-        let source = if scramble { self.scrambler.scramble(bit) } else { bit };
+        let source = if scramble {
+            self.scrambler.scramble(bit)
+        } else {
+            bit
+        };
         // "differentially encoded by modulo 2 addition of the present bit
         // with the previously transmitted bit" (8.5.1, 8.5.4).
         self.last ^= source;
@@ -377,7 +392,11 @@ impl Default for TwoPointReader {
 impl TwoPointReader {
     /// A reader of plain TRN1u, descrambling with GPA.
     pub fn new() -> Self {
-        Self { descrambler: Scrambler::new(Mode::Answer), previous: None, differential: false }
+        Self {
+            descrambler: Scrambler::new(Mode::Answer),
+            previous: None,
+            differential: false,
+        }
     }
 
     /// A reader that is differential from its first symbol, which is what a
@@ -391,7 +410,11 @@ impl TwoPointReader {
     /// end's role: `Answer` for an analogue modem's Ja and CPt, `Call` for a
     /// digital modem's Jd and Jp (6.3/V.92).
     pub fn differential_with(mode: Mode) -> Self {
-        Self { differential: true, descrambler: Scrambler::new(mode), ..Self::new() }
+        Self {
+            differential: true,
+            descrambler: Scrambler::new(mode),
+            ..Self::new()
+        }
     }
 
     /// Switch to differential decoding, replaying the symbol the switch lands
@@ -419,7 +442,11 @@ impl TwoPointReader {
     /// is the reference.
     pub fn feed_sign(&mut self, negative: bool) -> Option<bool> {
         let previous = self.previous.replace(negative);
-        let received = if self.differential { negative ^ previous? } else { negative };
+        let received = if self.differential {
+            negative ^ previous?
+        } else {
+            negative
+        };
         Some(self.descrambler.descramble(received))
     }
 
@@ -523,7 +550,11 @@ impl Trn2uSize {
     /// write it: MSB first, the MSB the sign, 0 positive.
     pub fn level(self, group: u8) -> f64 {
         let magnitude = self.magnitude(usize::from(group) & (self.points() / 2 - 1));
-        if usize::from(group) & (self.points() / 2) == 0 { magnitude } else { -magnitude }
+        if usize::from(group) & (self.points() / 2) == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
     }
 
     /// The group a received level, in LU units, decides to: its sign, and the
@@ -603,10 +634,15 @@ impl Trn2uSender {
     /// TRN2u's binary ones.
     pub fn next_symbol(&mut self) -> f64 {
         let b = self.size.bits();
-        debug_assert!(self.queue.is_empty() || self.queue.len() >= b, "a sequence rides TRN2u in whole symbols");
+        debug_assert!(
+            self.queue.is_empty() || self.queue.len() >= b,
+            "a sequence rides TRN2u in whole symbols"
+        );
         let mut group = 0u8;
         for k in 0..b {
-            let scrambled = self.scrambler.scramble(self.queue.pop_front().unwrap_or(true));
+            let scrambled = self
+                .scrambler
+                .scramble(self.queue.pop_front().unwrap_or(true));
             let place = if self.first_bit_is_lsb { k } else { b - 1 - k };
             let out = if place == b - 1 {
                 // The sign, and by TRN2U_ONLY_SIGN_IS_DIFFERENTIAL only the
@@ -681,7 +717,12 @@ impl Trn2uReader {
     /// A reader of `size` points, from the first symbol of a TRN2u. That
     /// first symbol is the differential reference and carries no bits.
     pub fn new(size: Trn2uSize) -> Self {
-        Self { size, first_bit_is_lsb: TRN2U_SIGN_LAST, descrambler: Scrambler::new(Mode::Answer), previous: None }
+        Self {
+            size,
+            first_bit_is_lsb: TRN2U_SIGN_LAST,
+            descrambler: Scrambler::new(Mode::Answer),
+            previous: None,
+        }
     }
 
     /// Read with the other reading of the bit order (see
@@ -708,7 +749,11 @@ impl Trn2uReader {
         let mut out = SymbolBits::default();
         for k in 0..b {
             let place = if self.first_bit_is_lsb { k } else { b - 1 - k };
-            let received = if place == b - 1 { sign ^ previous } else { group >> place & 1 == 1 };
+            let received = if place == b - 1 {
+                sign ^ previous
+            } else {
+                group >> place & 1 == 1
+            };
             out.push(self.descrambler.descramble(received));
         }
         out
@@ -756,7 +801,8 @@ pub(crate) fn fractional_delay(x: &[f64], delay: f64) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::v90::sequences::{
-        ALL_PCM_UPSTREAM_RATES, Cp, CpFinder, Descriptor, DescriptorFinder, JA_UNIT_BITS, Layout, Mask,
+        ALL_PCM_UPSTREAM_RATES, Cp, CpFinder, Descriptor, DescriptorFinder, JA_UNIT_BITS, Layout,
+        Mask,
     };
 
     /// The signs `text` names, 1 being -LU, as levels.
@@ -767,7 +813,11 @@ mod tests {
     /// A CPt in the shape P3S 4.1 worked out: drn 16, one constellation of
     /// Ucodes 0 to 79, 290 bits filled to 300.
     fn a_cpt() -> Cp {
-        Cp { drn: 16, constellations: vec![((1u128 << 80) - 1) as Mask], ..Cp::default() }
+        Cp {
+            drn: 16,
+            constellations: vec![((1u128 << 80) - 1) as Mask],
+            ..Cp::default()
+        }
     }
 
     /// A Ja descriptor with no DIL, the one length 8.5.4 prints: 276 bits.
@@ -792,7 +842,10 @@ mod tests {
     /// Every bit a cold differential reader gets out of `levels`.
     fn read_cold(levels: &[f64]) -> Vec<bool> {
         let mut reader = TwoPointReader::differential();
-        levels.iter().filter_map(|&level| reader.feed(level)).collect()
+        levels
+            .iter()
+            .filter_map(|&level| reader.feed(level))
+            .collect()
     }
 
     /// 8.5.7 with 6.3: ones into GPA (1 + x^-5 + x^-23) from a zeroed
@@ -854,7 +907,11 @@ mod tests {
         // It is a repetition, and the bar is the inversion, at every symbol
         // of a whole segment.
         for n in 0..super::super::RU_SYMBOLS as u64 {
-            assert_eq!(ru(n, false), period[(n % RU_PERIOD as u64) as usize], "symbol {n}");
+            assert_eq!(
+                ru(n, false),
+                period[(n % RU_PERIOD as u64) as usize],
+                "symbol {n}"
+            );
             assert_eq!(ru(n, true), -ru(n, false), "symbol {n}");
         }
         // 9.5.2.1.1's lengths are whole periods: 64 of them and 4.
@@ -884,27 +941,49 @@ mod tests {
         assert_eq!(period, vec![a, 0.0, a, -a, 0.0, -a]);
         let bar: Vec<f64> = (0..RU_PERIOD as u64).map(|n| su(n, true)).collect();
         assert_eq!(bar, vec![-a, 0.0, -a, a, 0.0, a]);
-        assert!(period.iter().filter(|level| **level == 0.0).count() == 2, "the zeros are true zeros");
+        assert!(
+            period.iter().filter(|level| **level == 0.0).count() == 2,
+            "the zeros are true zeros"
+        );
 
         let mut trn1u = Trn1u::new();
-        let trained: Vec<f64> = (0..super::super::SU_SYMBOLS).map(|_| trn1u.next_symbol()).collect();
+        let trained: Vec<f64> = (0..super::super::SU_SYMBOLS)
+            .map(|_| trn1u.next_symbol())
+            .collect();
         let power = mean_square(&period);
-        println!("Su {power}, TRN1u {}, Ru {}", mean_square(&trained), mean_square(&(0..6).map(|n| ru(n, false)).collect::<Vec<f64>>()));
+        println!(
+            "Su {power}, TRN1u {}, Ru {}",
+            mean_square(&trained),
+            mean_square(&(0..6).map(|n| ru(n, false)).collect::<Vec<f64>>())
+        );
         assert!((power - LU * LU).abs() < 1e-12);
         assert!((power - mean_square(&trained)).abs() < 1e-12);
 
         // The two lines P3S 4.6 derives, at 8000/6 Hz and 4000 Hz.
         let spectrum = dft(&period);
-        assert!((spectrum[1] - 2.0 * a).abs() < 1e-9, "1333.3 Hz: {spectrum:?}");
-        assert!((spectrum[3] - 4.0 * a).abs() < 1e-9, "4000 Hz: {spectrum:?}");
-        assert!((spectrum[5] - 2.0 * a).abs() < 1e-9, "its image: {spectrum:?}");
+        assert!(
+            (spectrum[1] - 2.0 * a).abs() < 1e-9,
+            "1333.3 Hz: {spectrum:?}"
+        );
+        assert!(
+            (spectrum[3] - 4.0 * a).abs() < 1e-9,
+            "4000 Hz: {spectrum:?}"
+        );
+        assert!(
+            (spectrum[5] - 2.0 * a).abs() < 1e-9,
+            "its image: {spectrum:?}"
+        );
         for k in [0, 2, 4] {
             assert!(spectrum[k] < 1e-12, "bin {k} of {spectrum:?}");
         }
         // Su's strong line is at 4000 Hz where Ru's is at 1333.3, which is
         // the whole reason there are two patterns.
         assert!(spectrum[3] > spectrum[1]);
-        assert_eq!(super::super::SU_SYMBOLS / RU_PERIOD, 24, "144T is 24 periods");
+        assert_eq!(
+            super::super::SU_SYMBOLS / RU_PERIOD,
+            24,
+            "144T is 24 periods"
+        );
     }
 
     /// The mean square of a stretch of symbols.
@@ -943,14 +1022,20 @@ mod tests {
 
         // Two TRN1u lengths, which leave the differential encoder seeded
         // differently, and both polarities of the line.
-        let seeds: Vec<bool> = [12usize, 24].iter().map(|&n| {
-            let mut trn1u = Trn1u::new();
-            (0..n).for_each(|_| {
-                trn1u.next_symbol();
-            });
-            trn1u.last_bit()
-        }).collect();
-        assert_ne!(seeds[0], seeds[1], "the two lengths really do seed differently");
+        let seeds: Vec<bool> = [12usize, 24]
+            .iter()
+            .map(|&n| {
+                let mut trn1u = Trn1u::new();
+                (0..n).for_each(|_| {
+                    trn1u.next_symbol();
+                });
+                trn1u.last_bit()
+            })
+            .collect();
+        assert_ne!(
+            seeds[0], seeds[1],
+            "the two lengths really do seed differently"
+        );
 
         for trn1u in [12usize, 24] {
             for polarity in [1.0, -1.0] {
@@ -960,15 +1045,28 @@ mod tests {
                 ja.extend_from_slice(&descriptor);
                 let bits = read_cold(&two_point_stream(trn1u, &ja, polarity));
                 let mut finder = DescriptorFinder::v92();
-                let found: Vec<Descriptor> = bits.iter().filter_map(|&bit| finder.feed(bit)).collect();
-                assert_eq!(found, vec![Descriptor::none(), Descriptor::none()], "Ja at {what}");
-                assert_eq!(finder.upstream_rates(), Some(ALL_PCM_UPSTREAM_RATES), "the mask at {what}");
+                let found: Vec<Descriptor> =
+                    bits.iter().filter_map(|&bit| finder.feed(bit)).collect();
+                assert_eq!(
+                    found,
+                    vec![Descriptor::none(), Descriptor::none()],
+                    "Ja at {what}"
+                );
+                assert_eq!(
+                    finder.upstream_rates(),
+                    Some(ALL_PCM_UPSTREAM_RATES),
+                    "the mask at {what}"
+                );
 
                 // CPt, its acknowledged repetition, and E1u behind them.
                 let levels = two_point_stream(trn1u, &cpt_bits, polarity);
                 let bits = read_cold(&levels);
                 let mut finder = CpFinder::v92(JA_UNIT_BITS);
-                let found: Vec<bool> = bits.iter().filter_map(|&bit| finder.feed(bit)).map(|cp| cp.acknowledge).collect();
+                let found: Vec<bool> = bits
+                    .iter()
+                    .filter_map(|&bit| finder.feed(bit))
+                    .map(|cp| cp.acknowledge)
+                    .collect();
                 assert_eq!(found, vec![false, true], "CPt at {what}");
             }
         }
@@ -990,24 +1088,42 @@ mod tests {
         // twenty-three garbage bits come out of it and then the sequence
         // itself, from its very first bit.
         assert_eq!(bits.len(), PREAMBLE_ONES - 1 + descriptor.len());
-        assert_eq!(&bits[PREAMBLE_ONES - 1..], &descriptor[..], "the whole descriptor, undamaged");
+        assert_eq!(
+            &bits[PREAMBLE_ONES - 1..],
+            &descriptor[..],
+            "the whole descriptor, undamaged"
+        );
 
         let mut finder = DescriptorFinder::v92();
-        assert_eq!(bits.iter().filter_map(|&bit| finder.feed(bit)).count(), 1, "found behind its preamble");
+        assert_eq!(
+            bits.iter().filter_map(|&bit| finder.feed(bit)).count(),
+            1,
+            "found behind its preamble"
+        );
 
         // And the ones are scrambled (PREAMBLE_IS_SCRAMBLED). Unscrambled
         // ones differentially encoded would be a bare alternation on the
         // line, and would descramble at a locked far end into anything but
         // ones -- which is the whole argument for this reading.
         let preamble = &levels[2040..2040 + PREAMBLE_ONES];
-        assert!(!preamble.windows(2).all(|pair| pair[0] != pair[1]), "not a bare alternation");
+        assert!(
+            !preamble.windows(2).all(|pair| pair[0] != pair[1]),
+            "not a bare alternation"
+        );
         let mut locked = TwoPointReader::new();
         levels[..2040].iter().for_each(|&level| {
             locked.feed(level);
         });
         locked.switch_to_differential();
-        let read: Vec<bool> = preamble.iter().filter_map(|&level| locked.feed(level)).collect();
-        assert_eq!(read, vec![true; PREAMBLE_ONES], "twenty-four ones to a reader that is already locked");
+        let read: Vec<bool> = preamble
+            .iter()
+            .filter_map(|&level| locked.feed(level))
+            .collect();
+        assert_eq!(
+            read,
+            vec![true; PREAMBLE_ONES],
+            "twenty-four ones to a reader that is already locked"
+        );
 
         // Without a preamble the first sequence is lost: the descrambler is
         // still filling while the sync goes past. This is the case the
@@ -1024,7 +1140,10 @@ mod tests {
             levels.push(level);
         }
         let mut finder = DescriptorFinder::v92();
-        let found = read_cold(&levels).iter().filter_map(|&bit| finder.feed(bit)).count();
+        let found = read_cold(&levels)
+            .iter()
+            .filter_map(|&bit| finder.feed(bit))
+            .count();
         assert_eq!(found, 1, "only the second of the two");
     }
 
@@ -1052,7 +1171,10 @@ mod tests {
         while let Some(level) = sender.next_symbol() {
             read.push(reader.feed(level).expect("the join replays its symbol"));
         }
-        assert_eq!(read, descriptor, "every bit, from the first, with no preamble");
+        assert_eq!(
+            read, descriptor,
+            "every bit, from the first, with no preamble"
+        );
     }
 
     /// 8.5.2: "E1u is a data frame of scrambled, differentially encoded
@@ -1086,11 +1208,18 @@ mod tests {
             while let Some(level) = sender.next_symbol() {
                 read.push(reader.feed(level).expect("no bit is lost at the join"));
             }
-            assert_eq!(read.len(), PREAMBLE_ONES + cpt_bits.len() + if ending { E1U_SYMBOLS } else { cpt_bits.len() });
+            assert_eq!(
+                read.len(),
+                PREAMBLE_ONES + cpt_bits.len() + if ending { E1U_SYMBOLS } else { cpt_bits.len() }
+            );
             tails.push(read[PREAMBLE_ONES + cpt_bits.len()..][..E1U_SYMBOLS].to_vec());
         }
         assert_eq!(tails[1], vec![false; E1U_SYMBOLS], "E1u is twelve zeros");
-        assert_eq!(tails[0], vec![true; E1U_SYMBOLS], "another CPt is the start of its sync");
+        assert_eq!(
+            tails[0],
+            vec![true; E1U_SYMBOLS],
+            "another CPt is the start of its sync"
+        );
         assert_ne!(tails[0], tails[1]);
     }
 
@@ -1102,10 +1231,15 @@ mod tests {
         let four: Vec<f64> = (0..4u8).map(|group| Trn2uSize::Four.level(group)).collect();
         let r5 = 5.0f64.sqrt();
         assert_eq!(four, vec![LU / r5, 3.0 * LU / r5, -LU / r5, -3.0 * LU / r5]);
-        let eight: Vec<f64> = (0..8u8).map(|group| Trn2uSize::Eight.level(group)).collect();
+        let eight: Vec<f64> = (0..8u8)
+            .map(|group| Trn2uSize::Eight.level(group))
+            .collect();
         let r21 = 21.0f64.sqrt();
         let printed = [1.0, 3.0, 5.0, 7.0, -1.0, -3.0, -5.0, -7.0];
-        assert_eq!(eight, printed.iter().map(|m| m * LU / r21).collect::<Vec<f64>>());
+        assert_eq!(
+            eight,
+            printed.iter().map(|m| m * LU / r21).collect::<Vec<f64>>()
+        );
         // Jp bit 48 during training and bit 49 during a rate renegotiation,
         // 0 = 4-point (8.7.6).
         assert_eq!(Trn2uSize::from_jp_bit(false), Trn2uSize::Four);
@@ -1114,18 +1248,33 @@ mod tests {
             assert_eq!(Trn2uSize::from_jp_bit(size.jp_bit()), size);
             assert_eq!(size.points(), 1 << size.bits());
             // One twelve-symbol frame is 24 bits on four points, 36 on eight.
-            assert_eq!(size.bits() * UP_SEQUENCE_UNIT, if size == Trn2uSize::Four { 24 } else { 36 });
+            assert_eq!(
+                size.bits() * UP_SEQUENCE_UNIT,
+                if size == Trn2uSize::Four { 24 } else { 36 }
+            );
             // And the slicer takes every point back, including at the ends.
             // The points are 2/root apart, so anything inside 1/root of one
             // decides to it; 0.8 of that is the margin checked here.
             let margin = 0.8 / size.root();
             for group in 0..size.points() as u8 {
-                assert_eq!(size.group_for(size.level(group)), group, "{size:?} group {group}");
+                assert_eq!(
+                    size.group_for(size.level(group)),
+                    group,
+                    "{size:?} group {group}"
+                );
                 for nudge in [margin, -margin] {
-                    assert_eq!(size.group_for(size.level(group) + nudge), group, "{size:?} group {group} off by {nudge}");
+                    assert_eq!(
+                        size.group_for(size.level(group) + nudge),
+                        group,
+                        "{size:?} group {group} off by {nudge}"
+                    );
                 }
             }
-            assert_eq!(size.group_for(9.0), (size.points() / 2 - 1) as u8, "clamped to the outer point");
+            assert_eq!(
+                size.group_for(9.0),
+                (size.points() / 2 - 1) as u8,
+                "clamped to the outer point"
+            );
         }
     }
 
@@ -1137,8 +1286,13 @@ mod tests {
     #[test]
     fn trn2u_has_mean_square_lu_squared_at_both_sizes() {
         for size in [Trn2uSize::Four, Trn2uSize::Eight] {
-            let constellation: Vec<f64> = (0..size.points() as u8).map(|group| size.level(group)).collect();
-            assert!((mean_square(&constellation) - LU * LU).abs() < 1e-12, "{size:?}");
+            let constellation: Vec<f64> = (0..size.points() as u8)
+                .map(|group| size.level(group))
+                .collect();
+            assert!(
+                (mean_square(&constellation) - LU * LU).abs() < 1e-12,
+                "{size:?}"
+            );
             // And over the signal itself, at 9.6.2.1.1's minimum length of
             // 12000T. Scrambled ones are not quite equiprobable over a finite
             // run, so this is a tolerance and not an identity.
@@ -1147,7 +1301,10 @@ mod tests {
             let power = mean_square(&sent);
             println!("{size:?} over 12000T: {power}");
             assert!((power - LU * LU).abs() < 0.05, "{size:?} gave {power}");
-            assert!(sent.len().is_multiple_of(UP_SEQUENCE_UNIT), "an integer multiple of 12 symbols");
+            assert!(
+                sent.len().is_multiple_of(UP_SEQUENCE_UNIT),
+                "an integer multiple of 12 symbols"
+            );
         }
     }
 
@@ -1161,24 +1318,38 @@ mod tests {
     fn trn2u_descrambles_to_ones_and_a_following_sequence_parses_from_its_first_zero() {
         for size in [Trn2uSize::Four, Trn2uSize::Eight] {
             let unit = size.bits() * UP_SEQUENCE_UNIT;
-            let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
+            let cpu = Cp {
+                data_mode: true,
+                drn: 22,
+                ..a_cpt()
+            };
             let mut sender = Trn2uSender::seeded(size, false);
             let mut levels: Vec<f64> = (0..240).map(|_| sender.next_symbol()).collect();
             let bits = cpu.to_bits_in(Layout::V92, unit);
-            assert!(bits.len().is_multiple_of(unit), "{} bits fill {unit}", bits.len());
+            assert!(
+                bits.len().is_multiple_of(unit),
+                "{} bits fill {unit}",
+                bits.len()
+            );
             sender.push(&bits);
             while sender.queued() > 0 {
                 levels.push(sender.next_symbol());
             }
 
             let mut reader = Trn2uReader::new(size);
-            let read: Vec<bool> = levels.iter().flat_map(|&level| reader.feed(level)).collect();
+            let read: Vec<bool> = levels
+                .iter()
+                .flat_map(|&level| reader.feed(level))
+                .collect();
             // The first symbol is the reference, so the stream is short by
             // b bits; the descrambler locks 23 bits later, and everything
             // from there to the sequence is ones.
             assert_eq!(read.len(), levels.len() * size.bits() - size.bits());
             let trn2u = &read[23..240 * size.bits() - size.bits()];
-            assert!(trn2u.iter().all(|bit| *bit), "{size:?}: TRN2u descrambles to ones");
+            assert!(
+                trn2u.iter().all(|bit| *bit),
+                "{size:?}: TRN2u descrambles to ones"
+            );
 
             let mut finder = CpFinder::v92(unit);
             let found: Vec<Cp> = read.iter().filter_map(|&bit| finder.feed(bit)).collect();
@@ -1195,7 +1366,11 @@ mod tests {
     fn the_trn2u_bit_order_is_one_switch() {
         for size in [Trn2uSize::Four, Trn2uSize::Eight] {
             let unit = size.bits() * UP_SEQUENCE_UNIT;
-            let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
+            let cpu = Cp {
+                data_mode: true,
+                drn: 22,
+                ..a_cpt()
+            };
             let bits = cpu.to_bits_in(Layout::V92, unit);
             let mut both = Vec::new();
             for first_bit_is_lsb in [true, false] {
@@ -1206,21 +1381,38 @@ mod tests {
                     levels.push(sender.next_symbol());
                 }
                 let mut reader = Trn2uReader::new(size).with_bit_order(first_bit_is_lsb);
-                let read: Vec<bool> = levels.iter().flat_map(|&level| reader.feed(level)).collect();
+                let read: Vec<bool> = levels
+                    .iter()
+                    .flat_map(|&level| reader.feed(level))
+                    .collect();
                 let mut finder = CpFinder::v92(unit);
                 let found: Vec<Cp> = read.iter().filter_map(|&bit| finder.feed(bit)).collect();
-                assert_eq!(found, vec![cpu.clone()], "{size:?} with the LSB first: {first_bit_is_lsb}");
+                assert_eq!(
+                    found,
+                    vec![cpu.clone()],
+                    "{size:?} with the LSB first: {first_bit_is_lsb}"
+                );
                 both.push(levels);
             }
-            assert_ne!(both[0], both[1], "{size:?}: the two readings are different signals");
+            assert_ne!(
+                both[0], both[1],
+                "{size:?}: the two readings are different signals"
+            );
 
             // And the far end has to have the same one. The magnitudes still
             // slice, so what a mismatched reader gets is a plausible bit
             // stream that no CRC passes.
             let mut reader = Trn2uReader::new(size).with_bit_order(false);
-            let read: Vec<bool> = both[0].iter().flat_map(|&level| reader.feed(level)).collect();
+            let read: Vec<bool> = both[0]
+                .iter()
+                .flat_map(|&level| reader.feed(level))
+                .collect();
             let mut finder = CpFinder::v92(unit);
-            assert_eq!(read.iter().filter_map(|&bit| finder.feed(bit)).count(), 0, "{size:?}: the wrong order finds nothing");
+            assert_eq!(
+                read.iter().filter_map(|&bit| finder.feed(bit)).count(),
+                0,
+                "{size:?}: the wrong order finds nothing"
+            );
         }
     }
 
@@ -1246,11 +1438,21 @@ mod tests {
         // And a reader does not care which seed was used, nor which way up
         // the line is.
         let mut plain = Trn2uReader::new(size);
-        let one: Vec<bool> = runs[0].iter().flat_map(|&level| plain.feed(level)).collect();
+        let one: Vec<bool> = runs[0]
+            .iter()
+            .flat_map(|&level| plain.feed(level))
+            .collect();
         let mut inverted = Trn2uReader::new(size);
-        let other: Vec<bool> = runs[1].iter().map(|level| -level).flat_map(|level| inverted.feed(level)).collect();
+        let other: Vec<bool> = runs[1]
+            .iter()
+            .map(|level| -level)
+            .flat_map(|level| inverted.feed(level))
+            .collect();
         assert_eq!(one, other);
-        assert!(one[23..].iter().all(|bit| *bit), "scrambled ones, once locked");
+        assert!(
+            one[23..].iter().all(|bit| *bit),
+            "scrambled ones, once locked"
+        );
     }
 
     /// 8.7.6 and 8.7.5 with P4A P2: one bit pump for the whole run. The
@@ -1266,10 +1468,24 @@ mod tests {
         // A second TRN2u, reset as 8.7.6 requires, repeats the first.
         let mut again = Trn2uSender::seeded(size, sender.last_sign());
         let second: Vec<f64> = (0..24).map(|_| again.next_symbol()).collect();
-        let signs = |levels: &[f64]| levels.iter().map(|level| level.is_sign_negative()).collect::<Vec<bool>>();
-        assert_ne!(signs(&first), signs(&second), "the seed differs, so the signs do");
-        let magnitudes = |levels: &[f64]| levels.iter().map(|level| level.abs()).collect::<Vec<f64>>();
-        assert_eq!(magnitudes(&first), magnitudes(&second), "but the scrambler starts again the same way");
+        let signs = |levels: &[f64]| {
+            levels
+                .iter()
+                .map(|level| level.is_sign_negative())
+                .collect::<Vec<bool>>()
+        };
+        assert_ne!(
+            signs(&first),
+            signs(&second),
+            "the seed differs, so the signs do"
+        );
+        let magnitudes =
+            |levels: &[f64]| levels.iter().map(|level| level.abs()).collect::<Vec<f64>>();
+        assert_eq!(
+            magnitudes(&first),
+            magnitudes(&second),
+            "but the scrambler starts again the same way"
+        );
 
         // E1u's last sign is what seeds a Phase 4 TRN2u (8.7.6), and it comes
         // off the two-point sender that sent E1u.

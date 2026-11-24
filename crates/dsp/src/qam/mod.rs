@@ -127,7 +127,12 @@ impl Band {
     /// leaves V.32's image at least 39 dB down at 16 kHz (core.md 1).
     pub fn new(fs: f64, baud: f64, carrier: f64) -> Self {
         let cutoff = (0.5 * baud * 1.1 + 300.0).min(0.45 * fs);
-        Self { fs, baud, carrier, cutoff }
+        Self {
+            fs,
+            baud,
+            carrier,
+            cutoff,
+        }
     }
 }
 
@@ -486,7 +491,9 @@ impl Core {
             if self.symbol_waiting() && !self.front.behind() {
                 break;
             }
-            let Some((half, index)) = self.front.make_half() else { break };
+            let Some((half, index)) = self.front.make_half() else {
+                break;
+            };
             self.on_half(half, index);
         }
     }
@@ -722,13 +729,16 @@ impl Core {
 }
 
 fn apply(taps: &[Complex], row: &[Complex]) -> Complex {
-    taps.iter().zip(row).fold(Complex::ZERO, |sum, (w, x)| sum + *w * *x)
+    taps.iter()
+        .zip(row)
+        .fold(Complex::ZERO, |sum, (w, x)| sum + *w * *x)
 }
 
 /// Where taps' weight is centred, in half symbols from the middle.
 fn centroid(taps: &[Complex]) -> f64 {
-    let (moment, energy) =
-        taps.iter().enumerate().fold((0.0, 0.0), |(m, e), (i, w)| (m + i as f64 * w.norm_sqr(), e + w.norm_sqr()));
+    let (moment, energy) = taps.iter().enumerate().fold((0.0, 0.0), |(m, e), (i, w)| {
+        (m + i as f64 * w.norm_sqr(), e + w.norm_sqr())
+    });
     moment / energy.max(1e-30) - (taps.len() / 2) as f64
 }
 

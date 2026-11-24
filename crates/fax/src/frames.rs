@@ -24,7 +24,12 @@ pub struct Message {
 
 impl Message {
     pub fn new(frame: Frame, from_caller: bool) -> Self {
-        Self { frame, last: true, from_caller, fif: Vec::new() }
+        Self {
+            frame,
+            last: true,
+            from_caller,
+            fif: Vec::new(),
+        }
     }
 
     pub fn with_fif(mut self, fif: &[u8]) -> Self {
@@ -45,7 +50,11 @@ impl Message {
     pub fn octets(&self) -> Vec<u8> {
         let mut out = vec![
             ADDRESS,
-            if self.last { CONTROL_FINAL } else { CONTROL_MORE },
+            if self.last {
+                CONTROL_FINAL
+            } else {
+                CONTROL_MORE
+            },
             self.frame.code(self.from_caller),
         ];
         out.extend_from_slice(&self.fif);
@@ -115,7 +124,10 @@ impl Default for Sender {
 
 impl Sender {
     pub fn new() -> Self {
-        Self { encoder: hdlc::Encoder::new(Fcs::Bits16), idle_at: 0 }
+        Self {
+            encoder: hdlc::Encoder::new(Fcs::Bits16),
+            idle_at: 0,
+        }
     }
 
     /// Queue a whole burst: the preamble, then every frame, then the flags
@@ -201,7 +213,10 @@ impl Reader {
     pub fn new() -> Self {
         // A T.30 frame is tens of octets, never hundreds: the longest
         // ordinary one is a 20-character identification.
-        Self { decoder: hdlc::Decoder::new(Fcs::Bits16).with_max_octets(256), bad: 0 }
+        Self {
+            decoder: hdlc::Decoder::new(Fcs::Bits16).with_max_octets(256),
+            bad: 0,
+        }
     }
 
     /// Feed one bit; yields a frame when one completes and checks out.
@@ -289,15 +304,18 @@ mod tests {
 
     #[test]
     fn a_real_capability_frame_reads_back_as_itself() {
-        let m = Message::parse(&[0xFF, 0x13, 0x80, 0x00, 0x6e, 0xf8, 0x00])
-            .expect("a frame");
+        let m = Message::parse(&[0xFF, 0x13, 0x80, 0x00, 0x6e, 0xf8, 0x00]).expect("a frame");
         assert_eq!(m.frame, Frame::Dis);
         assert!(m.last);
         assert!(!m.from_caller);
         let caps = t30::capabilities(&m.fif);
         assert_eq!(
             caps.modulations,
-            vec![t30::Modulation::V27ter, t30::Modulation::V29, t30::Modulation::V17]
+            vec![
+                t30::Modulation::V27ter,
+                t30::Modulation::V29,
+                t30::Modulation::V17
+            ]
         );
     }
 

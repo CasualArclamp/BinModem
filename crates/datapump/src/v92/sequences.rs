@@ -37,13 +37,14 @@
 //! data mode, D downstream.
 
 use crate::v90::sequences::{
-    BLOCK, CP_MARK, CP_TYPE_CPU, Cp, CpFinder, JD_BITS, Jd, J_IDENTIFIER, Layout, SYNC_ONES, frame, get, is_jd, is_jp,
-    put, unframe,
+    BLOCK, CP_MARK, CP_TYPE_CPU, Cp, CpFinder, J_IDENTIFIER, JD_BITS, Jd, Layout, SYNC_ONES, frame,
+    get, is_jd, is_jp, put, unframe,
 };
 
 use super::{
-    CONSTELLATION_FRAME, CONSTELLATION_POINTS, CONSTELLATION_SETS, FilterLimits, Filters, Parameters, Trellis,
-    UP_INTERVALS, UP_RATES, four_g_from_gain, gain_from_4g, signed_q, to_signed_q,
+    CONSTELLATION_FRAME, CONSTELLATION_POINTS, CONSTELLATION_SETS, FilterLimits, Filters,
+    Parameters, Trellis, UP_INTERVALS, UP_RATES, four_g_from_gain, gain_from_4g, signed_q,
+    to_signed_q,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,7 +94,10 @@ pub const SHORT_BITS: usize = 52;
 /// shrug; the `max` is only so that a shipped build limps instead of dividing
 /// by zero.
 fn pad_to(bits: &mut Vec<bool>, unit: usize) {
-    debug_assert!(unit > 0, "a V.92 sequence fills to a whole number of symbols, not to none");
+    debug_assert!(
+        unit > 0,
+        "a V.92 sequence fills to a whole number of symbols, not to none"
+    );
     let unit = unit.max(1);
     bits.resize(bits.len().div_ceil(unit) * unit, false);
 }
@@ -115,7 +119,11 @@ pub const TRN2U_EIGHT_BITS: usize = 3 * UP_INTERVALS;
 /// frame: `v90::sequences::training_bits` in Phase 4 and `data_bits` in data
 /// mode. Each is passed to `to_bits` as it stands.
 pub fn trn2u_unit(eight_point: bool) -> usize {
-    if eight_point { TRN2U_EIGHT_BITS } else { TRN2U_FOUR_BITS }
+    if eight_point {
+        TRN2U_EIGHT_BITS
+    } else {
+        TRN2U_FOUR_BITS
+    }
 }
 
 /// A short information sequence: one information word, the CRC over it, and
@@ -224,7 +232,12 @@ impl J {
     /// choice they used to make is Jp bits 48 and 49, over four or eight points
     /// rather than four or sixteen.
     pub fn jd(rates: u32, lookahead: u8) -> Self {
-        Self::Jd(Jd { rates, sixteen_in_training: false, sixteen_in_renegotiation: false, lookahead })
+        Self::Jd(Jd {
+            rates,
+            sixteen_in_training: false,
+            sixteen_in_renegotiation: false,
+            lookahead,
+        })
     }
 
     /// Whichever of the two `bits` hold, if the CRC checks.
@@ -299,10 +312,17 @@ impl Suvu {
     fn word(&self) -> u32 {
         let level = match self.level {
             None => LEVEL_NONE,
-            Some(level) => to_signed_q(level.clamp(-LEVEL_LARGEST, LEVEL_LARGEST), LEVEL_WIDTH, LEVEL_FRACTION),
+            Some(level) => to_signed_q(
+                level.clamp(-LEVEL_LARGEST, LEVEL_LARGEST),
+                LEVEL_WIDTH,
+                LEVEL_FRACTION,
+            ),
         };
         // Bits 19:25 go out as the zeros Table 27 asks for.
-        1 | u32::from(self.wait_for_cpu) << 8 | level << 9 | u32::from(self.silence) << 14 | u32::from(self.ack) << 15
+        1 | u32::from(self.wait_for_cpu) << 8
+            | level << 9
+            | u32::from(self.silence) << 14
+            | u32::from(self.ack) << 15
     }
 
     /// The sequence, filled to a multiple of twelve symbols: `unit` is what
@@ -357,7 +377,10 @@ impl Suvd {
     /// The SUVd `bits` hold. Bits 19:31 are ignored, not refused.
     pub fn from_bits(bits: &[bool]) -> Option<Self> {
         let word = short_word(bits)?;
-        (word & 1 == 1).then_some(Self { silence: word >> 14 & 1 == 1, ack: word >> 15 & 1 == 1 })
+        (word & 1 == 1).then_some(Self {
+            silence: word >> 14 & 1 == 1,
+            ack: word >> 15 & 1 == 1,
+        })
     }
 }
 
@@ -398,7 +421,10 @@ impl Cpus {
         if word & 1 == 1 || word >> 1 & 3 != CP_TYPE_CPUS {
             return None;
         }
-        Some(Self { drn: (word >> 3 & 0x1f) as u8, ack: word >> 15 & 1 == 1 })
+        Some(Self {
+            drn: (word >> 3 & 0x1f) as u8,
+            ack: word >> 15 & 1 == 1,
+        })
     }
 }
 
@@ -449,8 +475,12 @@ pub const SET_POINTS_SENT: usize = CONSTELLATION_POINTS / 2;
 /// The nine- and eight-bit length fields would let a corrupt header ask for
 /// three times that, so a candidate asking for more than this is dropped rather
 /// than waited on for seconds of bits that cannot pass the CRC.
-pub const CPD_WORDS_MOST: usize =
-    2 + MODULUS_WORDS + FILTER_LENGTH_WORDS + 384 + SET_HEADER_WORDS + CONSTELLATION_SETS * CONSTELLATION_POINTS;
+pub const CPD_WORDS_MOST: usize = 2
+    + MODULUS_WORDS
+    + FILTER_LENGTH_WORDS
+    + 384
+    + SET_HEADER_WORDS
+    + CONSTELLATION_SETS * CONSTELLATION_POINTS;
 
 /// The constellation sets a CPd carries, and which of them each interval uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -484,7 +514,9 @@ pub struct Sets {
 /// modem, so a capture that disagrees changes this one function.
 pub fn set_levels(points: &[u16]) -> Vec<i32> {
     let negative = points.iter().rev().map(|&point| -i32::from(point));
-    negative.chain(points.iter().map(|&point| i32::from(point))).collect()
+    negative
+        .chain(points.iter().map(|&point| i32::from(point)))
+        .collect()
 }
 
 /// CPd (Table 30): the modulation parameters the analogue modem is to transmit
@@ -615,13 +647,21 @@ impl Cpd {
             }
             for ((section, fraction), length) in sections.into_iter().zip(lengths) {
                 for &coefficient in &section[..length] {
-                    put(&mut information, to_signed_q(coefficient, COEFFICIENT_WIDTH, fraction), BLOCK);
+                    put(
+                        &mut information,
+                        to_signed_q(coefficient, COEFFICIENT_WIDTH, fraction),
+                        BLOCK,
+                    );
                 }
             }
         }
         if let Some(sets) = &self.sets {
             let index = |j: usize| u32::from(sets.index[j] & 0xf);
-            put(&mut information, index(0) | index(1) << 4 | index(2) << 8 | index(3) << 12, BLOCK);
+            put(
+                &mut information,
+                index(0) | index(1) << 4 | index(2) << 8 | index(3) << 12,
+                BLOCK,
+            );
             // Then intervals 4 and 10, 5 and 11, and eight reserved bits.
             put(&mut information, index(4) | index(5) << 4, BLOCK);
             // LC1 to LC6, two to a word, zero for a set that is not there.
@@ -675,7 +715,13 @@ impl Cpd {
             at += FILTER_LENGTH_WORDS * BLOCK;
             let mut section = |length: usize, fraction: u32| {
                 let taps = (0..length)
-                    .map(|k| signed_q(get(&information, at + k * BLOCK, BLOCK), COEFFICIENT_WIDTH, fraction))
+                    .map(|k| {
+                        signed_q(
+                            get(&information, at + k * BLOCK, BLOCK),
+                            COEFFICIENT_WIDTH,
+                            fraction,
+                        )
+                    })
                     .collect();
                 at += length * BLOCK;
                 taps
@@ -693,12 +739,17 @@ impl Cpd {
                 get(&information, at + word * BLOCK + 4 * nibble, 4) as u8
             });
             at += 2 * BLOCK;
-            let lengths: [usize; CONSTELLATION_SETS] =
-                std::array::from_fn(|k| get(&information, at + (k / 2) * BLOCK + (k % 2) * 8, 8) as usize);
+            let lengths: [usize; CONSTELLATION_SETS] = std::array::from_fn(|k| {
+                get(&information, at + (k / 2) * BLOCK + (k % 2) * 8, 8) as usize
+            });
             at += (SET_HEADER_WORDS - 2) * BLOCK;
             let mut points = Vec::new();
             for length in lengths {
-                points.push((0..length).map(|k| get(&information, at + k * BLOCK, BLOCK) as u16).collect::<Vec<_>>());
+                points.push(
+                    (0..length)
+                        .map(|k| get(&information, at + k * BLOCK, BLOCK) as u16)
+                        .collect::<Vec<_>>(),
+                );
                 at += length * BLOCK;
             }
             // A set of zero size carries no words at all. Trailing ones are
@@ -757,7 +808,8 @@ impl Cpd {
         }
         let parameters = Parameters::try_from(self)?;
         parameters.fits()?;
-        if up_bits > 0 && (u128::from(up_bits) >= 128 || (1u128 << up_bits) > parameters.product()) {
+        if up_bits > 0 && (u128::from(up_bits) >= 128 || (1u128 << up_bits) > parameters.product())
+        {
             return Err("the data frame carries more bits than the moduli can hold");
         }
         Ok(())
@@ -776,7 +828,10 @@ impl From<&Parameters> for Cpd {
             gain4: four_g_from_gain(parameters.gain),
             moduli: Some(parameters.moduli),
             filters: Some(parameters.filters.clone()),
-            sets: Some(Sets { index: parameters.indices, points: parameters.sets.clone() }),
+            sets: Some(Sets {
+                index: parameters.indices,
+                points: parameters.sets.clone(),
+            }),
         }
     }
 }
@@ -787,9 +842,17 @@ impl TryFrom<&Cpd> for Parameters {
     /// What a CPd means, once every part is there. A CPd that leaves one out
     /// is merged over the previous one first ([`Cpd::merged_over`]).
     fn try_from(cpd: &Cpd) -> Result<Self, Self::Error> {
-        let moduli = cpd.moduli.ok_or("the CPd carries no modulus encoder parameters")?;
-        let filters = cpd.filters.clone().ok_or("the CPd carries no precoder or prefilter coefficients")?;
-        let sets = cpd.sets.clone().ok_or("the CPd carries no constellation sets")?;
+        let moduli = cpd
+            .moduli
+            .ok_or("the CPd carries no modulus encoder parameters")?;
+        let filters = cpd
+            .filters
+            .clone()
+            .ok_or("the CPd carries no precoder or prefilter coefficients")?;
+        let sets = cpd
+            .sets
+            .clone()
+            .ok_or("the CPd carries no constellation sets")?;
         Ok(Self {
             drn: cpd.drn,
             trellis: cpd.trellis,
@@ -824,7 +887,11 @@ pub const RM_PERIOD: usize = 4;
 /// subtraction saturates rather than wrapping to 255.
 pub fn rm_k(i: usize, m: u8, prime: bool) -> u32 {
     let high = (i % RM_PERIOD < RM_PERIOD / 2) != prime;
-    if high { u32::from(m).saturating_sub(1) } else { 0 }
+    if high {
+        u32::from(m).saturating_sub(1)
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -861,9 +928,15 @@ impl CpFamily {
         }
         match get(bits, CP_MARK + 1, 2) {
             CP_TYPE_CPUS => Cpus::from_bits(bits).map(Self::Cpus),
-            type_bits if type_bits <= CP_TYPE_CPU => Cp::from_bits_in(Layout::V92, bits).map(|cp| {
-                if cp.data_mode { Self::Cpu(cp) } else { Self::Cpt(cp) }
-            }),
+            type_bits if type_bits <= CP_TYPE_CPU => {
+                Cp::from_bits_in(Layout::V92, bits).map(|cp| {
+                    if cp.data_mode {
+                        Self::Cpu(cp)
+                    } else {
+                        Self::Cpt(cp)
+                    }
+                })
+            }
             _ => None,
         }
     }
@@ -945,7 +1018,11 @@ fn cpd_words(bits: &[bool]) -> Length {
         }
         words += SET_HEADER_WORDS + points;
     }
-    if words > CPD_WORDS_MOST { Length::Refused } else { Length::Known(words) }
+    if words > CPD_WORDS_MOST {
+        Length::Refused
+    } else {
+        Length::Known(words)
+    }
 }
 
 /// The same as bits, fill included.
@@ -980,7 +1057,13 @@ struct Finder<T> {
 
 impl<T> Finder<T> {
     fn new(length: fn(&[bool]) -> Length, parse: fn(&[bool]) -> Option<T>) -> Self {
-        Self { bits: Vec::new(), ones: 0, starts: Vec::new(), length, parse }
+        Self {
+            bits: Vec::new(),
+            ones: 0,
+            starts: Vec::new(),
+            length,
+            parse,
+        }
     }
 
     fn feed(&mut self, bit: bool) -> Option<T> {
@@ -1012,7 +1095,11 @@ impl<T> Finder<T> {
             self.starts.clear();
         }
         // Keep what the oldest candidate needs, or the last sync's worth.
-        let keep_from = self.starts.first().copied().unwrap_or(self.bits.len().saturating_sub(SYNC_ONES));
+        let keep_from = self
+            .starts
+            .first()
+            .copied()
+            .unwrap_or(self.bits.len().saturating_sub(SYNC_ONES));
         if keep_from > 4096 {
             self.bits.drain(..keep_from);
             for start in &mut self.starts {
@@ -1041,13 +1128,22 @@ impl UpFinder {
     /// exchange: a long CP is padded to it, and the finder has to know where
     /// the padding ends.
     pub fn new(unit: usize) -> Self {
-        Self { cps: CpFinder::v92(unit), shorts: Finder::new(short_length, short_family) }
+        Self {
+            cps: CpFinder::v92(unit),
+            shorts: Finder::new(short_length, short_family),
+        }
     }
 
     /// One more descrambled bit, and the sequence it completed if it completed
     /// one.
     pub fn feed(&mut self, bit: bool) -> Option<CpFamily> {
-        let cp = self.cps.feed(bit).map(|cp| if cp.data_mode { CpFamily::Cpu(cp) } else { CpFamily::Cpt(cp) });
+        let cp = self.cps.feed(bit).map(|cp| {
+            if cp.data_mode {
+                CpFamily::Cpu(cp)
+            } else {
+                CpFamily::Cpt(cp)
+            }
+        });
         let short = self.shorts.feed(bit);
         cp.or(short)
     }
@@ -1091,7 +1187,11 @@ fn down_length(bits: &[bool]) -> Length {
     if bits.len() <= CP_MARK {
         return Length::Waiting;
     }
-    if bits[CP_MARK] == SUV_MARK { Length::Known(SHORT_BITS) } else { cpd_length(bits) }
+    if bits[CP_MARK] == SUV_MARK {
+        Length::Known(SHORT_BITS)
+    } else {
+        cpd_length(bits)
+    }
 }
 
 #[cfg(test)]
@@ -1113,7 +1213,9 @@ mod upstream_trace {
     #[test]
     #[ignore = "needs V92_UP_TRACE to name a captured upstream"]
     fn scan_an_upstream_trace() {
-        let Ok(path) = std::env::var("V92_UP_TRACE") else { return };
+        let Ok(path) = std::env::var("V92_UP_TRACE") else {
+            return;
+        };
         let text = std::fs::read_to_string(&path).unwrap();
         let (mut from, mut to) = (0u64, u64::MAX);
         if let Ok(span) = std::env::var("V92_UP_SPAN") {
@@ -1126,9 +1228,13 @@ mod upstream_trace {
         let (mut bits_seen, mut zeros) = (0u64, 0u64);
         for line in text.lines() {
             let mut parts = line.split_whitespace();
-            let Some(now) = parts.next().and_then(|t| t.parse::<u64>().ok()) else { continue };
+            let Some(now) = parts.next().and_then(|t| t.parse::<u64>().ok()) else {
+                continue;
+            };
             let _level = parts.next();
-            let Some(pattern) = parts.next() else { continue };
+            let Some(pattern) = parts.next() else {
+                continue;
+            };
             if now < from || now >= to {
                 continue;
             }
@@ -1139,16 +1245,22 @@ mod upstream_trace {
                     zeros += 1;
                 }
                 if let Some(family) = finder.feed(bit) {
-                    found.push((now, match family {
-                        CpFamily::Suvu(s) => format!("SUVu ack {}", s.ack),
-                        CpFamily::Cpu(_) => "CPu".into(),
-                        CpFamily::Cpt(_) => "CPt".into(),
-                        CpFamily::Cpus(c) => format!("CPus drn {} ack {}", c.drn, c.ack),
-                    }));
+                    found.push((
+                        now,
+                        match family {
+                            CpFamily::Suvu(s) => format!("SUVu ack {}", s.ack),
+                            CpFamily::Cpu(_) => "CPu".into(),
+                            CpFamily::Cpt(_) => "CPt".into(),
+                            CpFamily::Cpus(c) => format!("CPus drn {} ack {}", c.drn, c.ack),
+                        },
+                    ));
                 }
             }
         }
-        eprintln!("V92UP: {bits_seen} bits, {zeros} zeros, {} sequences", found.len());
+        eprintln!(
+            "V92UP: {bits_seen} bits, {zeros} zeros, {} sequences",
+            found.len()
+        );
         let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
         for (_, name) in &found {
             *counts.entry(name.as_str()).or_default() += 1;
@@ -1166,11 +1278,16 @@ mod upstream_trace {
 mod tests {
     use super::*;
     use crate::v34::info::crc;
-    use crate::v90::sequences::{ALL_PCM_UPSTREAM_RATES, Descriptor, DescriptorFinder, JD_PRIME_BITS};
+    use crate::v90::sequences::{
+        ALL_PCM_UPSTREAM_RATES, Descriptor, DescriptorFinder, JD_PRIME_BITS,
+    };
     use crate::v92::TRELLIS_FRAME;
 
     fn bits_of(text: &str) -> Vec<bool> {
-        text.bytes().filter(|b| !b.is_ascii_whitespace()).map(|b| b == b'1').collect()
+        text.bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| b == b'1')
+            .collect()
     }
 
     fn text(bits: &[bool]) -> String {
@@ -1230,7 +1347,10 @@ mod tests {
                 z2: vec![1.0 - 1.0 / 32768.0, 0.5],
                 p2: vec![-2.0],
             },
-            sets: vec![(1..=24).map(|k| k * 400).collect(), (1..=20).map(|k| k * 500).collect()],
+            sets: vec![
+                (1..=24).map(|k| k * 400).collect(),
+                (1..=20).map(|k| k * 500).collect(),
+            ],
             indices: [0, 1, 0, 1, 0, 1],
         }
     }
@@ -1240,15 +1360,34 @@ mod tests {
     #[test]
     fn jd_vectors_check_and_say_jd_in_bit_47() {
         for (lookahead, crc, printed) in [
-            (1, 0x776E, "11111111111111111 0 1111111111111111 0 1111110000000010 0 0111011011101110 0000"),
-            (3, 0xF366, "11111111111111111 0 1111111111111111 0 1111110000000011 0 0110011011001111 0000"),
+            (
+                1,
+                0x776E,
+                "11111111111111111 0 1111111111111111 0 1111110000000010 0 0111011011101110 0000",
+            ),
+            (
+                3,
+                0xF366,
+                "11111111111111111 0 1111111111111111 0 1111110000000011 0 0110011011001111 0000",
+            ),
         ] {
-            let jd = Jd { rates: Jd::ALL_RATES, lookahead, ..Jd::default() };
+            let jd = Jd {
+                rates: Jd::ALL_RATES,
+                lookahead,
+                ..Jd::default()
+            };
             let bits = jd.to_bits();
-            assert_eq!(text(&bits), text(&bits_of(printed)), "look-ahead {lookahead}");
+            assert_eq!(
+                text(&bits),
+                text(&bits_of(printed)),
+                "look-ahead {lookahead}"
+            );
             assert_eq!(crc_of(&bits, 2), crc);
             assert!(!bits[J_IDENTIFIER], "a Jd carries 0 in bit 47");
-            assert!(!bits[48], "and 0 in the bit V.90 used for a rate renegotiation");
+            assert!(
+                !bits[48],
+                "and 0 in the bit V.90 used for a rate renegotiation"
+            );
             assert_eq!(J::from_bits(&bits), Some(J::Jd(jd)));
             assert_eq!(J::from_bits(&bits).map(|j| j.to_bits()), Some(bits));
             // The constructor a V.92 sender uses leaves both flags clear.
@@ -1263,17 +1402,29 @@ mod tests {
     fn jp_carries_epsilon_in_bits_18_to_33_and_the_trn2u_sizes_in_48_and_49() {
         for (jp, crc, printed) in [
             (
-                Jp { epsilon: 0x8000, eight_in_training: false, eight_in_renegotiation: false },
+                Jp {
+                    epsilon: 0x8000,
+                    eight_in_training: false,
+                    eight_in_renegotiation: false,
+                },
                 0x1F4C,
                 "11111111111111111 0 0000000000000001 0 0000000000001000 0 0011001011111000 0000",
             ),
             (
-                Jp { epsilon: 0x8000, eight_in_training: true, eight_in_renegotiation: false },
+                Jp {
+                    epsilon: 0x8000,
+                    eight_in_training: true,
+                    eight_in_renegotiation: false,
+                },
                 0x3E4E,
                 "11111111111111111 0 0000000000000001 0 0000000000001100 0 0111001001111100 0000",
             ),
             (
-                Jp { epsilon: 0, eight_in_training: true, eight_in_renegotiation: true },
+                Jp {
+                    epsilon: 0,
+                    eight_in_training: true,
+                    eight_in_renegotiation: true,
+                },
                 0x70A6,
                 "11111111111111111 0 0000000000000000 0 0000000000001110 0 0110010100001110 0000",
             ),
@@ -1298,18 +1449,29 @@ mod tests {
     /// both carry a good CRC, so only bit 47 tells them apart.
     #[test]
     fn a_jp_is_never_read_as_a_jd_and_back() {
-        let jp = Jp { epsilon: 0xFFFF, eight_in_training: true, eight_in_renegotiation: false };
+        let jp = Jp {
+            epsilon: 0xFFFF,
+            eight_in_training: true,
+            eight_in_renegotiation: false,
+        };
         let bits = jp.to_bits();
         // V.90's own reader takes it for a Jd: epsilon's sixteen bits become
         // the first sixteen rates of the mask, and bit 47 becomes the training
         // constellation flag.
         let misread = Jd::from_bits(&bits).expect("a Jp does carry a good CRC");
         assert_eq!(misread.rates, 0xFFFF);
-        assert!(misread.sixteen_in_training, "this is the hazard, in one line");
+        assert!(
+            misread.sixteen_in_training,
+            "this is the hazard, in one line"
+        );
         // The V.92 reader does not make that mistake, in either direction.
         assert_eq!(Jd::from_bits_if(&bits, is_jd), None);
         assert_eq!(J::from_bits(&bits), Some(J::Jp(jp)));
-        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 2, ..Jd::default() };
+        let jd = Jd {
+            rates: Jd::ALL_RATES,
+            lookahead: 2,
+            ..Jd::default()
+        };
         assert_eq!(Jp::from_bits(&jd.to_bits()), None);
         assert_eq!(J::from_bits(&jd.to_bits()), Some(J::Jd(jd)));
     }
@@ -1319,10 +1481,38 @@ mod tests {
     #[test]
     fn suvd_vectors_match() {
         for (suvd, crc, printed) in [
-            (Suvd { silence: false, ack: false }, 0xE960, "11111111111111111 0 1000000000000000 0 0000011010010111 0"),
-            (Suvd { silence: false, ack: true }, 0x6D68, "11111111111111111 0 1000000000000001 0 0001011010110110 0"),
-            (Suvd { silence: true, ack: false }, 0xAB64, "11111111111111111 0 1000000000000010 0 0010011011010101 0"),
-            (Suvd { silence: true, ack: true }, 0x2F6C, "11111111111111111 0 1000000000000011 0 0011011011110100 0"),
+            (
+                Suvd {
+                    silence: false,
+                    ack: false,
+                },
+                0xE960,
+                "11111111111111111 0 1000000000000000 0 0000011010010111 0",
+            ),
+            (
+                Suvd {
+                    silence: false,
+                    ack: true,
+                },
+                0x6D68,
+                "11111111111111111 0 1000000000000001 0 0001011010110110 0",
+            ),
+            (
+                Suvd {
+                    silence: true,
+                    ack: false,
+                },
+                0xAB64,
+                "11111111111111111 0 1000000000000010 0 0010011011010101 0",
+            ),
+            (
+                Suvd {
+                    silence: true,
+                    ack: true,
+                },
+                0x2F6C,
+                "11111111111111111 0 1000000000000011 0 0011011011110100 0",
+            ),
         ] {
             // D = 42 bits a frame, so the fifty-two bits round up to two
             // frames; the vector is the sequence before that fill.
@@ -1353,7 +1543,9 @@ mod tests {
         assert_eq!(sequence_bits(2), 69);
         assert_eq!(
             text(&bits[..69]),
-            text(&bits_of("11111111111111111 0 0000110010000000 0 0000000000000010 0 1101000011101010 0"))
+            text(&bits_of(
+                "11111111111111111 0 0000110010000000 0 0000000000000010 0 1101000011101010 0"
+            ))
         );
         assert_eq!(crc_of(&bits, 2), 0x570B);
         // D = 9 bits a frame at the slowest TRN2d rate, so sixty-nine bits
@@ -1369,7 +1561,8 @@ mod tests {
     /// Table 30 read end to end: every part present, back to the same
     /// `Parameters`, with every start bit on a multiple of seventeen.
     #[test]
-    fn a_cpd_with_every_part_round_trips_through_parameters_and_keeps_start_bits_on_multiples_of_17() {
+    fn a_cpd_with_every_part_round_trips_through_parameters_and_keeps_start_bits_on_multiples_of_17()
+     {
         let wanted = parameters();
         let cpd = Cpd::from(&wanted);
         assert!(cpd.complete());
@@ -1378,7 +1571,11 @@ mod tests {
         assert_eq!(bits.len(), sequence_bits(words).div_ceil(30) * 30);
         for w in 0..=words {
             let at = word_at(w);
-            assert_eq!(at % WORD, 0, "word {w} does not start on a multiple of seventeen");
+            assert_eq!(
+                at % WORD,
+                0,
+                "word {w} does not start on a multiple of seventeen"
+            );
             assert!(!bits[at], "the start bit of word {w} is not a zero");
         }
         let read = Cpd::from_bits(&bits).expect("the CRC did not check");
@@ -1401,14 +1598,21 @@ mod tests {
     #[test]
     fn an_absent_part_moves_everything_after_it() {
         let full = Cpd::from(&parameters());
-        let without = Cpd { moduli: None, ..full.clone() };
+        let without = Cpd {
+            moduli: None,
+            ..full.clone()
+        };
         // Unpadded, so that the fill of the carrying modulation does not blur
         // what the part itself is worth.
         let (full_bits, short_bits) = (full.to_bits(1), without.to_bits(1));
         // Six words of moduli, at seventeen bits each.
         assert_eq!(full_bits.len() - short_bits.len(), 6 * WORD);
         // The filter lengths now sit where the moduli were.
-        assert_eq!(get(&short_bits, 52, LENGTH_BITS), 2, "LZ1 has moved to bit 52");
+        assert_eq!(
+            get(&short_bits, 52, LENGTH_BITS),
+            2,
+            "LZ1 has moved to bit 52"
+        );
         assert_eq!(Cpd::from_bits(&short_bits), Some(without.clone()));
         // An absent part means the previous one stands.
         let merged = without.merged_over(&full);
@@ -1416,9 +1620,20 @@ mod tests {
         assert!(!without.complete() && full.complete());
         // Any one part can go, and the sequence still reads.
         for cpd in [
-            Cpd { filters: None, ..full.clone() },
-            Cpd { sets: None, ..full.clone() },
-            Cpd { moduli: None, filters: None, sets: None, ..full.clone() },
+            Cpd {
+                filters: None,
+                ..full.clone()
+            },
+            Cpd {
+                sets: None,
+                ..full.clone()
+            },
+            Cpd {
+                moduli: None,
+                filters: None,
+                sets: None,
+                ..full.clone()
+            },
         ] {
             let bits = cpd.to_bits(30);
             assert_eq!(Cpd::from_bits(&bits), Some(cpd.clone()));
@@ -1438,36 +1653,79 @@ mod tests {
         let refused: [(Cpd, &str); 8] = [
             (
                 Cpd {
-                    filters: Some(Filters { z1: long(100), p1: long(100), z2: long(100), p2: long(100) }),
+                    filters: Some(Filters {
+                        z1: long(100),
+                        p1: long(100),
+                        z2: long(100),
+                        p2: long(100),
+                    }),
                     ..good.clone()
                 },
                 "the filters have more coefficients than this end offered",
             ),
             (
-                Cpd { filters: Some(Filters { z1: vec![], p1: long(330), z2: long(2), p2: vec![] }), ..good.clone() },
+                Cpd {
+                    filters: Some(Filters {
+                        z1: vec![],
+                        p1: long(330),
+                        z2: long(2),
+                        p2: vec![],
+                    }),
+                    ..good.clone()
+                },
                 "a filter section is longer than this end offered",
             ),
             (
-                Cpd { sets: Some(Sets { index: [0; 6], points: vec![vec![0, 400]] }), ..good.clone() },
+                Cpd {
+                    sets: Some(Sets {
+                        index: [0; 6],
+                        points: vec![vec![0, 400]],
+                    }),
+                    ..good.clone()
+                },
                 "a constellation set contains the zero point",
             ),
             (
                 Cpd {
-                    sets: Some(Sets { index: [0, 2, 0, 2, 0, 2], points: vec![vec![400], vec![], vec![500]] }),
+                    sets: Some(Sets {
+                        index: [0, 2, 0, 2, 0, 2],
+                        points: vec![vec![400], vec![], vec![500]],
+                    }),
                     ..good.clone()
                 },
                 "a constellation set is empty",
             ),
             (
-                Cpd { sets: Some(Sets { index: [3; CONSTELLATION_FRAME], points: vec![vec![400]] }), ..good.clone() },
+                Cpd {
+                    sets: Some(Sets {
+                        index: [3; CONSTELLATION_FRAME],
+                        points: vec![vec![400]],
+                    }),
+                    ..good.clone()
+                },
                 "a constellation index points past the sets",
             ),
             (
-                Cpd { moduli: Some([200; UP_INTERVALS]), ..good.clone() },
+                Cpd {
+                    moduli: Some([200; UP_INTERVALS]),
+                    ..good.clone()
+                },
                 "an interval's constellation is too small for its modulus",
             ),
-            (Cpd { moduli: Some([2; UP_INTERVALS]), ..good.clone() }, "the data frame carries more bits than the moduli can hold"),
-            (Cpd { gain4: 0, ..good.clone() }, "the gain is zero, which Table 30 forbids"),
+            (
+                Cpd {
+                    moduli: Some([2; UP_INTERVALS]),
+                    ..good.clone()
+                },
+                "the data frame carries more bits than the moduli can hold",
+            ),
+            (
+                Cpd {
+                    gain4: 0,
+                    ..good.clone()
+                },
+                "the gain is zero, which Table 30 forbids",
+            ),
         ];
         for (cpd, reason) in refused {
             assert_eq!(cpd.check(&limits, bits), Err(reason));
@@ -1485,7 +1743,10 @@ mod tests {
         let raise = |i: usize| {
             let mut moduli = parameters().moduli;
             moduli[i] = 21;
-            Cpd { moduli: Some(moduli), ..good.clone() }
+            Cpd {
+                moduli: Some(moduli),
+                ..good.clone()
+            }
         };
         assert_eq!(raise(1).check(&limits, bits), Ok(()));
         assert_eq!(
@@ -1493,8 +1754,16 @@ mod tests {
             Err("an interval's constellation is too small for its modulus")
         );
         // A partial CPd has no parameters of its own to check.
-        let partial = Cpd { moduli: None, filters: None, sets: None, ..good.clone() };
-        assert_eq!(partial.check(&limits, bits), Err("the CPd carries no modulus encoder parameters"));
+        let partial = Cpd {
+            moduli: None,
+            filters: None,
+            sets: None,
+            ..good.clone()
+        };
+        assert_eq!(
+            partial.check(&limits, bits),
+            Err("the CPd carries no modulus encoder parameters")
+        );
         assert_eq!(partial.merged_over(&good).check(&limits, bits), Ok(()));
         // And a rate off the ladder is not one drn names.
         assert_eq!(
@@ -1507,7 +1776,12 @@ mod tests {
     /// The value 16 (-4.00) indicates that no measurement has been taken."
     #[test]
     fn suvu_level_is_signed_q2_2_and_16_means_none() {
-        let unmeasured = Suvu { wait_for_cpu: true, level: None, silence: false, ack: false };
+        let unmeasured = Suvu {
+            wait_for_cpu: true,
+            level: None,
+            silence: false,
+            ack: false,
+        };
         let bits = unmeasured.to_bits(TRN2U_FOUR_BITS);
         // Bit 31 set and 27:30 clear is the printed 16.
         assert_eq!(get(&bits, 27, 5), LEVEL_NONE);
@@ -1516,8 +1790,12 @@ mod tests {
         // Every step of the field, and the two ends of it.
         for code in 0..32u32 {
             let level = signed_q(code, LEVEL_WIDTH, LEVEL_FRACTION);
-            let suvu = Suvu { level: Some(level), ..Suvu::default() };
-            let read = Suvu::from_bits(&suvu.to_bits(TRN2U_EIGHT_BITS)).expect("the CRC did not check");
+            let suvu = Suvu {
+                level: Some(level),
+                ..Suvu::default()
+            };
+            let read =
+                Suvu::from_bits(&suvu.to_bits(TRN2U_EIGHT_BITS)).expect("the CRC did not check");
             if code == LEVEL_NONE {
                 // -4.00 is not a level: a measurement there is clamped to the
                 // largest magnitude the field can otherwise report.
@@ -1531,10 +1809,19 @@ mod tests {
         assert_eq!(signed_q(0x0F, LEVEL_WIDTH, LEVEL_FRACTION), LEVEL_LARGEST);
         // A design asking for more than the field can hold still sends a legal
         // one, at the top of the range rather than wrapping to the bottom.
-        let loud = Suvu { level: Some(9.0), ..Suvu::default() };
+        let loud = Suvu {
+            level: Some(9.0),
+            ..Suvu::default()
+        };
         assert_eq!(get(&loud.to_bits(TRN2U_FOUR_BITS), 27, 5), 0x0F);
-        let quiet = Suvu { level: Some(-9.0), ..Suvu::default() };
-        assert_eq!(Suvu::from_bits(&quiet.to_bits(TRN2U_FOUR_BITS)).and_then(|s| s.level), Some(-LEVEL_LARGEST));
+        let quiet = Suvu {
+            level: Some(-9.0),
+            ..Suvu::default()
+        };
+        assert_eq!(
+            Suvu::from_bits(&quiet.to_bits(TRN2U_FOUR_BITS)).and_then(|s| s.level),
+            Some(-LEVEL_LARGEST)
+        );
     }
 
     /// Table 24: CPus is the CP family's type 2, and its CRC covers bits 18:33
@@ -1556,7 +1843,10 @@ mod tests {
         // drn = 0 is the cleardown form (9.11).
         let clear = Cpus { drn: 0, ack: false };
         assert_eq!(get(&clear.to_bits(TRN2U_FOUR_BITS), 21, 5), 0);
-        assert_eq!(Cpus::from_bits(&clear.to_bits(TRN2U_FOUR_BITS)), Some(clear));
+        assert_eq!(
+            Cpus::from_bits(&clear.to_bits(TRN2U_FOUR_BITS)),
+            Some(clear)
+        );
     }
 
     /// The fill of Tables 23, 24, 27, 30 and 31: "to the next multiple of 12
@@ -1591,15 +1881,41 @@ mod tests {
     /// 19:20 tells CPt, CPu and CPus apart.
     #[test]
     fn the_cp_family_is_told_apart_by_bit_18_and_type() {
-        let cpt = Cp { data_mode: false, drn: 16, ..Cp::default() };
-        let cpu = Cp { data_mode: true, drn: 22, ..Cp::default() };
-        let cpus = Cpus { drn: 22, ack: false };
-        let suvu = Suvu { silence: true, ..Suvu::default() };
+        let cpt = Cp {
+            data_mode: false,
+            drn: 16,
+            ..Cp::default()
+        };
+        let cpu = Cp {
+            data_mode: true,
+            drn: 22,
+            ..Cp::default()
+        };
+        let cpus = Cpus {
+            drn: 22,
+            ack: false,
+        };
+        let suvu = Suvu {
+            silence: true,
+            ..Suvu::default()
+        };
         let unit = trn2u_unit(false);
-        assert_eq!(CpFamily::from_bits(&cpt.to_bits_in(Layout::V92, unit)), Some(CpFamily::Cpt(cpt.clone())));
-        assert_eq!(CpFamily::from_bits(&cpu.to_bits_in(Layout::V92, unit)), Some(CpFamily::Cpu(cpu.clone())));
-        assert_eq!(CpFamily::from_bits(&cpus.to_bits(unit)), Some(CpFamily::Cpus(cpus)));
-        assert_eq!(CpFamily::from_bits(&suvu.to_bits(unit)), Some(CpFamily::Suvu(suvu)));
+        assert_eq!(
+            CpFamily::from_bits(&cpt.to_bits_in(Layout::V92, unit)),
+            Some(CpFamily::Cpt(cpt.clone()))
+        );
+        assert_eq!(
+            CpFamily::from_bits(&cpu.to_bits_in(Layout::V92, unit)),
+            Some(CpFamily::Cpu(cpu.clone()))
+        );
+        assert_eq!(
+            CpFamily::from_bits(&cpus.to_bits(unit)),
+            Some(CpFamily::Cpus(cpus))
+        );
+        assert_eq!(
+            CpFamily::from_bits(&suvu.to_bits(unit)),
+            Some(CpFamily::Suvu(suvu))
+        );
         // Type 3 is unassigned: a dispatch field this end cannot read is the
         // one thing that stops a sequence being read at all.
         let mut three = cpus.to_bits(unit);
@@ -1611,20 +1927,34 @@ mod tests {
         assert_eq!(Suvu::from_bits(&cpus.to_bits(unit)), None);
         // Downstream the same bit 18 separates CPd from SUVd.
         let cpd = Cpd::cleardown(false);
-        assert_eq!(DownFamily::from_bits(&cpd.to_bits(30)), Some(DownFamily::Cpd(cpd)));
-        assert_eq!(DownFamily::from_bits(&Suvd::default().to_bits(30)), Some(DownFamily::Suvd(Suvd::default())));
+        assert_eq!(
+            DownFamily::from_bits(&cpd.to_bits(30)),
+            Some(DownFamily::Cpd(cpd))
+        );
+        assert_eq!(
+            DownFamily::from_bits(&Suvd::default().to_bits(30)),
+            Some(DownFamily::Suvd(Suvd::default()))
+        );
     }
 
     /// Table 23/V.92 against Table 14/V.90: the type and drn moved, so a CP
     /// read in the wrong layout is a CP with the wrong rate (CD 4.4).
     #[test]
     fn a_v90_cp_is_not_read_as_a_v92_cp() {
-        let cpu = Cp { data_mode: true, drn: 12, ..Cp::default() };
+        let cpu = Cp {
+            data_mode: true,
+            drn: 12,
+            ..Cp::default()
+        };
         let v92 = cpu.to_bits_in(Layout::V92, trn2u_unit(false));
         // V.90's reader looks for drn at 20:24, one place below where V.92
         // puts it, so it reads the rate doubled.
         let misread = Cp::from_bits(&v92).expect("the CRC does check either way");
-        assert_eq!(misread.drn, 2 * cpu.drn, "the doubled drn of the wrong layout");
+        assert_eq!(
+            misread.drn,
+            2 * cpu.drn,
+            "the doubled drn of the wrong layout"
+        );
         // And the other way, a V.90 CP read as V.92: the drn comes out halved,
         // and the type field has swallowed its lowest bit.
         let v90 = cpu.to_bits();
@@ -1632,7 +1962,10 @@ mod tests {
         assert_eq!(other.drn, cpu.drn / 2);
         // With an odd drn that lowest bit makes the type 3, which is
         // unassigned, so the sequence is refused outright rather than misread.
-        let odd = Cp { drn: 11, ..cpu.clone() };
+        let odd = Cp {
+            drn: 11,
+            ..cpu.clone()
+        };
         assert_eq!(Cp::from_bits_in(Layout::V92, &odd.to_bits()), None);
         assert_eq!(CpFamily::from_bits(&odd.to_bits()), None);
         // Read in its own layout it is itself.
@@ -1646,16 +1979,46 @@ mod tests {
         let moduli = [10u8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
         let printed = |i: usize| moduli[i] as u32 - 1;
         // Table 25, row by row, including row 11's "u11 = 0".
-        let rm: Vec<u32> = (0..UP_INTERVALS).map(|i| rm_k(i, moduli[i], false)).collect();
+        let rm: Vec<u32> = (0..UP_INTERVALS)
+            .map(|i| rm_k(i, moduli[i], false))
+            .collect();
         assert_eq!(
             rm,
-            vec![printed(0), printed(1), 0, 0, printed(4), printed(5), 0, 0, printed(8), printed(9), 0, 0]
+            vec![
+                printed(0),
+                printed(1),
+                0,
+                0,
+                printed(4),
+                printed(5),
+                0,
+                0,
+                printed(8),
+                printed(9),
+                0,
+                0
+            ]
         );
         // Table 26, whose row 11 reads "k11 = M11 - 1".
-        let rm_prime: Vec<u32> = (0..UP_INTERVALS).map(|i| rm_k(i, moduli[i], true)).collect();
+        let rm_prime: Vec<u32> = (0..UP_INTERVALS)
+            .map(|i| rm_k(i, moduli[i], true))
+            .collect();
         assert_eq!(
             rm_prime,
-            vec![0, 0, printed(2), printed(3), 0, 0, printed(6), printed(7), 0, 0, printed(10), printed(11)]
+            vec![
+                0,
+                0,
+                printed(2),
+                printed(3),
+                0,
+                0,
+                printed(6),
+                printed(7),
+                0,
+                0,
+                printed(10),
+                printed(11)
+            ]
         );
         // The transition the digital modem watches for: RM ends with two zeros
         // and RM' starts with two, so four in a row (RRF 2.5).
@@ -1663,7 +2026,11 @@ mod tests {
         // An interval whose modulus is one carries nothing either way, which is
         // what a detector has to mask.
         assert_eq!(rm_k(0, 1, false), 0);
-        assert_eq!(rm_k(0, 0, false), 0, "no modulus at all, and no wrap to 255");
+        assert_eq!(
+            rm_k(0, 0, false),
+            0,
+            "no modulus at all, and no wrap to 255"
+        );
     }
 
     /// 9.11: "cleardown is signalled by drn = 0 in a rate sequence". The
@@ -1683,7 +2050,11 @@ mod tests {
         // left to hold it to.
         assert_eq!(clear.check(&FilterLimits::from_info1a(0, 0, 0), 0), Ok(()));
         // The upstream forms, in bits 21:25 of the two CP sequences.
-        let cpu = Cp { data_mode: true, drn: 0, ..Cp::default() };
+        let cpu = Cp {
+            data_mode: true,
+            drn: 0,
+            ..Cp::default()
+        };
         let bits = cpu.to_bits_in(Layout::V92, trn2u_unit(true));
         assert_eq!(get(&bits, 21, 5), 0);
         assert_eq!(CpFamily::from_bits(&bits), Some(CpFamily::Cpu(cpu)));
@@ -1700,21 +2071,46 @@ mod tests {
     #[test]
     fn reserved_bits_set_by_a_far_end_are_ignored_not_rejected() {
         // Jd bits 41:46 and 48, and Jp bits 35:46 and 50.
-        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 2, ..Jd::default() };
+        let jd = Jd {
+            rates: Jd::ALL_RATES,
+            lookahead: 2,
+            ..Jd::default()
+        };
         let mut set: Vec<usize> = (41..=46).collect();
         set.push(48);
         let loud = with_bits_set(&jd.to_bits(), 2, &set);
-        assert_eq!(J::from_bits(&loud), Some(J::Jd(Jd { sixteen_in_renegotiation: true, ..jd })));
-        let jp = Jp { epsilon: 0x1234, eight_in_training: true, eight_in_renegotiation: false };
+        assert_eq!(
+            J::from_bits(&loud),
+            Some(J::Jd(Jd {
+                sixteen_in_renegotiation: true,
+                ..jd
+            }))
+        );
+        let jp = Jp {
+            epsilon: 0x1234,
+            eight_in_training: true,
+            eight_in_renegotiation: false,
+        };
         let mut set: Vec<usize> = (35..=46).collect();
         set.push(50);
         let loud = with_bits_set(&jp.to_bits(), 2, &set);
-        assert_eq!(J::from_bits(&loud), Some(J::Jp(jp)), "Jp's reserved runs change nothing");
+        assert_eq!(
+            J::from_bits(&loud),
+            Some(J::Jp(jp)),
+            "Jp's reserved runs change nothing"
+        );
         // SUVu bits 19:25, and SUVd bits 19:31.
-        let suvu = Suvu { level: Some(1.5), ack: true, ..Suvu::default() };
+        let suvu = Suvu {
+            level: Some(1.5),
+            ack: true,
+            ..Suvu::default()
+        };
         let loud = with_bits_set(&suvu.to_bits(24), 1, &(19..=25).collect::<Vec<_>>());
         assert_eq!(Suvu::from_bits(&loud), Some(suvu));
-        let suvd = Suvd { silence: true, ack: false };
+        let suvd = Suvd {
+            silence: true,
+            ack: false,
+        };
         let loud = with_bits_set(&suvd.to_bits(30), 1, &(19..=31).collect::<Vec<_>>());
         assert_eq!(Suvd::from_bits(&loud), Some(suvd));
         // CPus bits 26:32.
@@ -1731,7 +2127,11 @@ mod tests {
         }
         set.extend(247 + alpha..=254 + alpha);
         let loud = with_bits_set(&cpd.to_bits(30), FULL_WORDS, &set);
-        assert_eq!(Cpd::from_bits(&loud), Some(cpd), "CPd's reserved runs change nothing");
+        assert_eq!(
+            Cpd::from_bits(&loud),
+            Some(cpd),
+            "CPd's reserved runs change nothing"
+        );
     }
 
     /// 8.8.3: a trellis field of 3 is "reserved for the ITU" and names no
@@ -1746,11 +2146,21 @@ mod tests {
         assert_eq!(Cpd::from_bits(&reserved), None);
         assert_eq!(DownFamily::from_bits(&reserved), None);
         // The three codes that do name one are read as they are printed.
-        for (code, trellis) in [(0, Trellis::Sixteen), (1, Trellis::ThirtyTwo), (2, Trellis::SixtyFour)] {
-            let cpd = Cpd { trellis, ..Cpd::cleardown(false) };
+        for (code, trellis) in [
+            (0, Trellis::Sixteen),
+            (1, Trellis::ThirtyTwo),
+            (2, Trellis::SixtyFour),
+        ] {
+            let cpd = Cpd {
+                trellis,
+                ..Cpd::cleardown(false)
+            };
             let bits = cpd.to_bits(30);
             assert_eq!(get(&bits, 27, 2), u32::from(code as u8));
-            assert_eq!(Cpd::from_bits(&bits).map(|read| read.trellis), Some(trellis));
+            assert_eq!(
+                Cpd::from_bits(&bits).map(|read| read.trellis),
+                Some(trellis)
+            );
         }
     }
 
@@ -1781,8 +2191,17 @@ mod tests {
     #[test]
     fn a_sequence_behind_a_long_run_of_ones_is_still_found() {
         let unit = trn2u_unit(false);
-        let cpt = Cp { data_mode: false, drn: 16, ..Cp::default() };
-        let suvu = Suvu { wait_for_cpu: true, level: Some(-0.5), silence: false, ack: true };
+        let cpt = Cp {
+            data_mode: false,
+            drn: 16,
+            ..Cp::default()
+        };
+        let suvu = Suvu {
+            wait_for_cpu: true,
+            level: Some(-0.5),
+            silence: false,
+            ack: true,
+        };
         let cpus = Cpus { drn: 21, ack: true };
         let mut stream = vec![true; 24];
         stream.extend(cpt.to_bits_in(Layout::V92, unit));
@@ -1791,7 +2210,14 @@ mod tests {
         stream.extend(cpus.to_bits(unit));
         let mut finder = UpFinder::new(unit);
         let found: Vec<CpFamily> = stream.iter().filter_map(|&bit| finder.feed(bit)).collect();
-        assert_eq!(found, vec![CpFamily::Cpt(cpt), CpFamily::Suvu(suvu), CpFamily::Cpus(cpus)]);
+        assert_eq!(
+            found,
+            vec![
+                CpFamily::Cpt(cpt),
+                CpFamily::Suvu(suvu),
+                CpFamily::Cpus(cpus)
+            ]
+        );
         // The V.90 descriptor finder's exact-seventeen rule is what this
         // replaces, and V92-03's V.92 finder has the same relaxation.
         let mut ja = vec![true; 24];
@@ -1805,8 +2231,15 @@ mod tests {
     #[test]
     fn cpd_and_suvd_are_found_back_to_back_in_a_stream() {
         let full = Cpd::from(&parameters());
-        let partial = Cpd { moduli: None, filters: None, ..full.clone() };
-        let suvd = Suvd { silence: false, ack: true };
+        let partial = Cpd {
+            moduli: None,
+            filters: None,
+            ..full.clone()
+        };
+        let suvd = Suvd {
+            silence: false,
+            ack: true,
+        };
         let mut stream = vec![true; 20];
         stream.extend(suvd.to_bits(30));
         stream.extend(full.to_bits(30));

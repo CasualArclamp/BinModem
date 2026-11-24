@@ -153,7 +153,6 @@ impl Encoder {
         self.mode
     }
 
-
     /// C1, "codeword value of next available entry of node-tree".
     fn c1(&self) -> u16 {
         N5 + self.nodes.len() as u16
@@ -378,7 +377,13 @@ impl Encoder {
         if !self.room() || total > u16::from(self.params.n7) {
             return None;
         }
-        self.nodes.push(Node { at, len, down: None, side: None, total });
+        self.nodes.push(Node {
+            at,
+            len,
+            down: None,
+            side: None,
+            total,
+        });
         // The index into the node-tree, which is the codeword less N5. The two
         // are a constant apart and telling them apart matters: the links below
         // are indices, and what goes on the line is the codeword.
@@ -388,7 +393,9 @@ impl Encoder {
     /// Hang a one-character segment under a root (6.3.3, "Append").
     fn append_to_root(&mut self, first: u8, at: u32) {
         // The root character and the one segment character.
-        let Some(node) = self.new_node(at, 1, 2) else { return };
+        let Some(node) = self.new_node(at, 1, 2) else {
+            return;
+        };
         let slot = &mut self.root[usize::from(first)];
         match *slot {
             None => *slot = Some(node),
@@ -399,7 +406,9 @@ impl Encoder {
     /// Hang the extension under the matched segment (6.3.3, "Extend").
     fn add_child(&mut self, parent: u16, at: u32, len: u8) {
         let total = self.nodes[usize::from(parent)].total + u16::from(len);
-        let Some(node) = self.new_node(at, len, total) else { return };
+        let Some(node) = self.new_node(at, len, total) else {
+            return;
+        };
         self.link_down(parent, node);
     }
 

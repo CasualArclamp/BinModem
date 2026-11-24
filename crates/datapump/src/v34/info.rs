@@ -97,7 +97,8 @@ const INFORMATION: usize = FILL.len() + SYNC.len();
 /// the CRC is what the register holds, "starting with bit 0". Nothing is
 /// inverted on the way out.
 pub fn crc(bits: &[bool]) -> u16 {
-    bits.iter().fold(0xffff, |register, &bit| shift(register, bit))
+    bits.iter()
+        .fold(0xffff, |register, &bit| shift(register, bit))
 }
 
 /// One bit into Figure 14's register.
@@ -181,7 +182,10 @@ fn get(bits: &[bool], from: usize, width: usize) -> u32 {
 /// count, and quietly sending the low four would put a different code on the
 /// wire from the one it meant.
 fn put_pattern(bits: &mut Vec<bool>, nibble: u8) {
-    debug_assert!(nibble < 16, "a bit pattern wider than the four bits it is sent in");
+    debug_assert!(
+        nibble < 16,
+        "a bit pattern wider than the four bits it is sent in"
+    );
     for i in (0..4).rev() {
         bits.push(nibble >> i & 1 == 1);
     }
@@ -195,7 +199,11 @@ fn get_pattern(bits: &[bool], from: usize) -> u8 {
 /// A frequency offset field: ten bits of two's complement in steps of 0.02 Hz,
 /// with -512 meaning "this field is to be ignored" (Tables 15 and 16).
 fn offset_from(raw: u32) -> Option<f64> {
-    let signed = if raw & 0x200 != 0 { raw as i32 - 0x400 } else { raw as i32 };
+    let signed = if raw & 0x200 != 0 {
+        raw as i32 - 0x400
+    } else {
+        raw as i32
+    };
     (signed != -512).then(|| f64::from(signed) * 0.02)
 }
 
@@ -307,7 +315,10 @@ impl Info0 {
     /// for the capability, "bit 26 of INFO0d and bit 27 of INFO0a" for the
     /// request -- so the two cannot be read through one accessor.
     pub fn pcm_flags(&self) -> PcmFlags {
-        PcmFlags { v92: self.clock & 1 == 1, short_phase2: self.clock & 2 == 2 }
+        PcmFlags {
+            v92: self.clock & 1 == 1,
+            short_phase2: self.clock & 2 == 2,
+        }
     }
 
     /// Write bits 26:27 as INFO0a lays them out.
@@ -442,7 +453,10 @@ impl Info1c {
     /// Bits 71:78: the 3429 probing result, with no carrier bit in front of
     /// it, which is how V.92 reads that field.
     pub fn probed_3429(&self) -> Probed3429 {
-        Probed3429 { pre_emphasis: self.probed[5].pre_emphasis, max_rate: self.probed[5].max_rate }
+        Probed3429 {
+            pre_emphasis: self.probed[5].pre_emphasis,
+            max_rate: self.probed[5].max_rate,
+        }
     }
 
     pub fn to_bits(&self) -> Vec<bool> {
@@ -654,7 +668,10 @@ impl Info0d {
     /// procedure text names them separately in both directions (9.3, 9.4).
     pub fn pcm_flags(&self) -> PcmFlags {
         let flags = self.v34.clock >> Self::FLAGS_SHIFT;
-        PcmFlags { short_phase2: flags & 1 == 1, v92: flags & 2 == 2 }
+        PcmFlags {
+            short_phase2: flags & 1 == 1,
+            v92: flags & 2 == 2,
+        }
     }
 
     /// Write bits 26:27 as INFO0d lays them out.
@@ -687,8 +704,14 @@ impl Info0d {
         // clock is left behind here, and V.92's two flags are written in over
         // the zeros. A modem that never asks for V.92 sends what it always
         // sent, whatever clock its `Info0` names.
-        let info0 = Info0 { clock: 0, ..self.v34 }.to_bits();
-        let mut info: Vec<bool> = unframe(&info0, INFO0_BITS).expect("an INFO0 unframes").to_vec();
+        let info0 = Info0 {
+            clock: 0,
+            ..self.v34
+        }
+        .to_bits();
+        let mut info: Vec<bool> = unframe(&info0, INFO0_BITS)
+            .expect("an INFO0 unframes")
+            .to_vec();
         let flags = self.pcm_flags();
         info[14] = flags.short_phase2;
         info[15] = flags.v92;
@@ -839,7 +862,13 @@ pub struct Info1aPcmUp {
 /// has thought about it.
 impl Default for Info1aPcmUp {
     fn default() -> Self {
-        Self { sections: 0, ltot_code: 0, lmax_code: 0, md_length: 0, uinfo: UINFO_LOWEST }
+        Self {
+            sections: 0,
+            ltot_code: 0,
+            lmax_code: 0,
+            md_length: 0,
+            uinfo: UINFO_LOWEST,
+        }
     }
 }
 
@@ -858,7 +887,10 @@ impl Info1aPcmUp {
     }
 
     pub fn to_bits(&self) -> Vec<bool> {
-        debug_assert!(self.uinfo_is_sendable(), "a table 18 u_info outside 67 to 111");
+        debug_assert!(
+            self.uinfo_is_sendable(),
+            "a table 18 u_info outside 67 to 111"
+        );
         let mut info = Vec::with_capacity(38);
         put(&mut info, u32::from(self.sections), 2);
         put(&mut info, u32::from(self.ltot_code), 2);
@@ -931,14 +963,19 @@ impl Info1aV34Up {
         // written over the zero it puts there -- so the two layouts cannot
         // drift apart, as INFO0d takes its first seventeen bits from INFO0a's.
         let table10 = self.v90.to_bits();
-        let mut info = unframe(&table10, INFO1A_BITS).expect("a Table 10 INFO1a unframes").to_vec();
+        let mut info = unframe(&table10, INFO1A_BITS)
+            .expect("a Table 10 INFO1a unframes")
+            .to_vec();
         info[Self::HIGH_CARRIER] = self.high_carrier;
         frame(&info)
     }
 
     pub fn from_bits(bits: &[bool]) -> Option<Self> {
         let high_carrier = unframe(bits, INFO1A_BITS)?[Self::HIGH_CARRIER];
-        Some(Self { v90: Info1aPcm::from_bits(bits)?, high_carrier })
+        Some(Self {
+            v90: Info1aPcm::from_bits(bits)?,
+            high_carrier,
+        })
     }
 }
 
@@ -965,7 +1002,14 @@ pub enum MhIndication {
 }
 
 impl MhIndication {
-    pub const ALL: [Self; 6] = [Self::Req, Self::Ack, Self::Nack, Self::Clrd, Self::Cda, Self::Frr];
+    pub const ALL: [Self; 6] = [
+        Self::Req,
+        Self::Ack,
+        Self::Nack,
+        Self::Clrd,
+        Self::Cda,
+        Self::Frr,
+    ];
 
     /// The pattern, leftmost bit first in time, as a nibble whose bit 3 went
     /// first.
@@ -981,7 +1025,9 @@ impl MhIndication {
     }
 
     pub fn from_code(code: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|indication| indication.code() == code)
+        Self::ALL
+            .into_iter()
+            .find(|indication| indication.code() == code)
     }
 }
 
@@ -1029,9 +1075,10 @@ impl T1 {
     /// out, which is the honest answer: Table 33 cannot express it.
     pub fn code(self) -> u8 {
         match self {
-            Self::Limit(seconds) => {
-                Self::PERIODS.iter().rposition(|&p| p <= seconds).map_or(0, |i| i as u8 + 1)
-            }
+            Self::Limit(seconds) => Self::PERIODS
+                .iter()
+                .rposition(|&p| p <= seconds)
+                .map_or(0, |i| i as u8 + 1),
             Self::NoLimit => 13,
             Self::Reserved(code) => code,
         }
@@ -1127,7 +1174,10 @@ impl Mh {
 
     /// "Indicate agreement to go on hold and timeout".
     pub fn ack(t1: T1) -> Self {
-        Self { indication: MhIndication::Ack, information: MhInformation::Timeout(t1) }
+        Self {
+            indication: MhIndication::Ack,
+            information: MhInformation::Timeout(t1),
+        }
     }
 
     /// "Deny on-hold, request cleardown or fast reconnect".
@@ -1137,7 +1187,10 @@ impl Mh {
 
     /// "Request cleardown".
     pub fn clrd(reason: Cleardown) -> Self {
-        Self { indication: MhIndication::Clrd, information: MhInformation::Reason(reason) }
+        Self {
+            indication: MhIndication::Clrd,
+            information: MhInformation::Reason(reason),
+        }
     }
 
     /// "Acknowledge cleardown".
@@ -1151,7 +1204,10 @@ impl Mh {
     }
 
     fn repeating(indication: MhIndication) -> Self {
-        Self { indication, information: MhInformation::Repeat(indication.code()) }
+        Self {
+            indication,
+            information: MhInformation::Repeat(indication.code()),
+        }
     }
 
     pub fn to_bits(&self) -> Vec<bool> {
@@ -1177,7 +1233,10 @@ impl Mh {
             MhIndication::Clrd => MhInformation::Reason(Cleardown::from_code(code)),
             _ => MhInformation::Repeat(code),
         };
-        Some(Self { indication, information })
+        Some(Self {
+            indication,
+            information,
+        })
     }
 }
 
@@ -1241,7 +1300,11 @@ mod tests {
     #[test]
     fn the_fill_and_sync_are_where_the_tables_put_them() {
         let bits = Info0::default().to_bits();
-        let printed = |b: &[bool]| b.iter().map(|&x| if x { '1' } else { '0' }).collect::<String>();
+        let printed = |b: &[bool]| {
+            b.iter()
+                .map(|&x| if x { '1' } else { '0' })
+                .collect::<String>()
+        };
         assert_eq!(printed(&bits[0..4]), "1111");
         assert_eq!(printed(&bits[4..12]), "01110010");
         assert_eq!(printed(&bits[45..49]), "1111");
@@ -1253,7 +1316,9 @@ mod tests {
         // contents in after the information, bit 0 first, and it comes back to
         // zero -- whatever the information was.
         for seed in 0..200u32 {
-            let info: Vec<bool> = (0..77).map(|i| (seed.wrapping_mul(2_654_435_761) >> (i % 32)) & 1 == 1).collect();
+            let info: Vec<bool> = (0..77)
+                .map(|i| (seed.wrapping_mul(2_654_435_761) >> (i % 32)) & 1 == 1)
+                .collect();
             let mut with_crc = info.clone();
             put(&mut with_crc, u32::from(crc(&info)), 16);
             assert_eq!(crc(&with_crc), 0, "seed {seed}");
@@ -1298,7 +1363,11 @@ mod tests {
             frequency_offset: Some(-3.24),
         };
         for (i, p) in info1c.probed.iter_mut().enumerate() {
-            *p = Probed { high_carrier: i % 2 == 1, pre_emphasis: i as u8 + 4, max_rate: 14 - i as u8 };
+            *p = Probed {
+                high_carrier: i % 2 == 1,
+                pre_emphasis: i as u8 + 4,
+                max_rate: 14 - i as u8,
+            };
         }
         let back = Info1c::from_bits(&info1c.to_bits()).expect("it did not check");
         assert_eq!(back.probed, info1c.probed);
@@ -1309,7 +1378,11 @@ mod tests {
             min_power_reduction: 1,
             additional_power_reduction: 2,
             md_length: 9,
-            probed: Probed { high_carrier: true, pre_emphasis: 10, max_rate: 13 },
+            probed: Probed {
+                high_carrier: true,
+                pre_emphasis: 10,
+                max_rate: 13,
+            },
             answer_to_call: SymbolRate::S3429,
             call_to_answer: SymbolRate::S2743,
             frequency_offset: None,
@@ -1341,7 +1414,13 @@ mod tests {
     #[test]
     fn info0d_is_info0a_with_the_digital_modem_s_levels_after_it() {
         let info0d = Info0d {
-            v34: Info0 { rate_3429: true, low_carrier_3200: true, asymmetry: 5, acknowledge: true, ..Info0::default() },
+            v34: Info0 {
+                rate_3429: true,
+                low_carrier_3200: true,
+                asymmetry: 5,
+                acknowledge: true,
+                ..Info0::default()
+            },
             nominal_power: 3,
             max_power: 31,
             power_at_codec: false,
@@ -1370,14 +1449,23 @@ mod tests {
     /// which V.34's own INFO1a refuses, so the two cannot be mistaken.
     #[test]
     fn a_v90_info1a_carries_uinfo_and_names_8000() {
-        let asked = Info1aPcm { md_length: 0, uinfo: 73, upstream: SymbolRate::S3200, frequency_offset: Some(-0.5) };
+        let asked = Info1aPcm {
+            md_length: 0,
+            uinfo: 73,
+            upstream: SymbolRate::S3200,
+            frequency_offset: Some(-0.5),
+        };
         let bits = asked.to_bits();
         assert_eq!(bits.len(), INFO1A_BITS);
         assert_eq!(Info1aPcm::from_bits(&bits), Some(asked));
         assert_eq!(get(&bits, 25, 7), 73);
         assert_eq!(get(&bits, 34, 3), 4);
         assert_eq!(get(&bits, 37, 3), 6);
-        assert_eq!(Info1a::from_bits(&bits), None, "V.34 took a V.90 INFO1a for its own");
+        assert_eq!(
+            Info1a::from_bits(&bits),
+            None,
+            "V.34 took a V.90 INFO1a for its own"
+        );
         // And the other way round.
         let v34 = Info1a {
             min_power_reduction: 0,
@@ -1432,14 +1520,19 @@ mod tests {
     #[test]
     fn every_infoh_field_comes_back_at_every_symbol_rate() {
         for (i, symbol_rate) in SymbolRate::ALL.into_iter().enumerate() {
-            for (power_reduction, trn_length, pre_emphasis) in [(0, 0, 0), (7, 127, 10), (3, 64, 5)] {
+            for (power_reduction, trn_length, pre_emphasis) in [(0, 0, 0), (7, 127, 10), (3, 64, 5)]
+            {
                 let asked = InfoH {
                     power_reduction,
                     trn_length,
                     high_carrier: i % 2 == 0,
                     pre_emphasis,
                     symbol_rate,
-                    trn_size: if i % 3 == 0 { Size::Sixteen } else { Size::Four },
+                    trn_size: if i % 3 == 0 {
+                        Size::Sixteen
+                    } else {
+                        Size::Four
+                    },
                 };
                 assert_eq!(InfoH::from_bits(&asked.to_bits()), Some(asked), "{asked:?}");
             }
@@ -1476,17 +1569,28 @@ mod tests {
             min_power_reduction: 1,
             additional_power_reduction: 0,
             md_length: 3,
-            probed: Probed { high_carrier: true, pre_emphasis: 2, max_rate: 12 },
+            probed: Probed {
+                high_carrier: true,
+                pre_emphasis: 2,
+                max_rate: 12,
+            },
             answer_to_call: SymbolRate::S3200,
             call_to_answer: SymbolRate::S3000,
             frequency_offset: None,
         };
-        let info1c = Info1c { md_length: 5, ..Info1c::default() };
+        let info1c = Info1c {
+            md_length: 5,
+            ..Info1c::default()
+        };
         let infoh = request().to_bits();
         assert_eq!(Info0::from_bits(&infoh), None);
         assert_eq!(Info1c::from_bits(&infoh), None);
         assert_eq!(Info1a::from_bits(&infoh), None);
-        for other in [Info0::default().to_bits(), info1c.to_bits(), info1a.to_bits()] {
+        for other in [
+            Info0::default().to_bits(),
+            info1c.to_bits(),
+            info1a.to_bits(),
+        ] {
             assert_eq!(InfoH::from_bits(&other), None);
         }
 
@@ -1501,10 +1605,16 @@ mod tests {
         for value in 0..1u32 << 17 {
             let info: Vec<bool> = (0..17).map(|i| value >> i & 1 == 1).collect();
             let mut bits = frame(&info);
-            assert!(unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_none(), "{value:#x}");
+            assert!(
+                unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_none(),
+                "{value:#x}"
+            );
             bits[45] = false;
             bits[46] = false;
-            assert!(unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_some(), "{value:#x} and two zeros");
+            assert!(
+                unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_some(),
+                "{value:#x} and two zeros"
+            );
         }
         // But the start of an INFOh is a whole INFO0 once in four times, and
         // this one, which a recipient could well ask for, is. What tells them
@@ -1530,9 +1640,18 @@ mod tests {
     fn trn_symbols_are_35_ms_steps_at_the_symbol_rate_asked_for() {
         for symbol_rate in SymbolRate::ALL {
             for trn_length in [0, 1, 127] {
-                let asked = InfoH { symbol_rate, trn_length, ..request() };
-                let exact = f64::from(trn_length) * 0.035 * crate::v34::probe::symbols_per_second(symbol_rate);
-                assert!((asked.trn_symbols() as f64 - exact).abs() < 1e-6, "{symbol_rate:?}: {exact}");
+                let asked = InfoH {
+                    symbol_rate,
+                    trn_length,
+                    ..request()
+                };
+                let exact = f64::from(trn_length)
+                    * 0.035
+                    * crate::v34::probe::symbols_per_second(symbol_rate);
+                assert!(
+                    (asked.trn_symbols() as f64 - exact).abs() < 1e-6,
+                    "{symbol_rate:?}: {exact}"
+                );
             }
         }
     }
@@ -1570,7 +1689,10 @@ mod tests {
     /// clear), both computed from Figure 14/V.34 by hand.
     #[test]
     fn a_v92_info0d_says_so_in_bit_27_and_asks_for_short_phase_2_in_bit_26() {
-        let both = PcmFlags { v92: true, short_phase2: true };
+        let both = PcmFlags {
+            v92: true,
+            short_phase2: true,
+        };
         let mut p2s = Info0d {
             v34: every_v34_capability(),
             nominal_power: 3,
@@ -1588,19 +1710,34 @@ mod tests {
         assert_eq!(Info0d::from_bits(&bits), Some(p2s));
         assert_eq!(Info0d::from_bits(&bits).unwrap().pcm_flags(), both);
 
-        let mut p2p = Info0d { power_at_codec: false, ..p2s };
+        let mut p2p = Info0d {
+            power_at_codec: false,
+            ..p2s
+        };
         p2p.v34.can_reduce_power = true;
         p2p.set_pcm_flags(both);
         assert_eq!(sent_crc(&p2p.to_bits()), 0xA8A9);
 
         // One without the other, and each in its own bit.
         let mut capable = p2s;
-        capable.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
+        capable.set_pcm_flags(PcmFlags {
+            v92: true,
+            short_phase2: false,
+        });
         let bits = capable.to_bits();
         assert!(!bits[26] && bits[27]);
-        assert_eq!(capable.pcm_flags(), PcmFlags { v92: true, short_phase2: false });
+        assert_eq!(
+            capable.pcm_flags(),
+            PcmFlags {
+                v92: true,
+                short_phase2: false
+            }
+        );
         let mut asking = p2s;
-        asking.set_pcm_flags(PcmFlags { v92: false, short_phase2: true });
+        asking.set_pcm_flags(PcmFlags {
+            v92: false,
+            short_phase2: true,
+        });
         let bits = asking.to_bits();
         assert!(bits[26] && !bits[27]);
     }
@@ -1612,8 +1749,14 @@ mod tests {
     /// and 0x2B52 once bit 28 acknowledges the far INFO0d.
     #[test]
     fn a_v92_info0a_has_the_two_bits_the_other_way_round() {
-        let both = PcmFlags { v92: true, short_phase2: true };
-        let mut info0a = Info0 { can_reduce_power: true, ..every_v34_capability() };
+        let both = PcmFlags {
+            v92: true,
+            short_phase2: true,
+        };
+        let mut info0a = Info0 {
+            can_reduce_power: true,
+            ..every_v34_capability()
+        };
         info0a.set_pcm_flags(both);
         let bits = info0a.to_bits();
         assert_eq!(bits.len(), INFO0_BITS);
@@ -1622,23 +1765,40 @@ mod tests {
         assert!(bits[27], "bit 27 asks for short phase 2");
         assert_eq!(Info0::from_bits(&bits).unwrap().pcm_flags(), both);
 
-        let acknowledging = Info0 { acknowledge: true, ..info0a };
+        let acknowledging = Info0 {
+            acknowledge: true,
+            ..info0a
+        };
         assert_eq!(sent_crc(&acknowledging.to_bits()), 0x2B52);
 
         // The two orders are genuinely opposite: the same pair of flags gives
         // different bits in the two layouts, and one layout's pair read as the
         // other's would be its own mirror image.
         let mut info0d = Info0d::default();
-        info0d.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
+        info0d.set_pcm_flags(PcmFlags {
+            v92: true,
+            short_phase2: false,
+        });
         let mut only_v92 = Info0::default();
-        only_v92.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
+        only_v92.set_pcm_flags(PcmFlags {
+            v92: true,
+            short_phase2: false,
+        });
         let (d, a) = (info0d.to_bits(), only_v92.to_bits());
         assert!(d[27] && !d[26]);
         assert!(a[26] && !a[27]);
-        assert_eq!((d[26], d[27]), (a[27], a[26]), "one layout's pair is the other's, swapped");
+        assert_eq!(
+            (d[26], d[27]),
+            (a[27], a[26]),
+            "one layout's pair is the other's, swapped"
+        );
         // Which is why INFO0d's pair is kept out of the two bits INFO0a reads:
         // there is no reading of `clock` that is right for both.
-        assert_eq!(info0d.v34.pcm_flags(), PcmFlags::default(), "INFO0d's pair is not V.34's");
+        assert_eq!(
+            info0d.v34.pcm_flags(),
+            PcmFlags::default(),
+            "INFO0d's pair is not V.34's"
+        );
     }
 
     /// V.90's Table 7 reserves bits 26:27 of INFO0d and "set[s] to 0" both, so
@@ -1652,7 +1812,10 @@ mod tests {
     fn an_info0d_never_claims_v92_because_of_a_v34_transmit_clock() {
         for clock in 0..4u8 {
             let v90 = Info0d {
-                v34: Info0 { clock, ..every_v34_capability() },
+                v34: Info0 {
+                    clock,
+                    ..every_v34_capability()
+                },
                 nominal_power: 4,
                 max_power: 23,
                 power_at_codec: true,
@@ -1661,17 +1824,37 @@ mod tests {
             };
             let bits = v90.to_bits();
             assert!(!bits[26] && !bits[27], "clock {clock} reached bits 26:27");
-            assert_eq!(v90.pcm_flags(), PcmFlags::default(), "clock {clock} read as V.92");
+            assert_eq!(
+                v90.pcm_flags(),
+                PcmFlags::default(),
+                "clock {clock} read as V.92"
+            );
             // Every V.90 INFO0d is the same sixty-two bits whatever clock it
             // was built around, which is the encoding V.90 tests are pinned to.
-            assert_eq!(bits, Info0d { v34: Info0 { clock: 0, ..v90.v34 }, ..v90 }.to_bits());
+            assert_eq!(
+                bits,
+                Info0d {
+                    v34: Info0 {
+                        clock: 0,
+                        ..v90.v34
+                    },
+                    ..v90
+                }
+                .to_bits()
+            );
 
             // And the V.92 flags still go out, above whatever clock is beneath
             // them, without disturbing it.
             let mut v92 = v90;
-            v92.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
+            v92.set_pcm_flags(PcmFlags {
+                v92: true,
+                short_phase2: false,
+            });
             let bits = v92.to_bits();
-            assert!(!bits[26] && bits[27], "clock {clock} swallowed the V.92 bit");
+            assert!(
+                !bits[26] && bits[27],
+                "clock {clock} swallowed the V.92 bit"
+            );
             assert_eq!(v92.v34.clock & 3, clock, "the V.34 clock was overwritten");
         }
     }
@@ -1684,7 +1867,10 @@ mod tests {
     #[test]
     fn a_v90_info0d_still_sends_zeros_in_bits_26_and_27() {
         let v90 = Info0d {
-            v34: Info0 { constellation_1664: true, ..Info0::default() },
+            v34: Info0 {
+                constellation_1664: true,
+                ..Info0::default()
+            },
             nominal_power: 4,
             max_power: 23,
             power_at_codec: true,
@@ -1700,7 +1886,11 @@ mod tests {
         // And so does every other V.90 INFO0d, whatever else it carries.
         for nominal in 0..16 {
             for max_power in [0, 15, 31] {
-                let other = Info0d { nominal_power: nominal, max_power, ..v90 };
+                let other = Info0d {
+                    nominal_power: nominal,
+                    max_power,
+                    ..v90
+                };
                 let bits = other.to_bits();
                 assert!(!bits[26] && !bits[27], "{nominal} {max_power}");
             }
@@ -1713,7 +1903,10 @@ mod tests {
     #[test]
     fn a_v90_peer_reads_a_v92_info0_as_v90() {
         let mut v92 = every_v34_capability();
-        v92.set_pcm_flags(PcmFlags { v92: true, short_phase2: true });
+        v92.set_pcm_flags(PcmFlags {
+            v92: true,
+            short_phase2: true,
+        });
         let read = Info0::from_bits(&v92.to_bits()).expect("the CRC checks");
         assert_eq!(Info0 { clock: 0, ..read }, every_v34_capability());
 
@@ -1725,12 +1918,21 @@ mod tests {
             a_law: true,
             upstream_3429: true,
         };
-        digital.set_pcm_flags(PcmFlags { v92: true, short_phase2: true });
+        digital.set_pcm_flags(PcmFlags {
+            v92: true,
+            short_phase2: true,
+        });
         let read = Info0d::from_bits(&digital.to_bits()).expect("the CRC checks");
         assert_eq!(read.nominal_dbm0(), -9.0);
         assert_eq!(read.max_dbm0(), -12.0);
         assert!(read.a_law && read.upstream_3429 && read.power_at_codec);
-        assert_eq!(Info0 { clock: 0, ..read.v34 }, every_v34_capability());
+        assert_eq!(
+            Info0 {
+                clock: 0,
+                ..read.v34
+            },
+            every_v34_capability()
+        );
     }
 
     /// Table 17/V.92: bit 70, the 3429 carrier flag in V.90, now says whether
@@ -1755,18 +1957,36 @@ mod tests {
             (true, 5, 14),
             (true, 6, 13),
         ]) {
-            *slot = Probed { high_carrier: carrier, pre_emphasis: pre, max_rate: rate };
+            *slot = Probed {
+                high_carrier: carrier,
+                pre_emphasis: pre,
+                max_rate: rate,
+            };
         }
         let bits = info1d.to_bits();
         assert_eq!(bits.len(), INFO1C_BITS);
         assert_eq!(sent_crc(&bits), 0x086C);
         assert!(bits[70], "bit 70 says the channel carries PCM upstream");
-        assert_eq!(get(&bits, 71, 4), 6, "bits 71:74 are still the pre-emphasis");
-        assert_eq!(get(&bits, 75, 4), 13, "bits 75:78 are still the projected rate");
+        assert_eq!(
+            get(&bits, 71, 4),
+            6,
+            "bits 71:74 are still the pre-emphasis"
+        );
+        assert_eq!(
+            get(&bits, 75, 4),
+            13,
+            "bits 75:78 are still the projected rate"
+        );
 
         let read = Info1c::from_bits(&bits).expect("the CRC checks");
         assert!(read.pcm_upstream());
-        assert_eq!(read.probed_3429(), Probed3429 { pre_emphasis: 6, max_rate: 13 });
+        assert_eq!(
+            read.probed_3429(),
+            Probed3429 {
+                pre_emphasis: 6,
+                max_rate: 13
+            }
+        );
         // The bit is written on purpose, and clearing it moves nothing else.
         let mut refusing = read;
         refusing.set_pcm_upstream(false);
@@ -1783,19 +2003,37 @@ mod tests {
     /// 0xA858) and `spec-phase2-procedures.md` 3.4 (CRC 0xF59A).
     #[test]
     fn a_table_18_info1a_round_trips_and_is_not_thrown_away() {
-        let asked =
-            Info1aPcmUp { sections: 3, ltot_code: 1, lmax_code: 0, md_length: 4, uinfo: 90 };
+        let asked = Info1aPcmUp {
+            sections: 3,
+            ltot_code: 1,
+            lmax_code: 0,
+            md_length: 4,
+            uinfo: 90,
+        };
         let bits = asked.to_bits();
         assert_eq!(bits.len(), INFO1A_BITS);
         assert_eq!(sent_crc(&bits), 0xA858);
-        assert_eq!(get(&bits, 34, 3), PCM_SYMBOL_RATE, "8000 from the analogue modem");
-        assert_eq!(get(&bits, 37, 3), PCM_SYMBOL_RATE, "8000 from the digital modem");
+        assert_eq!(
+            get(&bits, 34, 3),
+            PCM_SYMBOL_RATE,
+            "8000 from the analogue modem"
+        );
+        assert_eq!(
+            get(&bits, 37, 3),
+            PCM_SYMBOL_RATE,
+            "8000 from the digital modem"
+        );
         assert_eq!(get(&bits, 32, 2), 0, "bits 32:33 are set to 0");
         assert_eq!(get(&bits, 40, 10), 0x3ff, "bits 40:49 are set to 1");
         assert_eq!(Info1aPcmUp::from_bits(&bits), Some(asked));
 
-        let other =
-            Info1aPcmUp { sections: 3, ltot_code: 3, lmax_code: 3, md_length: 0, uinfo: 77 };
+        let other = Info1aPcmUp {
+            sections: 3,
+            ltot_code: 3,
+            lmax_code: 3,
+            md_length: 0,
+            uinfo: 77,
+        };
         assert_eq!(sent_crc(&other.to_bits()), 0xF59A);
 
         // Every filter code, and the ends of both seven-bit fields.
@@ -1803,14 +2041,18 @@ mod tests {
             for ltot_code in 0..4 {
                 for lmax_code in 0..4 {
                     for (md_length, uinfo) in [(0, UINFO_LOWEST), (127, UINFO_HIGHEST)] {
-                        let asked =
-                            Info1aPcmUp { sections, ltot_code, lmax_code, md_length, uinfo };
+                        let asked = Info1aPcmUp {
+                            sections,
+                            ltot_code,
+                            lmax_code,
+                            md_length,
+                            uinfo,
+                        };
                         assert_eq!(Info1aPcmUp::from_bits(&asked.to_bits()), Some(asked));
                     }
                 }
             }
         }
-
     }
 
     /// Table 18/V.92: "U_INFO shall be greater than 66", and 8.4.4/V.90 trains
@@ -1824,10 +2066,20 @@ mod tests {
     fn the_u_info_we_choose_is_one_table_18_allows() {
         assert_eq!(UINFO_LOWEST, 67);
         assert_eq!(UINFO_HIGHEST, 111);
-        assert!(u32::from(UINFO_HIGHEST) + 16 < 128, "Sd would train past Ucode 127");
+        assert!(
+            u32::from(UINFO_HIGHEST) + 16 < 128,
+            "Sd would train past Ucode 127"
+        );
         for uinfo in 0..=127u8 {
-            let asked = Info1aPcmUp { uinfo, ..Info1aPcmUp::default() };
-            assert_eq!(asked.uinfo_is_sendable(), (67..=111).contains(&uinfo), "U_INFO {uinfo}");
+            let asked = Info1aPcmUp {
+                uinfo,
+                ..Info1aPcmUp::default()
+            };
+            assert_eq!(
+                asked.uinfo_is_sendable(),
+                (67..=111).contains(&uinfo),
+                "U_INFO {uinfo}"
+            );
         }
         // A sequence built up from the default is sendable before anyone has
         // chosen anything, which a zero -- the one value Table 18 names as
@@ -1850,7 +2102,10 @@ mod tests {
         for uinfo in [0, 66, 112, 127] {
             let heard = Info1aPcmUp::from_bits(&raw(uinfo)).expect("the CRC checks");
             assert_eq!(heard.uinfo, uinfo as u8, "a far end's U_INFO was refused");
-            assert!(!heard.uinfo_is_sendable(), "and it is not one we would send");
+            assert!(
+                !heard.uinfo_is_sendable(),
+                "and it is not one we would send"
+            );
         }
     }
 
@@ -1879,7 +2134,11 @@ mod tests {
         assert_eq!(Info1aV34Up::from_bits(&bits), Some(high));
 
         let other = Info1aV34Up {
-            v90: Info1aPcm { uinfo: 77, upstream: SymbolRate::S3429, ..high.v90 },
+            v90: Info1aPcm {
+                uinfo: 77,
+                upstream: SymbolRate::S3429,
+                ..high.v90
+            },
             high_carrier: true,
         };
         assert_eq!(sent_crc(&other.to_bits()), 0x7A52);
@@ -1887,7 +2146,10 @@ mod tests {
         // Clear bit 33 and the seventy bits are V.90's Table 10 exactly, which
         // is why neither layout can be told from the other by its bits, and
         // why the phase and not the frame decides which reading applies.
-        let low = Info1aV34Up { high_carrier: false, ..high };
+        let low = Info1aV34Up {
+            high_carrier: false,
+            ..high
+        };
         assert_eq!(low.to_bits(), high.v90.to_bits());
         assert_eq!(Info1aPcm::from_bits(&high.to_bits()), Some(high.v90));
         assert_eq!(Info1aV34Up::from_bits(&high.v90.to_bits()), Some(low));
@@ -1918,20 +2180,35 @@ mod tests {
         // V.90's Table 11, which is V.34's own: both fields a symbol rate.
         for upper in 0..6 {
             for lower in 0..6 {
-                assert_eq!(reads(&raw(lower, upper)), (true, false, false), "{lower} {upper}");
+                assert_eq!(
+                    reads(&raw(lower, upper)),
+                    (true, false, false),
+                    "{lower} {upper}"
+                );
             }
         }
         // V.90's Table 10 and V.92's Table 19: 8000 down, one of V.34's three
         // fastest up.
         for lower in 3..6 {
-            assert_eq!(reads(&raw(lower, PCM_SYMBOL_RATE)), (false, true, false), "{lower}");
+            assert_eq!(
+                reads(&raw(lower, PCM_SYMBOL_RATE)),
+                (false, true, false),
+                "{lower}"
+            );
         }
         // V.92's Table 18: 8000 both ways.
-        assert_eq!(reads(&raw(PCM_SYMBOL_RATE, PCM_SYMBOL_RATE)), (false, false, true));
+        assert_eq!(
+            reads(&raw(PCM_SYMBOL_RATE, PCM_SYMBOL_RATE)),
+            (false, false, true)
+        );
         // Six above with 0, 1, 2 or 7 below is no layout at all, and seven
         // above is no layout whatever is below it.
         for lower in [0, 1, 2, 7] {
-            assert_eq!(reads(&raw(lower, PCM_SYMBOL_RATE)), (false, false, false), "{lower}");
+            assert_eq!(
+                reads(&raw(lower, PCM_SYMBOL_RATE)),
+                (false, false, false),
+                "{lower}"
+            );
         }
         for lower in 0..8 {
             assert_eq!(reads(&raw(lower, 7)), (false, false, false), "{lower}");
@@ -1942,7 +2219,13 @@ mod tests {
     /// parser would read as a perfectly plausible -0.02 Hz.
     #[test]
     fn a_table_18_frame_is_never_read_as_a_frequency_offset() {
-        let asked = Info1aPcmUp { sections: 0, ltot_code: 0, lmax_code: 0, md_length: 0, uinfo: 67 };
+        let asked = Info1aPcmUp {
+            sections: 0,
+            ltot_code: 0,
+            lmax_code: 0,
+            md_length: 0,
+            uinfo: 67,
+        };
         let bits = asked.to_bits();
         assert_eq!(get(&bits, 40, 10), 0x3ff);
         // What the trap looks like: those ten bits as a V.34 offset field.
@@ -1995,7 +2278,11 @@ mod tests {
             let bits = mh.to_bits();
             assert_eq!(sent_crc(&bits), want, "code {code:04b}");
             assert_eq!(get_pattern(&bits, 12), MhIndication::Ack.code());
-            assert_eq!(get_pattern(&bits, 16), code, "bit 16 carries the code's MSB");
+            assert_eq!(
+                get_pattern(&bits, 16),
+                code,
+                "bit 16 carries the code's MSB"
+            );
             assert_eq!(Mh::from_bits(&bits), Some(mh));
         }
 
@@ -2034,7 +2321,11 @@ mod tests {
             assert_eq!(heard.indication, MhIndication::Clrd);
             let kept = Cleardown::from_code(reason);
             assert_eq!(heard.information, MhInformation::Reason(kept));
-            assert_eq!(kept.code(), reason, "the reason goes back out as it came in");
+            assert_eq!(
+                kept.code(),
+                reason,
+                "the reason goes back out as it came in"
+            );
             match reason {
                 0b0101 => assert_eq!(kept, Cleardown::IncomingCall),
                 0b0110 => assert_eq!(kept, Cleardown::OutgoingCall),
@@ -2084,10 +2375,15 @@ mod tests {
             assert_eq!(t1.code(), code, "and it goes back out as it came in");
             // Through the wire as well as through the enum.
             let heard = Mh::from_bits(&Mh::ack(t1).to_bits()).expect("a good MHack");
-            assert_eq!(heard.information, MhInformation::Timeout(T1::Reserved(code)));
+            assert_eq!(
+                heard.information,
+                MhInformation::Timeout(T1::Reserved(code))
+            );
         }
         // Thirteen codes name a period and three do not; no code does both.
-        let granted = (0..16u8).filter(|&c| T1::from_code(c) != T1::Reserved(c)).count();
+        let granted = (0..16u8)
+            .filter(|&c| T1::from_code(c) != T1::Reserved(c))
+            .count();
         assert_eq!(granted, 13);
     }
 
@@ -2116,7 +2412,11 @@ mod tests {
             assert_eq!(t1.seconds(), granted, "{asked} s");
             // And what the far end will make of it, which is what settles it.
             let heard = Mh::from_bits(&Mh::ack(t1).to_bits()).expect("a good MHack");
-            assert_eq!(heard.information, MhInformation::Timeout(T1::from_code(sent)), "{asked} s");
+            assert_eq!(
+                heard.information,
+                MhInformation::Timeout(T1::from_code(sent)),
+                "{asked} s"
+            );
         }
         // Every pattern the wire can carry goes back out as itself, so nothing
         // is turned into something else on the way through.

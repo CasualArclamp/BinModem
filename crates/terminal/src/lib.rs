@@ -118,7 +118,13 @@ pub struct Attr {
 
 impl Default for Attr {
     fn default() -> Self {
-        Self { fg: DEFAULT_FG, bg: DEFAULT_BG, bold: false, blink: false, reverse: false }
+        Self {
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
+            bold: false,
+            blink: false,
+            reverse: false,
+        }
     }
 }
 
@@ -128,8 +134,16 @@ impl Attr {
     /// Bold brightens the foreground, which is how ANSI.SYS produced its top
     /// eight colours; reverse swaps the two afterwards.
     pub fn resolved(&self) -> (u8, u8) {
-        let fg = if self.bold && self.fg < 8 { self.fg + 8 } else { self.fg };
-        if self.reverse { (self.bg, fg) } else { (fg, self.bg) }
+        let fg = if self.bold && self.fg < 8 {
+            self.fg + 8
+        } else {
+            self.fg
+        };
+        if self.reverse {
+            (self.bg, fg)
+        } else {
+            (fg, self.bg)
+        }
     }
 }
 
@@ -141,7 +155,10 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { ch: ' ', attr: Attr::default() }
+        Self {
+            ch: ' ',
+            attr: Attr::default(),
+        }
     }
 }
 
@@ -377,7 +394,9 @@ impl Terminal {
         match byte {
             b'0'..=b'9' => {
                 let last = self.params.last_mut().expect("params seeded on entry");
-                *last = last.saturating_mul(10).saturating_add(u32::from(byte - b'0'));
+                *last = last
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(byte - b'0'));
             }
             b';' => self.params.push(0),
             b'?' => self.private = true,
@@ -626,7 +645,11 @@ impl Terminal {
         let (x, y) = (col + 1, row + 1);
         match self.mouse_coordinates() {
             Coordinates::Sgr => {
-                let last = if event.motion == Motion::Release { 'm' } else { 'M' };
+                let last = if event.motion == Motion::Release {
+                    'm'
+                } else {
+                    'M'
+                };
                 self.answer(format!("[<{code};{x};{y}{last}"));
             }
             Coordinates::Urxvt => self.answer(format!("[{};{x};{y}M", code + 32)),
@@ -638,13 +661,7 @@ impl Terminal {
                 if x > 223 || y > 223 {
                     return false;
                 }
-                self.answer_bytes(&[
-                    b'[',
-                    b'M',
-                    32 + code as u8,
-                    32 + x as u8,
-                    32 + y as u8,
-                ]);
+                self.answer_bytes(&[b'[', b'M', 32 + code as u8, 32 + x as u8, 32 + y as u8]);
             }
         }
         true
@@ -698,7 +715,10 @@ impl Terminal {
         self.wrap_pending = false;
 
         let index = self.row * self.cols + self.col;
-        self.cells[index] = Cell { ch, attr: self.attr };
+        self.cells[index] = Cell {
+            ch,
+            attr: self.attr,
+        };
 
         if self.col + 1 >= self.cols {
             // Park here; the next printable triggers the wrap.
@@ -729,24 +749,36 @@ impl Terminal {
         let last = (self.rows - 1) * self.cols;
         // A scrolled-in row takes the current background, not the default, so
         // a coloured screen scrolls in its own colour.
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[last..].fill(blank);
     }
 
     fn scroll_down(&mut self) {
         let last = (self.rows - 1) * self.cols;
         self.cells.copy_within(..last, self.cols);
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[..self.cols].fill(blank);
     }
 
     /// Attributes used to fill erased or scrolled-in cells.
     fn blank_attr(&self) -> Attr {
-        Attr { bg: self.attr.bg, ..Attr::default() }
+        Attr {
+            bg: self.attr.bg,
+            ..Attr::default()
+        }
     }
 
     fn erase_display(&mut self, mode: u32) {
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         let cursor = self.row * self.cols + self.col;
         match mode {
             0 => self.cells[cursor..].fill(blank),
@@ -762,7 +794,10 @@ impl Terminal {
     }
 
     fn erase_line(&mut self, mode: u32) {
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         let start = self.row * self.cols;
         let end = start + self.cols;
         let cursor = start + self.col;
@@ -774,7 +809,10 @@ impl Terminal {
     }
 
     fn erase_chars(&mut self, count: usize) {
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         let start = self.row * self.cols + self.col;
         let end = (start + count).min((self.row + 1) * self.cols);
         self.cells[start..end].fill(blank);
@@ -786,7 +824,10 @@ impl Terminal {
         let from = row_start + self.col;
         let count = count.min(row_end - from);
         self.cells.copy_within(from..row_end - count, from + count);
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[from..from + count].fill(blank);
     }
 
@@ -796,7 +837,10 @@ impl Terminal {
         let from = row_start + self.col;
         let count = count.min(row_end - from);
         self.cells.copy_within(from + count..row_end, from);
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[row_end - count..row_end].fill(blank);
     }
 
@@ -804,8 +848,12 @@ impl Terminal {
         let count = count.min(self.rows - self.row);
         let from = self.row * self.cols;
         let end = self.rows * self.cols;
-        self.cells.copy_within(from..end - count * self.cols, from + count * self.cols);
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        self.cells
+            .copy_within(from..end - count * self.cols, from + count * self.cols);
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[from..from + count * self.cols].fill(blank);
     }
 
@@ -814,7 +862,10 @@ impl Terminal {
         let from = self.row * self.cols;
         let end = self.rows * self.cols;
         self.cells.copy_within(from + count * self.cols..end, from);
-        let blank = Cell { ch: ' ', attr: self.blank_attr() };
+        let blank = Cell {
+            ch: ' ',
+            attr: self.blank_attr(),
+        };
         self.cells[end - count * self.cols..end].fill(blank);
     }
 
@@ -1071,7 +1122,11 @@ mod tests {
     fn scrolled_in_rows_take_the_current_background() {
         let mut t = Terminal::new(4, 2);
         feed(&mut t, "\x1b[44ma\r\nb\r\nc");
-        assert_eq!(t.cell(1, 3).attr.bg, 4, "new row should carry the blue background");
+        assert_eq!(
+            t.cell(1, 3).attr.bg,
+            4,
+            "new row should carry the blue background"
+        );
     }
 
     #[test]
@@ -1180,7 +1235,10 @@ mod tests {
         t.feed_bytes(b"\x1b[6n");
         // One-based, row then column, which puts this at column six.
         assert_eq!(t.take_reply(), b"\x1b[1;6R");
-        assert!(t.take_reply().is_empty(), "answered the same question twice");
+        assert!(
+            t.take_reply().is_empty(),
+            "answered the same question twice"
+        );
     }
 
     #[test]
@@ -1228,7 +1286,6 @@ mod tests {
         }
         assert!(t.take_reply().len() <= 256);
     }
-
 }
 
 #[cfg(test)]
@@ -1236,7 +1293,13 @@ mod mouse_tests {
     use super::*;
 
     fn at(motion: Motion, button: Option<Button>, col: usize, row: usize) -> Mouse {
-        Mouse { motion, button, col, row, modifiers: Modifiers::default() }
+        Mouse {
+            motion,
+            button,
+            col,
+            row,
+            modifiers: Modifiers::default(),
+        }
     }
 
     fn press(col: usize, row: usize) -> Mouse {
@@ -1319,7 +1382,11 @@ mod mouse_tests {
         // the far end has never heard of.
         let mut t = enabled("9");
         let mut event = press(0, 0);
-        event.modifiers = Modifiers { shift: true, alt: true, ctrl: true };
+        event.modifiers = Modifiers {
+            shift: true,
+            alt: true,
+            ctrl: true,
+        };
         t.mouse(event);
         assert_eq!(t.take_reply(), vec![0x1b, b'[', b'M', 32, 33, 33]);
     }
@@ -1328,7 +1395,11 @@ mod mouse_tests {
     fn the_modifier_keys_are_bits_four_eight_and_sixteen() {
         let mut t = enabled("1000;1006");
         let mut event = press(0, 0);
-        event.modifiers = Modifiers { shift: true, alt: false, ctrl: true };
+        event.modifiers = Modifiers {
+            shift: true,
+            alt: false,
+            ctrl: true,
+        };
         t.mouse(event);
         assert_eq!(t.take_reply(), b"\x1b[<20;1;1M");
     }
@@ -1456,7 +1527,10 @@ mod mouse_tests {
         assert!(t.autowrap, "wrapping stayed off");
         assert!(t.cursor_visible, "the cursor stayed hidden");
         assert!(!t.bell, "a bell rung before the reset");
-        assert!(t.take_reply().is_empty(), "answered a question from before it");
+        assert!(
+            t.take_reply().is_empty(),
+            "answered a question from before it"
+        );
         assert_eq!(t.cell(9, 39).ch, ' ', "the screen was not cleared");
 
         // And the parser is not still waiting for the rest of that sequence,

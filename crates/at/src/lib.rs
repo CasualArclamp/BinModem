@@ -104,7 +104,12 @@ impl Default for Modulation {
         // V.250 6.4.1: automode on, and both rates unspecified. "If
         // unspecified (set to 0), they are determined by the modulation means
         // selected", so zero is the absence of a limit rather than a slow one.
-        Self { carrier: "V22B".into(), automode: true, min_rate: 0, max_rate: 0 }
+        Self {
+            carrier: "V22B".into(),
+            automode: true,
+            min_rate: 0,
+            max_rate: 0,
+        }
     }
 }
 
@@ -165,7 +170,12 @@ impl Default for Compression {
         // protect anything, it decides the matter for both ends and decides it
         // badly. 250 is the top of the permitted range and a far end that can
         // only manage 6 still gets 6.
-        Self { direction: 3, required: false, max_dict: 2048, max_string: 250 }
+        Self {
+            direction: 3,
+            required: false,
+            max_dict: 2048,
+            max_string: 250,
+        }
     }
 }
 
@@ -222,7 +232,10 @@ impl Default for ErrorControl {
     fn default() -> Self {
         // V.42 with the detection phase, and a connection without it is still
         // acceptable, which is what almost every modem shipped configured for.
-        Self { request: 3, fallback: 0 }
+        Self {
+            request: 3,
+            fallback: 0,
+        }
     }
 }
 
@@ -405,10 +418,13 @@ impl Interpreter {
             // The last three are no Recommendation's: V.ARC, this modem's
             // own mode for a sound card wired to another one, as its
             // multicarrier, QAM and baseband modulations.
-            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            modulations: [
+                "V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "VARC",
+                "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
             modulation: Modulation::default(),
             error_control: ErrorControl::default(),
             compression: Compression::default(),
@@ -611,12 +627,21 @@ impl Interpreter {
                 self.regs.set(*n, value.unwrap_or(0)).map_err(reg_error)?;
                 Ok(None)
             }
-            Command::Basic { amp, letter, number } => self.basic(*amp, *letter, *number),
+            Command::Basic {
+                amp,
+                letter,
+                number,
+            } => self.basic(*amp, *letter, *number),
             Command::Extended { name, op } => self.extended(name, op),
         }
     }
 
-    fn basic(&mut self, amp: bool, letter: char, number: Option<u32>) -> Result<Option<Action>, ResultCode> {
+    fn basic(
+        &mut self,
+        amp: bool,
+        letter: char,
+        number: Option<u32>,
+    ) -> Result<Option<Action>, ResultCode> {
         // V.250 5.3.1: a missing <number> means zero.
         let n = number.unwrap_or(0);
         let small = u8::try_from(n).map_err(|_| ResultCode::Error)?;
@@ -624,8 +649,14 @@ impl Interpreter {
         if amp {
             return match letter {
                 // V.250 6.2.8 / 6.2.9.
-                'C' if n <= 1 => { self.config.dcd = small; Ok(None) }
-                'D' if n <= 2 => { self.config.dtr = small; Ok(None) }
+                'C' if n <= 1 => {
+                    self.config.dcd = small;
+                    Ok(None)
+                }
+                'D' if n <= 2 => {
+                    self.config.dtr = small;
+                    Ok(None)
+                }
                 // V.250 6.1.2. The reset applies here so that later commands
                 // on the same line, as in "AT&F&C1&D2", act on the fresh state.
                 'F' if n == 0 => {
@@ -640,26 +671,54 @@ impl Interpreter {
             // V.250 6.3.5: answer. The rest of the line is ignored.
             'A' => Ok(Some(Action::Answer)),
             // V.250 6.2.4.
-            'E' if n <= 1 => { self.config.echo = n == 1; Ok(None) }
+            'E' if n <= 1 => {
+                self.config.echo = n == 1;
+                Ok(None)
+            }
             // V.250 6.3.6.
             'H' if n == 0 => Ok(Some(Action::HangUp)),
             'H' if n == 1 => Ok(Some(Action::OffHook)),
             // V.250 6.1.3.
-            'I' => { let t = self.identify(small); self.fmt.info(&t, &self.regs, &mut self.out); Ok(None) }
+            'I' => {
+                let t = self.identify(small);
+                self.fmt.info(&t, &self.regs, &mut self.out);
+                Ok(None)
+            }
             // V.250 6.3.13 / 6.3.14: accepted and stored; this DCE has no speaker.
-            'L' if n <= 3 => { self.config.speaker_volume = small; Ok(None) }
-            'M' if n <= 3 => { self.config.speaker_mode = small; Ok(None) }
+            'L' if n <= 3 => {
+                self.config.speaker_volume = small;
+                Ok(None)
+            }
+            'M' if n <= 3 => {
+                self.config.speaker_mode = small;
+                Ok(None)
+            }
             // V.250 6.3.7.
             'O' if n == 0 => Ok(Some(Action::ReturnOnline)),
             // V.250 6.3.3 / 6.3.2.
-            'P' => { self.config.pulse_dialling = true; Ok(None) }
-            'T' => { self.config.pulse_dialling = false; Ok(None) }
+            'P' => {
+                self.config.pulse_dialling = true;
+                Ok(None)
+            }
+            'T' => {
+                self.config.pulse_dialling = false;
+                Ok(None)
+            }
             // V.250 6.2.5.
-            'Q' if n <= 1 => { self.fmt.quiet = n == 1; Ok(None) }
+            'Q' if n <= 1 => {
+                self.fmt.quiet = n == 1;
+                Ok(None)
+            }
             // V.250 6.2.6.
-            'V' if n <= 1 => { self.fmt.verbose = n == 1; Ok(None) }
+            'V' if n <= 1 => {
+                self.fmt.verbose = n == 1;
+                Ok(None)
+            }
             // V.250 6.2.7.
-            'X' if n <= 4 => { self.config.x = small; Ok(None) }
+            'X' if n <= 4 => {
+                self.config.x = small;
+                Ok(None)
+            }
             // V.250 6.1.1. The OK that follows must use the new Q, V, S3 and
             // S4 values, which it does because the reset happens here and the
             // result code is formatted afterwards.
@@ -814,12 +873,14 @@ impl Interpreter {
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info("+A8E: (1),(1),(0),(0,1)", &self.regs, &mut self.out);
+                self.fmt
+                    .info("+A8E: (1),(1),(0),(0,1)", &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Set(value) => {
                 let mut parts = value.split(',').map(str::trim);
-                let fixed = |p: Option<&str>, only: &str| matches!(p, None | Some("")) || p == Some(only);
+                let fixed =
+                    |p: Option<&str>, only: &str| matches!(p, None | Some("")) || p == Some(only);
                 if !fixed(parts.next(), "1") || !fixed(parts.next(), "1") {
                     return Err(ResultCode::Error);
                 }
@@ -856,7 +917,8 @@ impl Interpreter {
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info(&format!("+{name}: (0,1)"), &self.regs, &mut self.out);
+                self.fmt
+                    .info(&format!("+{name}: (0,1)"), &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Set(value) => match value.trim() {
@@ -966,11 +1028,19 @@ impl Interpreter {
         match op {
             ExtOp::Read | ExtOp::Execute => {
                 let (baud, code, bits) = self.config.varc;
-                self.fmt.info(&format!("+VARC: {baud},{code},{bits}"), &self.regs, &mut self.out);
+                self.fmt.info(
+                    &format!("+VARC: {baud},{code},{bits}"),
+                    &self.regs,
+                    &mut self.out,
+                );
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info("+VARC: (0,250-128000),(0,25,33,50,75,93),(0-24)", &self.regs, &mut self.out);
+                self.fmt.info(
+                    "+VARC: (0,250-128000),(0,25,33,50,75,93),(0-24)",
+                    &self.regs,
+                    &mut self.out,
+                );
                 Ok(None)
             }
             ExtOp::Set(value) => {
@@ -979,7 +1049,11 @@ impl Interpreter {
                     match parts.next().map(str::trim) {
                         // 5.4.2.1: an omitted subparameter keeps its value.
                         None | Some("") => Ok(was),
-                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                        Some(v) => v
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|n| *n <= most)
+                            .ok_or(ResultCode::Error),
                     }
                 };
                 let (was_baud, was_code, was_bits) = self.config.varc;
@@ -1004,11 +1078,16 @@ impl Interpreter {
         match op {
             ExtOp::Read | ExtOp::Execute => {
                 let (mode, two_wire) = self.config.varc_bis;
-                self.fmt.info(&format!("+VARCBIS: {mode},{}", u8::from(two_wire)), &self.regs, &mut self.out);
+                self.fmt.info(
+                    &format!("+VARCBIS: {mode},{}", u8::from(two_wire)),
+                    &self.regs,
+                    &mut self.out,
+                );
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info("+VARCBIS: (0-3),(0,1)", &self.regs, &mut self.out);
+                self.fmt
+                    .info("+VARCBIS: (0-3),(0,1)", &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Set(value) => {
@@ -1017,7 +1096,11 @@ impl Interpreter {
                     match parts.next().map(str::trim) {
                         // 5.4.2.1: an omitted subparameter keeps its value.
                         None | Some("") => Ok(was),
-                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                        Some(v) => v
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|n| *n <= most)
+                            .ok_or(ResultCode::Error),
                     }
                 };
                 let (was_mode, was_wires) = self.config.varc_bis;
@@ -1034,7 +1117,11 @@ impl Interpreter {
     fn varc_z_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read | ExtOp::Execute => {
-                self.fmt.info(&format!("+VARCZ: {}", self.config.varc_z), &self.regs, &mut self.out);
+                self.fmt.info(
+                    &format!("+VARCZ: {}", self.config.varc_z),
+                    &self.regs,
+                    &mut self.out,
+                );
                 Ok(None)
             }
             ExtOp::Test => {
@@ -1044,7 +1131,11 @@ impl Interpreter {
             ExtOp::Set(value) => {
                 self.config.varc_z = match value.trim() {
                     "" => self.config.varc_z,
-                    v => v.parse::<u8>().ok().filter(|n| *n <= 2).ok_or(ResultCode::Error)?,
+                    v => v
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|n| *n <= 2)
+                        .ok_or(ResultCode::Error)?,
                 };
                 Ok(None)
             }
@@ -1099,7 +1190,12 @@ impl Interpreter {
                 if parts.next().is_some() {
                     return Err(ResultCode::Error);
                 }
-                let in_range = |n: u32, low: u32, high: u32| (low..=high).contains(&n).then_some(n).ok_or(ResultCode::Error);
+                let in_range = |n: u32, low: u32, high: u32| {
+                    (low..=high)
+                        .contains(&n)
+                        .then_some(n)
+                        .ok_or(ResultCode::Error)
+                };
                 let mut v = self.v44;
                 if let Some(d) = values[0] {
                     if d != 0 && d != 3 {
@@ -1183,7 +1279,8 @@ impl Interpreter {
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info(&format!("+{name}: (0)"), &self.regs, &mut self.out);
+                self.fmt
+                    .info(&format!("+{name}: (0)"), &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Set(_) => Err(ResultCode::Error),

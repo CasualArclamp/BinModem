@@ -129,7 +129,10 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, spare: None }
+        Self {
+            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+            spare: None,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -301,9 +304,16 @@ enum Mode {
     V22,
     V22bis1200,
     V22bis2400,
-    V32 { bps: u32, trellis: bool },
-    V29 { bps: u32 },
-    V27ter { bps: u32 },
+    V32 {
+        bps: u32,
+        trellis: bool,
+    },
+    V29 {
+        bps: u32,
+    },
+    V27ter {
+        bps: u32,
+    },
 }
 
 impl Mode {
@@ -315,7 +325,11 @@ impl Mode {
             Mode::V22bis1200 => "V.22bis 1200".into(),
             Mode::V22bis2400 => "V.22bis 2400".into(),
             Mode::V32 { bps, trellis } => {
-                let family = if bps > 9600 || (bps == 7200) { "V.32bis" } else { "V.32" };
+                let family = if bps > 9600 || (bps == 7200) {
+                    "V.32bis"
+                } else {
+                    "V.32"
+                };
                 if trellis {
                     format!("{family} {bps}T")
                 } else {
@@ -407,7 +421,11 @@ impl Mode {
             // a grid of one and three.
             Mode::V22bis2400 => Some(grid16(rms10)),
             Mode::V32 { bps, trellis } => {
-                let coding = if trellis { v32::Coding::Trellis } else { v32::Coding::Uncoded };
+                let coding = if trellis {
+                    v32::Coding::Trellis
+                } else {
+                    v32::Coding::Uncoded
+                };
                 match v32::coding_for(bps, coding) {
                     Some(coded) => Some(
                         (0..coded.size())
@@ -590,7 +608,11 @@ fn transmit(mode: Mode, samples: usize, lead_in: usize, seed: u64) -> (Vec<f64>,
         Mode::V32 { bps, trellis } => {
             let mut tx = v32::Transmitter::new(v32::Mode::Answer, FS);
             tx.set_data_rate(bps);
-            tx.set_coding(if trellis { v32::Coding::Trellis } else { v32::Coding::Uncoded });
+            tx.set_coding(if trellis {
+                v32::Coding::Trellis
+            } else {
+                v32::Coding::Uncoded
+            });
             for _ in 0..samples {
                 if tx.pending_bits() < 256 {
                     let mut chunk = Vec::with_capacity(256);
@@ -675,7 +697,11 @@ fn own_transmitter(mode: Mode, samples: usize, seed: u64) -> Vec<f64> {
         Mode::V32 { bps, trellis } => {
             let mut tx = v32::Transmitter::new(v32::Mode::Call, FS);
             tx.set_data_rate(bps);
-            tx.set_coding(if trellis { v32::Coding::Trellis } else { v32::Coding::Uncoded });
+            tx.set_coding(if trellis {
+                v32::Coding::Trellis
+            } else {
+                v32::Coding::Uncoded
+            });
             for _ in 0..samples {
                 if tx.pending_bits() < 256 {
                     let chunk: Vec<bool> = (0..256).map(|_| rng.bit()).collect();
@@ -734,7 +760,11 @@ impl Rx {
             Mode::V32 { bps, trellis } => {
                 let mut rx = v32::Receiver::new(v32::Mode::Call, FS);
                 rx.set_data_rate(bps);
-                rx.set_coding(if trellis { v32::Coding::Trellis } else { v32::Coding::Uncoded });
+                rx.set_coding(if trellis {
+                    v32::Coding::Trellis
+                } else {
+                    v32::Coding::Uncoded
+                });
                 Rx::V32(rx)
             }
             Mode::V29 { bps } => {
@@ -993,7 +1023,10 @@ fn run(mode: Mode, imp: Impairments, arrival: usize, seed: u64) -> Metrics {
         let mean_sq = sig / count as f64;
         // Variance about ±mean_mag, which is the slicer's own alphabet.
         let noise = (mean_sq - mean_mag * mean_mag).max(1e-18);
-        (10.0 * (mean_mag * mean_mag / noise).log10(), noise.sqrt() / mean_mag.max(1e-18))
+        (
+            10.0 * (mean_mag * mean_mag / noise).log10(),
+            noise.sqrt() / mean_mag.max(1e-18),
+        )
     };
 
     let mut m = score(mode, &sent, &units, &times, carrier_at);
@@ -1025,7 +1058,10 @@ fn run(mode: Mode, imp: Impairments, arrival: usize, seed: u64) -> Metrics {
 /// scores its real error rate, and the slip is counted and reported on its own.
 fn score(mode: Mode, sent: &[bool], got: &[u16], times: &[f64], carrier_at: f64) -> Metrics {
     let unit_bits = mode.unit_bits();
-    let mut m = Metrics { units: got.len(), ..Metrics::default() };
+    let mut m = Metrics {
+        units: got.len(),
+        ..Metrics::default()
+    };
 
     // What went in, as units of the same size as what came out.
     let sent_units: Vec<u16> = if unit_bits == 1 {
@@ -1195,7 +1231,11 @@ fn score(mode: Mode, sent: &[bool], got: &[u16], times: &[f64], carrier_at: f64)
         }
     }
     m.first_error_s = first_error;
-    m.ber = if total_bits == 0 { 0.5 } else { wrong_bits as f64 / total_bits as f64 };
+    m.ber = if total_bits == 0 {
+        0.5
+    } else {
+        wrong_bits as f64 / total_bits as f64
+    };
 
     // Symbol error rate: the fraction of consecutive groups of one symbol's
     // worth of aligned bits that carry at least one wrong bit.
@@ -1220,10 +1260,18 @@ fn score(mode: Mode, sent: &[bool], got: &[u16], times: &[f64], carrier_at: f64)
                 group_bad = false;
             }
         }
-        m.ser = if groups == 0 { 1.0 } else { bad_groups as f64 / groups as f64 };
+        m.ser = if groups == 0 {
+            1.0
+        } else {
+            bad_groups as f64 / groups as f64
+        };
     } else {
         // Bell 103: the unit is a character, so this is a character error rate.
-        m.ser = if total_units == 0 { 1.0 } else { wrong_units as f64 / total_units as f64 };
+        m.ser = if total_units == 0 {
+            1.0
+        } else {
+            wrong_units as f64 / total_units as f64
+        };
     }
     m
 }
@@ -1238,12 +1286,30 @@ const MODES: &[Mode] = &[
     Mode::V22,
     Mode::V22bis1200,
     Mode::V22bis2400,
-    Mode::V32 { bps: 4800, trellis: false },
-    Mode::V32 { bps: 9600, trellis: false },
-    Mode::V32 { bps: 7200, trellis: true },
-    Mode::V32 { bps: 9600, trellis: true },
-    Mode::V32 { bps: 12000, trellis: true },
-    Mode::V32 { bps: 14400, trellis: true },
+    Mode::V32 {
+        bps: 4800,
+        trellis: false,
+    },
+    Mode::V32 {
+        bps: 9600,
+        trellis: false,
+    },
+    Mode::V32 {
+        bps: 7200,
+        trellis: true,
+    },
+    Mode::V32 {
+        bps: 9600,
+        trellis: true,
+    },
+    Mode::V32 {
+        bps: 12000,
+        trellis: true,
+    },
+    Mode::V32 {
+        bps: 14400,
+        trellis: true,
+    },
     Mode::V29 { bps: 7200 },
     Mode::V29 { bps: 9600 },
     Mode::V27ter { bps: 2400 },
@@ -1335,7 +1401,6 @@ const PREAMBLE: &[&str] = &[
     "",
 ];
 
-
 /// The eight arrival phases: eight samples at 16 kHz covers more than a whole
 /// symbol at V.32's 6.67 samples per symbol, which is where this matters.
 const PHASES: usize = 8;
@@ -1344,29 +1409,82 @@ fn cases() -> Vec<(String, Impairments)> {
     let mut out: Vec<(String, Impairments)> = Vec::new();
     out.push(("clean".into(), Impairments::default()));
     for hz in [-7.0, -3.0, -1.0, 1.0, 3.0, 7.0] {
-        out.push((format!("carrier {hz:+.0} Hz"), Impairments { carrier_hz: hz, ..Default::default() }));
+        out.push((
+            format!("carrier {hz:+.0} Hz"),
+            Impairments {
+                carrier_hz: hz,
+                ..Default::default()
+            },
+        ));
     }
     for ppm in [-200.0, -120.0, -50.0, 50.0, 120.0, 200.0] {
-        out.push((format!("clock {ppm:+.0} ppm"), Impairments { clock_ppm: ppm, ..Default::default() }));
+        out.push((
+            format!("clock {ppm:+.0} ppm"),
+            Impairments {
+                clock_ppm: ppm,
+                ..Default::default()
+            },
+        ));
     }
-    for db in [36.0, 33.0, 30.0, 27.0, 24.0, 21.0, 18.0, 15.0, 12.0, 9.0, 6.0] {
-        out.push((format!("SNR {db:.0} dB"), Impairments { snr_db: Some(db), ..Default::default() }));
+    for db in [
+        36.0, 33.0, 30.0, 27.0, 24.0, 21.0, 18.0, 15.0, 12.0, 9.0, 6.0,
+    ] {
+        out.push((
+            format!("SNR {db:.0} dB"),
+            Impairments {
+                snr_db: Some(db),
+                ..Default::default()
+            },
+        ));
     }
     out.push((
         "echo 0.57 @ 120 ms".into(),
-        Impairments { echo: Some(Echo { delay_s: 0.120, amplitude: 0.57 }), ..Default::default() },
+        Impairments {
+            echo: Some(Echo {
+                delay_s: 0.120,
+                amplitude: 0.57,
+            }),
+            ..Default::default()
+        },
     ));
     out.push((
         "echo -25 dB @ 1.1 s".into(),
         Impairments {
-            echo: Some(Echo { delay_s: 1.100, amplitude: 10f64.powf(-25.0 / 20.0) }),
+            echo: Some(Echo {
+                delay_s: 1.100,
+                amplitude: 10f64.powf(-25.0 / 20.0),
+            }),
             ..Default::default()
         },
     ));
-    out.push(("level +6 dB".into(), Impairments { step_db: Some(6.0), ..Default::default() }));
-    out.push(("level -6 dB".into(), Impairments { step_db: Some(-6.0), ..Default::default() }));
-    out.push(("dropout 20 ms".into(), Impairments { dropout_s: Some(0.020), ..Default::default() }));
-    out.push(("round trip 1.1 s".into(), Impairments { delay_s: 1.100, ..Default::default() }));
+    out.push((
+        "level +6 dB".into(),
+        Impairments {
+            step_db: Some(6.0),
+            ..Default::default()
+        },
+    ));
+    out.push((
+        "level -6 dB".into(),
+        Impairments {
+            step_db: Some(-6.0),
+            ..Default::default()
+        },
+    ));
+    out.push((
+        "dropout 20 ms".into(),
+        Impairments {
+            dropout_s: Some(0.020),
+            ..Default::default()
+        },
+    ));
+    out.push((
+        "round trip 1.1 s".into(),
+        Impairments {
+            delay_s: 1.100,
+            ..Default::default()
+        },
+    ));
     out
 }
 
@@ -1545,10 +1663,18 @@ fn every_slow_mode_against_every_impairment() {
         writeln!(doc).unwrap();
         match snr_floor {
             Some(db) => {
-                writeln!(doc, "Lowest signal-to-noise ratio that still carried the payload: **{db:.0} dB**.").unwrap();
+                writeln!(
+                    doc,
+                    "Lowest signal-to-noise ratio that still carried the payload: **{db:.0} dB**."
+                )
+                .unwrap();
             }
             None => {
-                writeln!(doc, "No signal-to-noise ratio in the sweep carried the payload.").unwrap();
+                writeln!(
+                    doc,
+                    "No signal-to-noise ratio in the sweep carried the payload."
+                )
+                .unwrap();
             }
         }
         if rate_flip {
@@ -1567,7 +1693,11 @@ fn every_slow_mode_against_every_impairment() {
     )
     .unwrap();
     writeln!(doc).unwrap();
-    writeln!(doc, "| mode | arrival phases | SNR floor | failed | what failed |").unwrap();
+    writeln!(
+        doc,
+        "| mode | arrival phases | SNR floor | failed | what failed |"
+    )
+    .unwrap();
     writeln!(doc, "|---|---|---|---|---|").unwrap();
     let mut ordered = summary.clone();
     ordered.sort_by_key(|(_, ok, _, f)| std::cmp::Reverse((PHASES - ok) * 2 + f.len()));
@@ -1580,7 +1710,11 @@ fn every_slow_mode_against_every_impairment() {
                 None => "none held".into(),
             },
             what.len(),
-            if what.is_empty() { "nothing".into() } else { what.join(", ") }
+            if what.is_empty() {
+                "nothing".into()
+            } else {
+                what.join(", ")
+            }
         )
         .unwrap();
     }
@@ -1613,11 +1747,21 @@ fn every_slow_mode_against_every_impairment() {
     .unwrap();
     writeln!(doc, "|---|---|---|---|---|").unwrap();
     for &delay in &[0.0f64, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.60, 1.10] {
-        let imp = Impairments { delay_s: delay, ..Default::default() };
-        let v32 = Mode::V32 { bps: 4800, trellis: false };
+        let imp = Impairments {
+            delay_s: delay,
+            ..Default::default()
+        };
+        let v32 = Mode::V32 {
+            bps: 4800,
+            trellis: false,
+        };
         let a = run(v32, imp, 0, SEED);
-        let ok32 = (0..PHASES).filter(|&q| run(v32, imp, q, SEED).held()).count();
-        let ok22 = (0..PHASES).filter(|&q| run(Mode::V22bis2400, imp, q, SEED).held()).count();
+        let ok32 = (0..PHASES)
+            .filter(|&q| run(v32, imp, q, SEED).held())
+            .count();
+        let ok22 = (0..PHASES)
+            .filter(|&q| run(Mode::V22bis2400, imp, q, SEED).held())
+            .count();
         writeln!(
             doc,
             "| {:.0} ms | {ok32}/{PHASES} | {} | {} | {ok22}/{PHASES} |",
@@ -1644,14 +1788,62 @@ fn every_slow_mode_against_every_impairment() {
     writeln!(doc).unwrap();
     let axes: [(&str, Impairments); 9] = [
         ("clean", Impairments::default()),
-        ("-7 Hz", Impairments { carrier_hz: -7.0, ..Default::default() }),
-        ("-3 Hz", Impairments { carrier_hz: -3.0, ..Default::default() }),
-        ("-1 Hz", Impairments { carrier_hz: -1.0, ..Default::default() }),
-        ("+1 Hz", Impairments { carrier_hz: 1.0, ..Default::default() }),
-        ("+3 Hz", Impairments { carrier_hz: 3.0, ..Default::default() }),
-        ("+7 Hz", Impairments { carrier_hz: 7.0, ..Default::default() }),
-        ("-200 ppm", Impairments { clock_ppm: -200.0, ..Default::default() }),
-        ("+200 ppm", Impairments { clock_ppm: 200.0, ..Default::default() }),
+        (
+            "-7 Hz",
+            Impairments {
+                carrier_hz: -7.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "-3 Hz",
+            Impairments {
+                carrier_hz: -3.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "-1 Hz",
+            Impairments {
+                carrier_hz: -1.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "+1 Hz",
+            Impairments {
+                carrier_hz: 1.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "+3 Hz",
+            Impairments {
+                carrier_hz: 3.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "+7 Hz",
+            Impairments {
+                carrier_hz: 7.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "-200 ppm",
+            Impairments {
+                clock_ppm: -200.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "+200 ppm",
+            Impairments {
+                clock_ppm: 200.0,
+                ..Default::default()
+            },
+        ),
     ];
     write!(doc, "| mode |").unwrap();
     for (name, _) in &axes {
@@ -1665,7 +1857,9 @@ fn every_slow_mode_against_every_impairment() {
         }
         write!(doc, "| {} |", mode.label()).unwrap();
         for (_, imp) in &axes {
-            let ok = (0..PHASES).filter(|&q| run(mode, *imp, q, SEED).held()).count();
+            let ok = (0..PHASES)
+                .filter(|&q| run(mode, *imp, q, SEED).held())
+                .count();
             write!(doc, " {ok}/{PHASES} |").unwrap();
         }
         writeln!(doc).unwrap();
@@ -1695,11 +1889,22 @@ fn every_slow_mode_against_every_impairment() {
         Mode::V27ter { bps: 4800 },
         Mode::V29 { bps: 9600 },
         Mode::V22bis2400,
-        Mode::V32 { bps: 4800, trellis: false },
+        Mode::V32 {
+            bps: 4800,
+            trellis: false,
+        },
     ] {
         write!(doc, "| {} |", mode.label()).unwrap();
         for &hole in &[0.002f64, 0.005, 0.010, 0.020, 0.050] {
-            let m = run(mode, Impairments { dropout_s: Some(hole), ..Default::default() }, 0, SEED);
+            let m = run(
+                mode,
+                Impairments {
+                    dropout_s: Some(hole),
+                    ..Default::default()
+                },
+                0,
+                SEED,
+            );
             write!(
                 doc,
                 " BER {}, carrier {} |",
@@ -1712,7 +1917,10 @@ fn every_slow_mode_against_every_impairment() {
     }
     writeln!(doc).unwrap();
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/design/slow-modes/before.md");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/design/slow-modes/before.md"
+    );
     std::fs::write(path, &doc).expect("could not write before.md");
     eprintln!("\nwrote {path}");
     println!("{doc}");
@@ -1754,8 +1962,19 @@ fn two_things_worth_a_closer_look() {
     // fixed in `v22bis.rs:646`; if that is the mechanism, a short silence works
     // and a long one does not, with nothing else changed.
     for &delay in &[0.0f64, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.60, 1.10] {
-        let imp = Impairments { delay_s: delay, ..Default::default() };
-        let a = run(Mode::V32 { bps: 4800, trellis: false }, imp, 0, SEED);
+        let imp = Impairments {
+            delay_s: delay,
+            ..Default::default()
+        };
+        let a = run(
+            Mode::V32 {
+                bps: 4800,
+                trellis: false,
+            },
+            imp,
+            0,
+            SEED,
+        );
         let b = run(Mode::V22bis2400, imp, 0, SEED);
         eprintln!(
             "silence {:>5.0} ms   V.32 4800 ber {:>8}  lock {:<8}   V.22bis 2400 ber {:>8}  lock {}",
@@ -1774,11 +1993,22 @@ fn two_things_worth_a_closer_look() {
         Mode::V27ter { bps: 4800 },
         Mode::V29 { bps: 9600 },
         Mode::V22bis2400,
-        Mode::V32 { bps: 4800, trellis: false },
+        Mode::V32 {
+            bps: 4800,
+            trellis: false,
+        },
     ] {
         let mut line = format!("{:<14}", mode.label());
         for &hole in &[0.002f64, 0.005, 0.010, 0.020, 0.050] {
-            let m = run(mode, Impairments { dropout_s: Some(hole), ..Default::default() }, 0, SEED);
+            let m = run(
+                mode,
+                Impairments {
+                    dropout_s: Some(hole),
+                    ..Default::default()
+                },
+                0,
+                SEED,
+            );
             line.push_str(&format!(
                 "  {:>3.0} ms: ber {:>8} slips {} carrier {}",
                 hole * 1000.0,
@@ -1792,15 +2022,29 @@ fn two_things_worth_a_closer_look() {
 
     eprintln!();
     for &mode in &[
-        Mode::V32 { bps: 4800, trellis: false },
-        Mode::V32 { bps: 9600, trellis: false },
-        Mode::V32 { bps: 14400, trellis: true },
+        Mode::V32 {
+            bps: 4800,
+            trellis: false,
+        },
+        Mode::V32 {
+            bps: 9600,
+            trellis: false,
+        },
+        Mode::V32 {
+            bps: 14400,
+            trellis: true,
+        },
         Mode::V22bis2400,
     ] {
         let mut line = format!("{:<16}", mode.label());
         for &d in &[0.0f64, 0.3, 1.1] {
-            let imp = Impairments { delay_s: d, ..Default::default() };
-            let ok = (0..PHASES).filter(|&q| run(mode, imp, q, SEED).held()).count();
+            let imp = Impairments {
+                delay_s: d,
+                ..Default::default()
+            };
+            let ok = (0..PHASES)
+                .filter(|&q| run(mode, imp, q, SEED).held())
+                .count();
             line.push_str(&format!("  silence {:>4.0} ms: {ok}/{PHASES}", d * 1000.0));
         }
         eprintln!("{line}");
@@ -1812,15 +2056,32 @@ fn two_things_worth_a_closer_look() {
     eprintln!();
     for &mode in &[
         Mode::V22bis2400,
-        Mode::V32 { bps: 9600, trellis: false },
-        Mode::V32 { bps: 9600, trellis: true },
-        Mode::V32 { bps: 12000, trellis: true },
-        Mode::V32 { bps: 14400, trellis: true },
+        Mode::V32 {
+            bps: 9600,
+            trellis: false,
+        },
+        Mode::V32 {
+            bps: 9600,
+            trellis: true,
+        },
+        Mode::V32 {
+            bps: 12000,
+            trellis: true,
+        },
+        Mode::V32 {
+            bps: 14400,
+            trellis: true,
+        },
     ] {
         let mut line = format!("{:<16}", mode.label());
         for &hz in &[0.0f64, 1.0, 3.0, 7.0, -7.0] {
-            let imp = Impairments { carrier_hz: hz, ..Default::default() };
-            let ok = (0..PHASES).filter(|&q| run(mode, imp, q, SEED).held()).count();
+            let imp = Impairments {
+                carrier_hz: hz,
+                ..Default::default()
+            };
+            let ok = (0..PHASES)
+                .filter(|&q| run(mode, imp, q, SEED).held())
+                .count();
             line.push_str(&format!("  {hz:+.0} Hz: {ok}/{PHASES}"));
         }
         eprintln!("{line}");
@@ -1831,7 +2092,12 @@ fn two_things_worth_a_closer_look() {
     let mode = Mode::V21;
     let (lead_in_s, payload_s) = mode.plan();
     let lead_in = (lead_in_s * FS) as usize;
-    let (far, sent) = transmit(mode, ((lead_in_s + payload_s + 0.15) * FS) as usize, lead_in, SEED);
+    let (far, sent) = transmit(
+        mode,
+        ((lead_in_s + payload_s + 0.15) * FS) as usize,
+        lead_in,
+        SEED,
+    );
     let mut rx = Rx::new(mode);
     let mut step = Step::default();
     let mut got = Vec::new();
@@ -1865,7 +2131,10 @@ fn two_things_worth_a_closer_look() {
                     })
                     .count()
             };
-            let best = [-2isize, -1, 0, 1, 2].into_iter().max_by_key(|&l| score(l)).unwrap();
+            let best = [-2isize, -1, 0, 1, 2]
+                .into_iter()
+                .max_by_key(|&l| score(l))
+                .unwrap();
             eprintln!(
                 "V.21 mismatch at bit {i} ({:.0} ms), lag {lag} -> {}, agreement over the next \
                  64 bits {}/64",

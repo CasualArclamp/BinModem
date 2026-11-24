@@ -146,8 +146,16 @@ fn run(audio: line::Duplex, rate: f64) -> ExitCode {
                 match modem.rate() {
                     Some(r) => format!(
                         ", {r} bit/s, {}{}",
-                        if modem.error_controlled() { "V.42" } else { "no error control" },
-                        if modem.compressing() { " with V.42bis" } else { "" }
+                        if modem.error_controlled() {
+                            "V.42"
+                        } else {
+                            "no error control"
+                        },
+                        if modem.compressing() {
+                            " with V.42bis"
+                        } else {
+                            ""
+                        }
                     ),
                     None => String::new(),
                 }

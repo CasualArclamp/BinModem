@@ -146,8 +146,13 @@ impl Stack {
         }
         let port = self.free_port()?;
         let local = Endpoint::new(self.address, port);
-        let connection =
-            Connection::connect_sized(local, to, self.initial_sequence(), self.receive_mss, self.send_limit);
+        let connection = Connection::connect_sized(
+            local,
+            to,
+            self.initial_sequence(),
+            self.receive_mss,
+            self.send_limit,
+        );
         Some(self.keep(connection))
     }
 
@@ -268,7 +273,10 @@ impl Stack {
                 });
             }
             for report in connection.take_reports() {
-                self.events.push(Event { handle: *handle, report });
+                self.events.push(Event {
+                    handle: *handle,
+                    report,
+                });
             }
             if connection.state == State::Closed && connection.available() == 0 {
                 done.push(*handle);
@@ -314,8 +322,13 @@ impl Stack {
     /// 3.4.1: "a clock... incremented roughly every 4 microseconds", so a
     /// millisecond is two hundred and fifty of them.
     fn initial_sequence(&mut self) -> u32 {
-        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (self.clock as u32).wrapping_mul(250).wrapping_add(self.seed)
+        self.seed = self
+            .seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        (self.clock as u32)
+            .wrapping_mul(250)
+            .wrapping_add(self.seed)
     }
 }
 
@@ -464,7 +477,10 @@ mod tests {
         let mut bytes = syn.to_bytes(B, A);
         bytes[0] ^= 0x40;
         stack.deliver(B, A, &bytes);
-        assert!(stack.take_outgoing().is_empty(), "it answered a bad checksum");
+        assert!(
+            stack.take_outgoing().is_empty(),
+            "it answered a bad checksum"
+        );
         assert_eq!(stack.open_connections(), 0);
     }
 

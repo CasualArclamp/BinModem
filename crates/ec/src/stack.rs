@@ -16,8 +16,8 @@ use crate::detect::{Answer, Answerer, Originator, Outcome};
 use crate::frame::{Address, Frame, Kind, Role};
 use crate::hdlc::{Decoder, Encoder, Fcs};
 use crate::lapm::{Cause, Event, Lapm, Params, State};
-use crate::{v42bis, v44};
 use crate::xid::{Compression, Xid};
+use crate::{v42bis, v44};
 
 /// Append one line to the file named by `V92_XID_TRACE`, if it is set.
 ///
@@ -29,7 +29,11 @@ fn xid_trace(text: &str) {
     let Some(path) = std::env::var_os("V92_XID_TRACE") else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{text}");
     }
 }
@@ -328,7 +332,11 @@ impl Detect {
         match role {
             Role::Originator => Self::Origin(Box::new(Originator::new(t400_ms))),
             Role::Answerer => {
-                let answer = if declining { Answer::None } else { Answer::ErrorControl };
+                let answer = if declining {
+                    Answer::None
+                } else {
+                    Answer::ErrorControl
+                };
                 let answerer = Answerer::new(t400_ms, answer);
                 // Ten T400s only where the far end may not be listening yet.
                 Self::Answer(Box::new(if late { answerer } else { answerer.prompt() }))
@@ -343,9 +351,15 @@ pub enum Agreed {
     /// V.42bis, with the dictionary the two ends settled on. `in_band` where
     /// it was never negotiated and is being followed because the far end
     /// started sending it (see `may_follow_ecm`).
-    V42bis { params: v42bis::Params, in_band: bool },
+    V42bis {
+        params: v42bis::Params,
+        in_band: bool,
+    },
     /// V.44, each direction sized on its own (7.4).
-    V44 { transmit: v44::Params, receive: v44::Params },
+    V44 {
+        transmit: v44::Params,
+        receive: v44::Params,
+    },
 }
 
 /// Whichever compression the two ends settled on.
@@ -460,8 +474,6 @@ impl Compressor {
         }
     }
 }
-
-
 
 impl Stack {
     pub fn new(role: Role, params: Params) -> Self {
@@ -592,7 +604,10 @@ impl Stack {
     /// the far one than a detection phase would have given it.
     pub fn bypassing_detection(mut self) -> Self {
         self.enter_negotiating();
-        self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
+        self.watch = Some(Box::new(Answerer::new(
+            self.t400_ms(),
+            Answer::ErrorControl,
+        )));
         self
     }
 
@@ -643,14 +658,18 @@ impl Stack {
     pub fn over_a_round_trip(mut self, round_trip_ms: u32) -> Self {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
-            self.detect = Detect::start(self.role, self.t400_ms(), self.declining, self.late_far_end);
+            self.detect =
+                Detect::start(self.role, self.t400_ms(), self.declining, self.late_far_end);
         }
         // And the detector a bypass leaves running, which has the same T400
         // and is on the same line. Rebuilt rather than adjusted because
         // nothing can have reached it yet: these are builders, and the call
         // has not started.
         if self.watch.is_some() {
-            self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
+            self.watch = Some(Box::new(Answerer::new(
+                self.t400_ms(),
+                Answer::ErrorControl,
+            )));
         }
         self
     }
@@ -726,13 +745,18 @@ impl Stack {
         }
         if !self.offer_v44 {
             xid.v44 = None;
-        } else if let (Some(offer), Some((transmit, receive))) = (xid.v44.as_mut(), self.v44_limits) {
+        } else if let (Some(offer), Some((transmit, receive))) = (xid.v44.as_mut(), self.v44_limits)
+        {
             offer.transmit = offer.transmit.resolve(transmit);
             offer.receive = offer.receive.resolve(receive);
         }
         if let Some(path) = std::env::var_os("V92_XID_TRACE") {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
                 let _ = writeln!(
                     f,
                     "XID offer: compression={:?} v42bis={:?}/{:?} v44={:?}",
@@ -832,8 +856,14 @@ impl Stack {
     pub fn agreed_compression(&self) -> Option<Agreed> {
         let compressor = self.compression.as_ref()?;
         Some(match &compressor.codec {
-            Codec::V42bis(b) => Agreed::V42bis { params: b.params, in_band: compressor.speculative },
-            Codec::V44(l) => Agreed::V44 { transmit: l.transmit, receive: l.receive },
+            Codec::V42bis(b) => Agreed::V42bis {
+                params: b.params,
+                in_band: compressor.speculative,
+            },
+            Codec::V44(l) => Agreed::V44 {
+                transmit: l.transmit,
+                receive: l.receive,
+            },
         })
     }
 
@@ -920,7 +950,11 @@ impl Stack {
         if self.log.len() >= LOG_FRAMES {
             self.log.remove(0);
         }
-        self.log.push(Crossed { outbound, intact, body: body.to_vec() });
+        self.log.push(Crossed {
+            outbound,
+            intact,
+            body: body.to_vec(),
+        });
     }
 
     /// One line about the XID exchange into the `V92_XID_TRACE` file.
@@ -1163,7 +1197,8 @@ impl Stack {
                 self.xid_ms = 0;
                 let info = self.proposal().encode(Kind::Command);
                 self.trace(&format!("XID sending Command info={}", hex(&info)));
-                let body = Frame::Xid { pf: false, info }.encode(DLCI_DATA, self.role, Kind::Command);
+                let body =
+                    Frame::Xid { pf: false, info }.encode(DLCI_DATA, self.role, Kind::Command);
                 self.encoder.frame_with(&body, Fcs::Bits16);
                 self.note(true, true, &body);
                 queued = true;
@@ -1209,7 +1244,10 @@ impl Stack {
         let Ok(body) = result else {
             let discarded = self.decoder.discarded().to_vec();
             if self.damaged < 40 {
-                self.trace(&format!("bad HDLC frame discarded body={}", hex(&discarded)));
+                self.trace(&format!(
+                    "bad HDLC frame discarded body={}",
+                    hex(&discarded)
+                ));
             }
             self.note(false, false, &discarded);
             // A frame that did not survive the line is dropped and left to the
@@ -1552,9 +1590,7 @@ impl Stack {
                 // connection, which is the whole reason V.42 7.2.1 exists. The
                 // line reverts to start-stop characters, which is what a far
                 // end that never answered a SABME was expecting all along.
-                Event::Released(Cause::NoResponse | Cause::Refused)
-                    if !self.established =>
-                {
+                Event::Released(Cause::NoResponse | Cause::Refused) if !self.established => {
                     self.gave_up = true;
                     self.phase = Phase::Transparent;
                 }
@@ -1643,7 +1679,12 @@ mod tests {
     ///
     /// `channel` is given each bit and returns what arrives, which is where a
     /// test puts errors.
-    fn settle(a: &mut Stack, b: &mut Stack, bits: usize, mut channel: impl FnMut(usize, bool) -> bool) {
+    fn settle(
+        a: &mut Stack,
+        b: &mut Stack,
+        bits: usize,
+        mut channel: impl FnMut(usize, bool) -> bool,
+    ) {
         for i in 0..bits {
             let to_b = a.next_bit();
             let to_a = b.next_bit();
@@ -1806,7 +1847,11 @@ mod tests {
         assert!(
             a.compressing() && b.compressing(),
             "both ends offered compression and only {} got it",
-            if a.compressing() { "the originator" } else { "the answerer" }
+            if a.compressing() {
+                "the originator"
+            } else {
+                "the answerer"
+            }
         );
 
         // And it works: what goes in comes out.
@@ -1868,7 +1913,10 @@ mod tests {
         let warmed = block(0);
         a.send(&warmed);
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
-        assert!(a.compressing(), "compression never engaged, so nothing could diverge");
+        assert!(
+            a.compressing(),
+            "compression never engaged, so nothing could diverge"
+        );
         assert_eq!(b.take_received().len(), warmed.len());
 
         // Then a second lot, cut off partway. What is still unacknowledged
@@ -1878,7 +1926,10 @@ mod tests {
         a.send(&lost);
         settle(&mut a, &mut b, 4_000, |_, bit| bit);
         let crossed = b.take_received().len();
-        assert!(crossed < lost.len(), "all {crossed} of it crossed before the link went");
+        assert!(
+            crossed < lost.len(),
+            "all {crossed} of it crossed before the link went"
+        );
 
         // The far end re-establishes underneath it, which is what a line that
         // went away and came back does.
@@ -1895,7 +1946,11 @@ mod tests {
         let after = block(2_000);
         a.send(&after);
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
-        assert_eq!(b.take_received(), after, "what arrived was not what was sent");
+        assert_eq!(
+            b.take_received(),
+            after,
+            "what arrived was not what was sent"
+        );
         b.send(&after);
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
         assert_eq!(a.take_received(), after, "and not the other way either");
@@ -1923,8 +1978,14 @@ mod tests {
         let (mut a, mut b) = negotiated_pair();
         a.connect();
         settle(&mut a, &mut b, 40_000, |_, bit| bit);
-        assert!(a.is_connected() && b.is_connected(), "the link never came up");
-        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link never came up"
+        );
+        assert!(
+            a.compressing() && b.compressing(),
+            "compression was not negotiated"
+        );
 
         // Web traffic, near enough: headers that repeat and a body that does
         // not, so the dictionary is being added to throughout.
@@ -1955,8 +2016,15 @@ mod tests {
             a.damaged_frames() + b.damaged_frames() > 0,
             "the channel damaged nothing, so nothing was tested"
         );
-        assert!(a.is_connected() && b.is_connected(), "the link did not survive");
-        assert_eq!(b.take_received(), up, "what reached the answerer was not what was sent");
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link did not survive"
+        );
+        assert_eq!(
+            b.take_received(),
+            up,
+            "what reached the answerer was not what was sent"
+        );
         assert_eq!(a.take_received(), down, "and not the other way either");
     }
 
@@ -1977,11 +2045,11 @@ mod tests {
         // The same text through each, to see that the choice is worth making.
         let text: Vec<u8> = b"the same line of text over and over and over
 "
-            .iter()
-            .copied()
-            .cycle()
-            .take(24_000)
-            .collect();
+        .iter()
+        .copied()
+        .cycle()
+        .take(24_000)
+        .collect();
         a.send(&text);
         settle(&mut a, &mut b, 3_000_000, |_, bit| bit);
         assert_eq!(b.take_received(), text, "V.44 did not carry it");
@@ -2035,13 +2103,20 @@ mod tests {
         let (mut a, mut b) = negotiated_pair();
         a.connect();
         settle(&mut a, &mut b, 40_000, |_, bit| bit);
-        assert_eq!(a.compression_name(), Some("V.44"), "nothing was settled to answer about");
+        assert_eq!(
+            a.compression_name(),
+            Some("V.44"),
+            "nothing was settled to answer about"
+        );
         let mut both = answers(&mut a, Role::Originator);
         both.extend(answers(&mut b, Role::Answerer));
         assert!(!both.is_empty(), "neither end answered an XID command");
         for xid in both {
             assert!(xid.v44.is_some(), "an answer dropped the agreed V.44");
-            assert!(xid.compression.is_none(), "an answer named V.42bis as well as V.44");
+            assert!(
+                xid.compression.is_none(),
+                "an answer named V.42bis as well as V.44"
+            );
         }
 
         // And an end that has never heard of V.44 is answered about the
@@ -2053,12 +2128,25 @@ mod tests {
         b.without_v44();
         a.connect();
         settle(&mut a, &mut b, 40_000, |_, bit| bit);
-        assert_eq!(a.compression_name(), Some("V.42bis"), "nothing was settled to answer about");
+        assert_eq!(
+            a.compression_name(),
+            Some("V.42bis"),
+            "nothing was settled to answer about"
+        );
         let answered = answers(&mut a, Role::Originator);
-        assert!(!answered.is_empty(), "the originator answered no XID command");
+        assert!(
+            !answered.is_empty(),
+            "the originator answered no XID command"
+        );
         for xid in answered {
-            assert!(xid.compression.is_some(), "the originator's answer dropped V.42bis");
-            assert!(xid.v44.is_none(), "the originator offered V.44 to an end without it");
+            assert!(
+                xid.compression.is_some(),
+                "the originator's answer dropped V.42bis"
+            );
+            assert!(
+                xid.v44.is_none(),
+                "the originator offered V.44 to an end without it"
+            );
         }
     }
 
@@ -2095,11 +2183,36 @@ mod tests {
     #[test]
     fn the_terminal_s_v44_ceilings_go_into_the_offer() {
         let (mut a, _) = negotiated_pair();
-        a.offer_v44_limits(v44::Params { n2: 512, n7: 40, n8: 1024 }, v44::Params { n2: 1024, n7: 255, n8: 65535 });
+        a.offer_v44_limits(
+            v44::Params {
+                n2: 512,
+                n7: 40,
+                n8: 1024,
+            },
+            v44::Params {
+                n2: 1024,
+                n7: 255,
+                n8: 65535,
+            },
+        );
         let offer = a.proposal().v44.expect("V.44 not offered");
-        assert_eq!(offer.transmit, v44::Params { n2: 512, n7: 40, n8: 1024 });
+        assert_eq!(
+            offer.transmit,
+            v44::Params {
+                n2: 512,
+                n7: 40,
+                n8: 1024
+            }
+        );
         // A ceiling above what the coder offers leaves the coder's offer.
-        assert_eq!(offer.receive, v44::Params::of(v44::OFFERED_N2, v44::OFFERED_N7).resolve(v44::Params { n2: 1024, n7: 255, n8: 65535 }));
+        assert_eq!(
+            offer.receive,
+            v44::Params::of(v44::OFFERED_N2, v44::OFFERED_N7).resolve(v44::Params {
+                n2: 1024,
+                n7: 255,
+                n8: 65535
+            })
+        );
         assert_eq!(offer.receive.n2, 1024);
     }
 
@@ -2164,14 +2277,20 @@ mod tests {
         // one, what the whole exchange is allowed to cost from the first XID
         // to the give-up -- T401 and then a round trip -- written out rather
         // than computed, so that a budget which grows has to be typed here.
-        for (round_trip_ms, budget_ms) in
-            [(None, 2038), (Some(200), 1238), (Some(1142), 2893), (Some(4_000), 10_000)]
-        {
+        for (round_trip_ms, budget_ms) in [
+            (None, 2038),
+            (Some(200), 1238),
+            (Some(1142), 2893),
+            (Some(4_000), 10_000),
+        ] {
             let t401_ms = match round_trip_ms {
                 Some(ms) => crate::lapm::t401_for_line(RATE, ms),
                 None => crate::lapm::t401_for(RATE),
             };
-            let params = Params { t401_ms, ..Default::default() };
+            let params = Params {
+                t401_ms,
+                ..Default::default()
+            };
             let mut stack = Stack::new(Role::Originator, params);
             if let Some(ms) = round_trip_ms {
                 stack = stack.over_a_round_trip(ms);
@@ -2275,11 +2394,23 @@ mod tests {
             stack.next_bit();
             stack.feed_bit(bit);
         }
-        let heard: Vec<Crossed> = stack.take_log().into_iter().filter(|f| !f.outbound).collect();
+        let heard: Vec<Crossed> = stack
+            .take_log()
+            .into_iter()
+            .filter(|f| !f.outbound)
+            .collect();
         assert_eq!(heard.len(), 2, "{heard:02x?}");
         assert!(heard.iter().all(|f| !f.intact));
-        assert_eq!(heard[0].body.len(), rr.len() + 2, "the damaged frame was not kept");
-        assert_eq!(heard[1].body, [0x41, 0x42], "the abort was not logged as itself");
+        assert_eq!(
+            heard[0].body.len(),
+            rr.len() + 2,
+            "the damaged frame was not kept"
+        );
+        assert_eq!(
+            heard[1].body,
+            [0x41, 0x42],
+            "the abort was not logged as itself"
+        );
         assert_eq!(stack.damaged_frames(), 2);
     }
 
@@ -2329,27 +2460,42 @@ mod tests {
             }
             answerer.tick(100);
         }
-        assert_eq!(answerer.phase(), Phase::Protocol, "still waiting for an XID");
+        assert_eq!(
+            answerer.phase(),
+            Phase::Protocol,
+            "still waiting for an XID"
+        );
 
         // Then the originator's arrives, offering 32 bits as this modem does.
         let offer = Xid::proposal(Compression::Neither);
         assert!(offer.fcs32, "nothing here to agree to");
-        let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
-            .encode(DLCI_DATA, Role::Originator, Kind::Command);
+        let xid = Frame::Xid {
+            pf: false,
+            info: offer.encode(Kind::Command),
+        }
+        .encode(DLCI_DATA, Role::Originator, Kind::Command);
         wire(&mut answerer, &xid, Fcs::Bits16);
-        let answered = answerer
-            .take_log()
-            .iter()
-            .any(|f| f.outbound && Frame::decode(&f.body, Role::Originator)
-                .is_ok_and(|(_, frame)| matches!(frame, Frame::Xid { .. })));
+        let answered = answerer.take_log().iter().any(|f| {
+            f.outbound
+                && Frame::decode(&f.body, Role::Originator)
+                    .is_ok_and(|(_, frame)| matches!(frame, Frame::Xid { .. }))
+        });
         assert!(answered, "the late XID was not answered");
 
         // And the SABME comes at the width the answer agreed to.
         let sabme = Frame::Sabme { poll: true }.encode(DLCI_DATA, Role::Originator, Kind::Command);
         wire(&mut answerer, &sabme, Fcs::Bits32);
         assert_eq!(answerer.damaged_frames(), 0, "the SABME could not be read");
-        assert!(answerer.is_connected(), "the answerer is {:?}", answerer.state());
-        assert_eq!(answerer.fcs(), Fcs::Bits32, "and it did not follow the SABME to 32");
+        assert!(
+            answerer.is_connected(),
+            "the answerer is {:?}",
+            answerer.state()
+        );
+        assert_eq!(
+            answerer.fcs(),
+            Fcs::Bits32,
+            "and it did not follow the SABME to 32"
+        );
     }
 
     /// A far end's XID offering V.42bis with a P1 below the minimum.
@@ -2369,8 +2515,11 @@ mod tests {
             let mut offer = Xid::proposal(Compression::Both);
             offer.v44 = None;
             offer.codewords = Some(codewords);
-            let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
-                .encode(DLCI_DATA, Role::Originator, Kind::Command);
+            let xid = Frame::Xid {
+                pf: false,
+                info: offer.encode(Kind::Command),
+            }
+            .encode(DLCI_DATA, Role::Originator, Kind::Command);
             let mut e = Encoder::new(Fcs::Bits16);
             e.idle(LEADING_FLAGS);
             e.frame(&xid);
@@ -2381,14 +2530,20 @@ mod tests {
             }
             answerer.tick(0);
 
-            assert_eq!(answerer.compression_name(), None, "P1 {codewords} turned compression on");
+            assert_eq!(
+                answerer.compression_name(),
+                None,
+                "P1 {codewords} turned compression on"
+            );
             let answers: Vec<Xid> = answerer
                 .take_log()
                 .into_iter()
                 .filter(|f| f.outbound)
                 .filter_map(|f| Frame::decode(&f.body, Role::Originator).ok())
                 .filter_map(|(address, frame)| match frame {
-                    Frame::Xid { info, .. } if address.kind == Kind::Response => Xid::decode(&info).ok(),
+                    Frame::Xid { info, .. } if address.kind == Kind::Response => {
+                        Xid::decode(&info).ok()
+                    }
                     _ => None,
                 })
                 .collect();
@@ -2423,7 +2578,10 @@ mod tests {
         // What the far end puts on the line: text, and then V.42bis deciding
         // it is worth compressing, which it announces with the escape
         // character and ECM and in no other way.
-        let params = v42bis::Params { n2: v42bis::OFFERED_N2, n7: v42bis::OFFERED_N7 };
+        let params = v42bis::Params {
+            n2: v42bis::OFFERED_N2,
+            n7: v42bis::OFFERED_N7,
+        };
         let text: Vec<u8> = b"Welcome to the board. Please log in. "
             .iter()
             .copied()
@@ -2472,7 +2630,11 @@ mod tests {
             &Frame::Ua { final_bit: true }.encode(DLCI_DATA, Role::Answerer, Kind::Response),
         );
         assert!(stack.is_connected(), "the link never came up");
-        assert_eq!(stack.far_xid(), None, "the far end was not supposed to answer XID");
+        assert_eq!(
+            stack.far_xid(),
+            None,
+            "the far end was not supposed to answer XID"
+        );
 
         for (i, chunk) in stream.chunks(64).enumerate() {
             let frame = Frame::I {
@@ -2481,7 +2643,10 @@ mod tests {
                 poll: false,
                 info: chunk.to_vec(),
             };
-            wire(&mut stack, &frame.encode(DLCI_DATA, Role::Answerer, Kind::Command));
+            wire(
+                &mut stack,
+                &frame.encode(DLCI_DATA, Role::Answerer, Kind::Command),
+            );
         }
 
         assert_eq!(
@@ -2490,7 +2655,6 @@ mod tests {
             "the screen got something other than what the far end sent",
         );
     }
-
 
     /// A frame body written the way a frame log prints it.
     fn hex(text: &str) -> Vec<u8> {
@@ -2524,7 +2688,12 @@ mod tests {
 
     /// The frames this end has sent since the log was last taken.
     fn sent(stack: &mut Stack) -> Vec<Vec<u8>> {
-        stack.take_log().into_iter().filter(|c| c.outbound).map(|c| c.body).collect()
+        stack
+            .take_log()
+            .into_iter()
+            .filter(|c| c.outbound)
+            .map(|c| c.body)
+            .collect()
     }
 
     /// live-1790041800's far end, up to the point where it answered our
@@ -2536,8 +2705,10 @@ mod tests {
         idle(&mut stack);
         wire(
             &mut stack,
-            &hex("03 af 82 80 00 13 03 03 8e 89 00 05 02 04 00 06 02 04 00 07 01 0f 08 01 0f \
-                  f0 00 0f 00 03 56 34 32 01 01 03 02 02 04 00 03 01 20"),
+            &hex(
+                "03 af 82 80 00 13 03 03 8e 89 00 05 02 04 00 06 02 04 00 07 01 0f 08 01 0f \
+                  f0 00 0f 00 03 56 34 32 01 01 03 02 02 04 00 03 01 20",
+            ),
         );
         idle(&mut stack);
         wire(&mut stack, &hex("03 73"));
@@ -2572,8 +2743,14 @@ mod tests {
         idle(&mut stack);
         assert_eq!(stack.undecodable_streams(), 1);
         let sent = sent(&mut stack);
-        assert!(sent.contains(&vec![0x03, 0x7f]), "no SABME went out: {sent:02x?}");
-        assert!(!sent.contains(&vec![0x03, 0x53]), "the link was released: {sent:02x?}");
+        assert!(
+            sent.contains(&vec![0x03, 0x7f]),
+            "no SABME went out: {sent:02x?}"
+        );
+        assert!(
+            !sent.contains(&vec![0x03, 0x53]),
+            "the link was released: {sent:02x?}"
+        );
 
         // The far end's UA, and then what it sends from its own fresh start.
         // Frames it sent before our SABME reached it cannot get in: they
@@ -2583,8 +2760,13 @@ mod tests {
         stack.take_received();
         wire(
             &mut stack,
-            &Frame::I { ns: 0, nr: 0, poll: false, info: b"Login: ".to_vec() }
-                .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+            &Frame::I {
+                ns: 0,
+                nr: 0,
+                poll: false,
+                info: b"Login: ".to_vec(),
+            }
+            .encode(DLCI_DATA, Role::Answerer, Kind::Command),
         );
         assert_eq!(stack.take_received(), b"Login: ");
     }
@@ -2600,19 +2782,33 @@ mod tests {
             for (ns, info) in [(0, "0c c0 00 00"), (1, "02 32 d6 98 81")] {
                 wire(
                     &mut stack,
-                    &Frame::I { ns, nr: 0, poll: false, info: hex(info) }
-                        .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+                    &Frame::I {
+                        ns,
+                        nr: 0,
+                        poll: false,
+                        info: hex(info),
+                    }
+                    .encode(DLCI_DATA, Role::Answerer, Kind::Command),
                 );
             }
             idle(&mut stack);
             assert_eq!(stack.undecodable_streams(), round + 1);
             let sent = sent(&mut stack);
             if round < UNDECODABLE_RESETS {
-                assert!(sent.contains(&vec![0x03, 0x7f]), "round {round}: no SABME: {sent:02x?}");
+                assert!(
+                    sent.contains(&vec![0x03, 0x7f]),
+                    "round {round}: no SABME: {sent:02x?}"
+                );
                 wire(&mut stack, &hex("03 73"));
-                assert!(stack.is_connected(), "round {round}: the link did not come back");
+                assert!(
+                    stack.is_connected(),
+                    "round {round}: the link did not come back"
+                );
             } else {
-                assert!(sent.contains(&vec![0x03, 0x53]), "never released: {sent:02x?}");
+                assert!(
+                    sent.contains(&vec![0x03, 0x53]),
+                    "never released: {sent:02x?}"
+                );
             }
         }
     }
@@ -2660,7 +2856,12 @@ mod tests {
         // anything a decoder can make sense of.
         let mut ns = 0u8;
         let mut send = |stack: &mut Stack, info: &[u8]| {
-            let frame = Frame::I { ns, nr: 0, poll: false, info: info.to_vec() };
+            let frame = Frame::I {
+                ns,
+                nr: 0,
+                poll: false,
+                info: info.to_vec(),
+            };
             ns = (ns + 1) % 128;
             let body = frame.encode(DLCI_DATA, Role::Answerer, Kind::Command);
             let mut e = Encoder::new(Fcs::Bits16);
@@ -2745,7 +2946,11 @@ mod tests {
             "{} ONEs in a row from the answerer: an ADP crossed",
             longest_run_of_ones(&from_b)
         );
-        assert_eq!(a.far_answer(), None, "the originator was answered by something");
+        assert_eq!(
+            a.far_answer(),
+            None,
+            "the originator was answered by something"
+        );
 
         a.send(b"login: cactus\r\n");
         settle(&mut a, &mut b, 20_000, |_, bit| bit);
@@ -2765,7 +2970,11 @@ mod tests {
     fn an_answerer_that_skips_detection_still_answers_an_odp() {
         let mut a = Stack::new(Role::Originator, Params::default());
         let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
-        assert_eq!(a.phase(), Phase::Detecting, "the far end is the one that asks");
+        assert_eq!(
+            a.phase(),
+            Phase::Detecting,
+            "the far end is the one that asks"
+        );
 
         let (_, from_b) = settle_recording(&mut a, &mut b, 40_000);
         assert_eq!(
@@ -2778,7 +2987,10 @@ mod tests {
 
         // The answer really was async characters on the line, and not HDLC
         // that happened to satisfy the detector.
-        assert!(longest_run_of_ones(&from_b) >= 8, "Table 3's fill never went out");
+        assert!(
+            longest_run_of_ones(&from_b) >= 8,
+            "Table 3's fill never went out"
+        );
 
         a.send(b"login: cactus\r\n");
         settle(&mut a, &mut b, 20_000, |_, bit| bit);
@@ -2808,7 +3020,10 @@ mod tests {
             b.tick(100);
         }
         assert_eq!(b.phase(), Phase::Transparent);
-        assert!(b.settled(), "the terminal would still be waiting for a CONNECT");
+        assert!(
+            b.settled(),
+            "the terminal would still be waiting for a CONNECT"
+        );
     }
 
     /// V.42 7.10: "the error control function shall freeze the appropriate
@@ -2825,7 +3040,10 @@ mod tests {
     fn a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing() {
         let (mut a, mut b) = pair();
         settle(&mut a, &mut b, 20_000, |_, bit| bit);
-        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link never came up"
+        );
 
         // One frame on the line with nothing at the far end to acknowledge it,
         // which is exactly the state a hold interrupts.
@@ -2833,14 +3051,21 @@ mod tests {
         for _ in 0..4_000 {
             a.next_bit();
         }
-        assert!(!a.take_log().is_empty(), "nothing went out, so nothing is outstanding");
+        assert!(
+            !a.take_log().is_empty(),
+            "nothing went out, so nothing is outstanding"
+        );
 
         a.suspend();
         assert!(a.suspended());
         for _ in 0..600 {
             a.tick(100);
         }
-        assert!(a.is_connected(), "the link was released while suspended: {:?}", a.state());
+        assert!(
+            a.is_connected(),
+            "the link was released while suspended: {:?}",
+            a.state()
+        );
         for _ in 0..4_000 {
             a.next_bit();
         }
@@ -2875,22 +3100,38 @@ mod tests {
 
         let (mut a, mut b) = negotiated_pair();
         settle(&mut a, &mut b, 40_000, |_, bit| bit);
-        assert!(a.is_connected() && b.is_connected(), "the link never came up");
-        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link never came up"
+        );
+        assert!(
+            a.compressing() && b.compressing(),
+            "compression was not negotiated"
+        );
 
         // Enough of the same phrases for both dictionaries to be full of them.
         let block = |from: usize| {
             let mut out = Vec::new();
             for i in from..from + 200 {
-                out.extend_from_slice(format!("the same words over and over, line {i}\r\n").as_bytes());
+                out.extend_from_slice(
+                    format!("the same words over and over, line {i}\r\n").as_bytes(),
+                );
             }
             out
         };
         let before = block(0);
         a.send(&before);
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
-        assert_eq!(b.take_received(), before, "what arrived before the hold was wrong");
-        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+        assert_eq!(
+            b.take_received(),
+            before,
+            "what arrived before the hold was wrong"
+        );
+        assert_eq!(
+            b.undecodable_streams(),
+            0,
+            "a compressed stream would not decode"
+        );
 
         /// The N(S) of every I frame this end has put on the line since the
         /// log was last taken, in order.
@@ -2910,8 +3151,13 @@ mod tests {
                 })
                 .collect()
         }
-        let last = *outbound_ns(&mut a, Role::Originator).last().expect("no I frame went out");
-        assert!(last + 1 < crate::frame::MODULUS, "V(S) wrapped, and the check below cannot tell");
+        let last = *outbound_ns(&mut a, Role::Originator)
+            .last()
+            .expect("no I frame went out");
+        assert!(
+            last + 1 < crate::frame::MODULUS,
+            "V(S) wrapped, and the check below cannot tell"
+        );
 
         // A second lot, cut off partway: a hold falls where it falls, and
         // where it usually falls is with frames on the line that nothing has
@@ -2922,7 +3168,10 @@ mod tests {
         a.send(&during);
         settle(&mut a, &mut b, 4_000, |_, bit| bit);
         let partial = b.take_received().len();
-        assert!(partial < during.len(), "all {partial} of it crossed, so nothing was outstanding");
+        assert!(
+            partial < during.len(),
+            "all {partial} of it crossed, so nothing was outstanding"
+        );
 
         // The line goes away for ten minutes, which is a modem-on-hold: V.92
         // Table 34's T1 runs to a quarter of an hour, and the whole point of
@@ -2954,7 +3203,11 @@ mod tests {
             expected,
             "what arrived after the hold was not what was sent, so the dictionaries came apart"
         );
-        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+        assert_eq!(
+            b.undecodable_streams(),
+            0,
+            "a compressed stream would not decode"
+        );
 
         // Counting on from where it left off. An establishment would have put
         // V(S) back to 0 (8.3.1) and discarded what was unacknowledged

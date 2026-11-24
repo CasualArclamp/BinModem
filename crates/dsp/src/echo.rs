@@ -790,7 +790,9 @@ impl EchoCanceller {
 
     /// How far back the canceller can see, in samples.
     pub fn span(&self) -> usize {
-        self.near.end().max(self.far.as_ref().map_or(0, Segment::end))
+        self.near
+            .end()
+            .max(self.far.as_ref().map_or(0, Segment::end))
     }
 
     /// Whether the taps are being updated.
@@ -889,7 +891,10 @@ impl EchoCanceller {
     /// The taps that stay where training put them, applied to the reference.
     fn unretimed_echo(&self) -> f64 {
         self.near.unretimed_echo(&self.history)
-            + self.far.as_ref().map_or(0.0, |f| f.unretimed_echo(&self.history))
+            + self
+                .far
+                .as_ref()
+                .map_or(0.0, |f| f.unretimed_echo(&self.history))
     }
 
     /// The retimed taps' output `from` samples ago, reading `shift` behind
@@ -1551,7 +1556,8 @@ mod tests {
         }
         let found = finder.best().expect("nothing found on a line with an echo");
         assert_eq!(
-            found.delay, FAR,
+            found.delay,
+            FAR,
             "put the reflection {} samples from where it is",
             found.delay as i64 - FAR as i64
         );

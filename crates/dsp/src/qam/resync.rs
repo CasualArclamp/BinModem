@@ -94,7 +94,11 @@ impl Core {
             return;
         }
         self.resyncs += 1;
-        let found = if dense { self.search_dense(self.turn) } else { self.search_sparse(self.turn) };
+        let found = if dense {
+            self.search_dense(self.turn)
+        } else {
+            self.search_sparse(self.turn)
+        };
         let Some(found) = found else { return };
         // The shifts that are wrong read as what the signal reads out of step;
         // a real jump found stands clear of them.
@@ -108,22 +112,43 @@ impl Core {
     /// first symbol that showed the loss: symbols from before the jump fit
     /// nothing after it, and the next look will be clear of them.
     fn after_loss(&self, dense: bool) -> bool {
-        let (window, short) = if dense { (DENSE_WINDOW, SHORT) } else { (RESYNC_WINDOW, self.short()) };
-        self.span(window, short).is_none_or(|span| span.from + REACH as u64 + 1 >= self.lost_from)
+        let (window, short) = if dense {
+            (DENSE_WINDOW, SHORT)
+        } else {
+            (RESYNC_WINDOW, self.short())
+        };
+        self.span(window, short)
+            .is_none_or(|span| span.from + REACH as u64 + 1 >= self.lost_from)
     }
 
     /// Whether the window a resync would read carries enough of the power the
     /// line carried before the signal was lost to be worth reading.
     fn loud_enough(&self, dense: bool) -> bool {
-        let (window, short) = if dense { (DENSE_WINDOW, SHORT) } else { (RESYNC_WINDOW, self.short()) };
-        let Some(span) = self.span(window, short) else { return true };
+        let (window, short) = if dense {
+            (DENSE_WINDOW, SHORT)
+        } else {
+            (RESYNC_WINDOW, self.short())
+        };
+        let Some(span) = self.span(window, short) else {
+            return true;
+        };
         let from = (span.from - self.front.first) as usize;
-        let power = self.front.halves.range(from..from + span.count).map(|h| h.norm_sqr()).sum::<f64>() / span.count as f64;
+        let power = self
+            .front
+            .halves
+            .range(from..from + span.count)
+            .map(|h| h.norm_sqr())
+            .sum::<f64>()
+            / span.count as f64;
         power >= LEVEL_FLOOR * self.power_before
     }
 
     fn short(&self) -> u64 {
-        if self.options.resync_margin { SHORT } else { SHORT_V34 }
+        if self.options.resync_margin {
+            SHORT
+        } else {
+            SHORT_V34
+        }
     }
 
     /// The newest window of `window` symbols that every shift can be read
@@ -138,7 +163,12 @@ impl Core {
         }
         let start_time = self.front.times[(from - self.front.first) as usize];
         let count = (last + reach - from + 1) as usize;
-        Some(Span { from, last, start_time, count })
+        Some(Span {
+            from,
+            last,
+            start_time,
+            count,
+        })
     }
 
     /// Symbols from the middle of a window to the next symbol.
@@ -162,7 +192,11 @@ impl Core {
         let mut outputs: Vec<Complex> = (0..window)
             .map(|j| {
                 let y = apply(&self.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH]).scale(gain);
-                if self.options.resync_derotate { y * Complex::from_polar(1.0, -turn * (j as f64 - middle)) } else { y }
+                if self.options.resync_derotate {
+                    y * Complex::from_polar(1.0, -turn * (j as f64 - middle))
+                } else {
+                    y
+                }
             })
             .collect();
         let mut scale = 1.0;
@@ -180,7 +214,11 @@ impl Core {
 
     /// Mean squared error of `outputs` turned and scaled by `c`.
     fn mse(&self, outputs: &[Complex], c: Complex) -> f64 {
-        outputs.iter().map(|y| (*y * c - self.slicer.decide(*y * c).1).norm_sqr()).sum::<f64>() / outputs.len() as f64
+        outputs
+            .iter()
+            .map(|y| (*y * c - self.slicer.decide(*y * c).1).norm_sqr())
+            .sum::<f64>()
+            / outputs.len() as f64
     }
 
     /// Gain and phase, least squares against the decisions, a few rounds
@@ -188,7 +226,10 @@ impl Core {
     fn fit(&self, outputs: &[Complex], mut c: Complex) -> (f64, Complex) {
         for _ in 0..4 {
             let (num, den) = outputs.iter().fold((Complex::ZERO, 0.0), |(num, den), y| {
-                (num + self.slicer.decide(*y * c).1 * y.conj(), den + y.norm_sqr())
+                (
+                    num + self.slicer.decide(*y * c).1 * y.conj(),
+                    den + y.norm_sqr(),
+                )
             });
             if den > 0.0 {
                 c = num.scale(1.0 / den);
@@ -208,23 +249,35 @@ impl Core {
         let distance = self.distance(&span, window);
         // The phase the loop would have had at the window's middle, if the
         // turn has been taken out across it; V.34 compares with the newest.
-        let reference = if self.options.resync_derotate { self.rotation - turn * distance } else { self.rotation };
+        let reference = if self.options.resync_derotate {
+            self.rotation - turn * distance
+        } else {
+            self.rotation
+        };
         let fourth_reference = self.slicer.fourth();
         let mut readings = Vec::new();
         let mut by_step = [None; 2 * RESYNC_STEPS];
         let mut best: Option<(f64, f64, f64, Option<f64>)> = None;
         for (step, slot) in by_step.iter_mut().enumerate() {
             let shift = (step as f64 - RESYNC_STEPS as f64) / RESYNC_STEPS as f64;
-            let read: Option<Vec<Complex>> =
-                (0..span.count).map(|m| self.front.interpolate(span.start_time + (m as f64 + shift) * half)).collect();
+            let read: Option<Vec<Complex>> = (0..span.count)
+                .map(|m| {
+                    self.front
+                        .interpolate(span.start_time + (m as f64 + shift) * half)
+                })
+                .collect();
             let Some(read) = read else { continue };
             let (outputs, scale) = self.outputs(&read, window, turn);
-            let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
+            let fourth = outputs
+                .iter()
+                .fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
             let base = (fourth.arg() - fourth_reference) / 4.0;
             // Of the four turns that fit, the one nearest the turn before.
             let mut turned = (0..4)
                 .map(|q| base + std::f64::consts::FRAC_PI_2 * f64::from(q))
-                .min_by(|a, b| angle_between(*a, reference).total_cmp(&angle_between(*b, reference)))
+                .min_by(|a, b| {
+                    angle_between(*a, reference).total_cmp(&angle_between(*b, reference))
+                })
                 .unwrap_or(base);
             // The fourth power only gets close on a dense constellation; the
             // decisions it then allows take the rest of the way.
@@ -242,7 +295,10 @@ impl Core {
                 (mse, Some(scale * c.abs()))
             } else {
                 let spin = Complex::from_polar(1.0, -turned);
-                let mse = outputs.iter().map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr()).sum::<f64>()
+                let mse = outputs
+                    .iter()
+                    .map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr())
+                    .sum::<f64>()
                     / window as f64;
                 (mse, None)
             };
@@ -261,7 +317,10 @@ impl Core {
             // timing's error, so the parabola through it and its neighbours
             // has its bottom where the timing is.
             let step = ((shift + 1.0) * RESYNC_STEPS as f64).round() as usize;
-            if let (Some(Some(early)), Some(Some(late))) = (step.checked_sub(1).map(|s| by_step[s]), by_step.get(step + 1)) {
+            if let (Some(Some(early)), Some(Some(late))) = (
+                step.checked_sub(1).map(|s| by_step[s]),
+                by_step.get(step + 1),
+            ) {
                 let curve = early - 2.0 * mse + late;
                 if curve > 0.0 {
                     let off = (0.5 * (early - late) / curve).clamp(-0.5, 0.5);
@@ -270,8 +329,20 @@ impl Core {
             }
         }
         readings.sort_by(f64::total_cmp);
-        let median = readings.get(readings.len() / 2).copied().unwrap_or(f64::MAX);
-        Some(Found { mse, median, from: span.from, moved: shift * half, turned, gain, distance, window })
+        let median = readings
+            .get(readings.len() / 2)
+            .copied()
+            .unwrap_or(f64::MAX);
+        Some(Found {
+            mse,
+            median,
+            from: span.from,
+            moved: shift * half,
+            turned,
+            gain,
+            distance,
+            window,
+        })
     }
 
     /// On a dense constellation: read the newest symbols again at every
@@ -290,17 +361,26 @@ impl Core {
         // has samples to read.
         let span = self.span(DENSE_WINDOW, SHORT)?;
         let distance = self.distance(&span, DENSE_WINDOW);
-        let reference = if self.options.resync_derotate { self.rotation - turn * distance } else { self.rotation };
+        let reference = if self.options.resync_derotate {
+            self.rotation - turn * distance
+        } else {
+            self.rotation
+        };
         let outputs_at = |moved: f64| -> Option<(Vec<Complex>, f64)> {
             let read: Vec<Complex> = (0..span.count)
-                .map(|m| self.front.interpolate(span.start_time + m as f64 * half + moved))
+                .map(|m| {
+                    self.front
+                        .interpolate(span.start_time + m as f64 * half + moved)
+                })
                 .collect::<Option<_>>()?;
             Some(self.outputs(&read, DENSE_WINDOW, turn))
         };
         let settle = |outputs: &[Complex]| {
             let turns = (90.0 / DENSE_DEGREES) as usize;
             let coarse = (0..turns)
-                .map(|q| Complex::from_polar(1.0, -(reference + (q as f64 * DENSE_DEGREES).to_radians())))
+                .map(|q| {
+                    Complex::from_polar(1.0, -(reference + (q as f64 * DENSE_DEGREES).to_radians()))
+                })
                 .map(|c| (self.mse(outputs, c), c))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map_or(Complex::ONE, |(_, c)| c);
@@ -310,7 +390,9 @@ impl Core {
         let mut best: Option<(f64, f64, Complex, f64)> = None;
         for step in 0..2 * DENSE_STEPS {
             let moved = (step as f64 / DENSE_STEPS as f64 - 1.0) * half;
-            let Some((outputs, scale)) = outputs_at(moved) else { continue };
+            let Some((outputs, scale)) = outputs_at(moved) else {
+                continue;
+            };
             let (found, c) = settle(&outputs);
             readings.push(found);
             if best.is_none_or(|b| found < b.0) {
@@ -322,7 +404,9 @@ impl Core {
         for fine in 1..DENSE_FINE / DENSE_STEPS {
             for sign in [-1.0, 1.0] {
                 let tried = coarse + sign * fine as f64 * half / DENSE_FINE as f64;
-                let Some((outputs, s)) = outputs_at(tried) else { continue };
+                let Some((outputs, s)) = outputs_at(tried) else {
+                    continue;
+                };
                 // The fit goes on from the best so far, in its own scale.
                 let (e, g) = self.fit(&outputs, c.scale(scale / s));
                 if e < found {
@@ -386,7 +470,11 @@ impl Core {
         }
         // V.34 carried the phase half a window on from the window's middle;
         // the next symbol is further on than that.
-        let ahead = if self.options.extrapolate { found.distance } else { found.window as f64 / 2.0 };
+        let ahead = if self.options.extrapolate {
+            found.distance
+        } else {
+            found.window as f64 / 2.0
+        };
         self.rotation = (found.turned + self.turn * ahead).rem_euclid(std::f64::consts::TAU);
         self.lost = None;
         self.recent.clear();

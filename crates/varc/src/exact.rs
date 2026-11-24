@@ -69,7 +69,10 @@ fn table() -> Table {
 }
 
 fn table_of(parity: u8) -> Table {
-    Table { parity, bits: vec![16] }
+    Table {
+        parity,
+        bits: vec![16],
+    }
 }
 
 fn layout_of(parity: u8) -> Layout {
@@ -117,7 +120,10 @@ fn rates(fs: f64) -> (f64, f64) {
 
 fn rates_of(fs: f64, parity: u8) -> (f64, f64) {
     let superframe = (SYNC + BLOCK) as f64 / fs;
-    ((16 * BLOCK) as f64 / superframe, (8 * layout_of(parity).payload()) as f64 / superframe)
+    (
+        (16 * BLOCK) as f64 / superframe,
+        (8 * layout_of(parity).payload()) as f64 / superframe,
+    )
 }
 
 /// The transmitter.
@@ -138,13 +144,23 @@ pub struct Tx {
 impl Tx {
     /// A transmitter for a line of exact samples at `fs` a second.
     pub fn new(fs: f64) -> Self {
-        Self { fs, sync: (0..4).map(sync).collect(), id: 0, next: None, at: 0, block: Vec::new(), wanting: true, parity: [PARITY; 4] }
+        Self {
+            fs,
+            sync: (0..4).map(sync).collect(),
+            id: 0,
+            next: None,
+            at: 0,
+            block: Vec::new(),
+            wanting: true,
+            parity: [PARITY; 4],
+        }
     }
 }
 
 impl Sender for Tx {
     fn wants(&self) -> Option<Layout> {
-        self.wanting.then(|| layout_of(self.parity[usize::from(self.id & 3)]))
+        self.wanting
+            .then(|| layout_of(self.parity[usize::from(self.id & 3)]))
     }
 
     fn give(&mut self, line: Vec<u8>) {
@@ -328,7 +344,11 @@ impl Rx {
         self.erased += holes as u64;
         self.judge(holes > 0, LIGHT);
         let layout = layout_of(self.parity[usize::from(self.id.unwrap_or(0) & 3)]);
-        self.arrived.push_back(Arrived::Octets { line, layout, erased: Some(erased) });
+        self.arrived.push_back(Arrived::Octets {
+            line,
+            layout,
+            erased: Some(erased),
+        });
     }
 }
 
@@ -411,7 +431,12 @@ impl Receiver for Rx {
     fn health(&self) -> Health {
         let locked = self.id.is_some();
         // Sixteen bits against their own rounding: there is nothing else.
-        Health { locked, steady: locked, snr_db: if locked { 98.0 } else { 0.0 }, clock_ppm: 0.0 }
+        Health {
+            locked,
+            steady: locked,
+            snr_db: if locked { 98.0 } else { 0.0 },
+            clock_ppm: 0.0,
+        }
     }
 
     fn rates(&self) -> (f64, f64) {
@@ -422,11 +447,16 @@ impl Receiver for Rx {
     }
 
     fn code(&self) -> Option<(usize, usize)> {
-        self.id.map(|id| layout_of(self.parity[usize::from(id & 3)]).code())
+        self.id
+            .map(|id| layout_of(self.parity[usize::from(id & 3)]).code())
     }
 
     fn spectrum(&self) -> Vec<Bin> {
-        vec![Bin { hz: 0.0, snr_db: self.health().snr_db, bits: 16 }]
+        vec![Bin {
+            hz: 0.0,
+            snr_db: self.health().snr_db,
+            bits: 16,
+        }]
     }
 
     fn points(&mut self) -> Vec<(f64, f64)> {
@@ -452,7 +482,9 @@ mod tests {
     use crate::station::Station;
 
     fn stream(seed: usize, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
+        (0..len)
+            .map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8)
+            .collect()
     }
 
     type End = Station<Tx, Rx>;
@@ -478,14 +510,32 @@ mod tests {
 
     impl Pair {
         fn new() -> Self {
-            Self { a: end(), b: end(), from_a: 0.0, from_b: 0.0, at_a: vec![], at_b: vec![], sample: 0, lose: vec![], gain: 1.0 }
+            Self {
+                a: end(),
+                b: end(),
+                from_a: 0.0,
+                from_b: 0.0,
+                at_a: vec![],
+                at_b: vec![],
+                sample: 0,
+                lose: vec![],
+                gain: 1.0,
+            }
         }
 
         fn run(&mut self, seconds: f64) {
             for _ in 0..(seconds * 16_000.0) as usize {
-                let lost = self.lose.iter().any(|&at| (at..at + 320).contains(&self.sample));
-                let carry = |x: f64, gain: f64| ((x * 32768.0 * gain).round() / 32768.0).clamp(-1.0, 1.0);
-                let to_b = if lost { 0.0 } else { carry(self.from_a, self.gain) };
+                let lost = self
+                    .lose
+                    .iter()
+                    .any(|&at| (at..at + 320).contains(&self.sample));
+                let carry =
+                    |x: f64, gain: f64| ((x * 32768.0 * gain).round() / 32768.0).clamp(-1.0, 1.0);
+                let to_b = if lost {
+                    0.0
+                } else {
+                    carry(self.from_a, self.gain)
+                };
                 let to_a = carry(self.from_b, 1.0);
                 let (mut out_a, mut out_b) = ([0.0], [0.0]);
                 self.a.step(&[to_a], &mut out_a);
@@ -508,7 +558,12 @@ mod tests {
         pair.a.write(&to_b);
         pair.b.write(&to_a);
         pair.run(10.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         assert!(pair.at_a == to_a);
         assert!(pair.a.channels[0].loaded() && pair.b.channels[0].loaded());
         assert_eq!(pair.b.channels[0].tally.failed, 0);
@@ -524,9 +579,18 @@ mod tests {
         let to_b = stream(3, 150_000);
         pair.a.write(&to_b);
         pair.run(10.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         let b = &pair.b.channels[0];
-        assert!(b.rx.erased >= 24 * 600, "{} octets marked as holes", b.rx.erased);
+        assert!(
+            b.rx.erased >= 24 * 600,
+            "{} octets marked as holes",
+            b.rx.erased
+        );
         assert_eq!(b.tally.failed, 0, "{:?}", b.tally);
         assert_eq!(pair.a.arq.resent, 0);
         assert_eq!(b.rx.losses, 0);
@@ -539,7 +603,12 @@ mod tests {
         let to_b = stream(4, 150_000);
         pair.a.write(&to_b);
         pair.run(10.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         assert!(pair.b.channels[0].tally.failed > 0);
         assert!(pair.a.arq.resent > 0);
     }

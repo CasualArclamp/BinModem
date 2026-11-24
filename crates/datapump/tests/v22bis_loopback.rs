@@ -185,7 +185,6 @@ fn the_receiver_reports_a_settled_constellation() {
 
 // -- 1200 bit/s (V.22bis 2.5.2.2) --------------------------------------------
 
-
 fn loopback_at(payload: &[u8], lead_in: usize, rate: Rate) -> (Vec<u8>, Rate) {
     let mut tx = Transmitter::at_rate(Channel::Calling, rate, FS);
     let mut rx = Receiver::new(Channel::Answering, FS);
@@ -332,7 +331,8 @@ fn acquisitions(own_level: f64) -> (usize, usize) {
     let mut tried = 0;
     for quiet_ms in quiets {
         tried += 1;
-        if contains_at_any_bit_offset(&with_own_channel(payload, 96, own_level, quiet_ms), payload) {
+        if contains_at_any_bit_offset(&with_own_channel(payload, 96, own_level, quiet_ms), payload)
+        {
             heard += 1;
         }
     }
@@ -394,7 +394,10 @@ fn the_channel_we_transmit_in_is_not_heard_as_a_carrier() {
         rx.feed(s);
     }
     let sent = (sent / n as f64).sqrt();
-    assert!(!rx.carrier(), "heard its own transmit as an incoming carrier");
+    assert!(
+        !rx.carrier(),
+        "heard its own transmit as an incoming carrier"
+    );
     // Where the two channels sit, 55 dB is what the filter is designed for and
     // 60 is what it should comfortably beat end to end.
     let rejection = 20.0 * (sent / rx.level().max(1e-12)).log10();
@@ -403,7 +406,6 @@ fn the_channel_we_transmit_in_is_not_heard_as_a_carrier() {
         "our own channel is only {rejection:.1} dB down after band selection"
     );
 }
-
 
 /// Eight-bit mu-law: the companding every G.711 call is carried in.
 ///
@@ -440,7 +442,10 @@ fn a_straight_line_keeps_our_own_channel_out_of_the_other_one() {
     // claimed. The two channels of V.22bis are far enough apart that a
     // linear-phase filter can separate them completely.
     let leak = own_channel_leakage(|x| x);
-    assert!(leak < 1.0e-3, "our own channel leaks at {leak:.2e} on a clean line");
+    assert!(
+        leak < 1.0e-3,
+        "our own channel leaks at {leak:.2e} on a clean line"
+    );
 }
 
 #[test]
@@ -585,7 +590,10 @@ fn twenty_four_hundred_cannot_be_had_while_we_shout_over_it() {
     // twenty decibels here: our own transmit, squared onto the far end's
     // carrier by companding, is louder than the far end itself.
     let (heard, tried) = acquisitions_at(Rate::Bps2400, 9.6);
-    assert_eq!(heard, 0, "expected 2400 to be hopeless here, heard {heard} of {tried}");
+    assert_eq!(
+        heard, 0,
+        "expected 2400 to be hopeless here, heard {heard} of {tried}"
+    );
 }
 
 #[test]
@@ -644,11 +652,13 @@ fn the_offer_of_2400_is_read_from_every_starting_phase() {
     // clean channel and noise on a real one, and it is the second that lets it
     // wander to the midpoint and sit there.
     let mut seed = 0x2545_f491_4f6c_dd1d_u64;
-    let mut noise = move || 0.04 * {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        f64::from(u16::try_from((seed >> 40) & 0xfff).unwrap_or(0)) / 2048.0 - 1.0
+    let mut noise = move || {
+        0.04 * {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            f64::from(u16::try_from((seed >> 40) & 0xfff).unwrap_or(0)) / 2048.0 - 1.0
+        }
     };
     // Every phase the clock could have been left in by the tone before it.
     for offset in 0..sps {

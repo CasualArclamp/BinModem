@@ -103,11 +103,7 @@ impl Link {
     /// port in it. A failure is not fatal: a trunk that is down at start-up is
     /// an ordinary Tuesday, and the link retries as soon as anything is sent
     /// or read.
-    pub fn open(
-        transport: Transport,
-        local_port: u16,
-        hop: SocketAddr,
-    ) -> Result<Self, String> {
+    pub fn open(transport: Transport, local_port: u16, hop: SocketAddr) -> Result<Self, String> {
         match transport {
             Transport::Udp => {
                 let socket = UdpSocket::bind(("0.0.0.0", local_port))
@@ -648,7 +644,10 @@ pub fn routed_source(hop: SocketAddr, port: u16) -> Result<SocketAddr, String> {
 }
 
 fn would_block(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 #[cfg(test)]
@@ -692,7 +691,11 @@ mod tests {
         };
         let two = Message::parse(&rest[..second]).expect("the second message would not parse");
         assert_eq!(two.body(), b"v=1\r\n");
-        assert_eq!(second, rest.len(), "the second message did not end where it ends");
+        assert_eq!(
+            second,
+            rest.len(),
+            "the second message did not end where it ends"
+        );
     }
 
     /// And the other way about: one message spread over three reads, which is
@@ -837,8 +840,7 @@ mod tests {
     /// waiting for an answer to a request that nothing ever delivered.
     #[test]
     fn a_connection_that_drops_is_opened_again_and_said_to_have_been() {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("the trunk's listener");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("the trunk's listener");
         let hop = listener.local_addr().unwrap();
         let far_end = thread::spawn(move || {
             // The first connection is taken and dropped at once, which is what

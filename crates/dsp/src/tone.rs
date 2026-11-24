@@ -348,13 +348,18 @@ impl ReversalDetector {
             // into twelve reversals.
             let warmup = self.history.len() as u32;
             let collapsed = 2.0 * magnitude <= 0.5 * self.envelope.value();
-            self.null = if collapsed { self.null.saturating_add(1) } else { 0 };
+            self.null = if collapsed {
+                self.null.saturating_add(1)
+            } else {
+                0
+            };
             let reversing = collapsed && self.null <= 2 * self.confirm;
-            if let Some(n) =
-                self.settled.checked_sub(warmup).filter(|n| *n > 0 && !reversing)
+            if let Some(n) = self
+                .settled
+                .checked_sub(warmup)
+                .filter(|n| *n > 0 && !reversing)
             {
-                let turn = (prev.0 * now.1 - prev.1 * now.0)
-                    .atan2(prev.0 * now.0 + prev.1 * now.1);
+                let turn = (prev.0 * now.1 - prev.1 * now.0).atan2(prev.0 * now.0 + prev.1 * now.1);
                 let rate = self.drift_rate.max(1.0 / f64::from(n));
                 self.drift += (turn - self.drift) * rate;
             }
@@ -491,10 +496,26 @@ mod tests {
         // 12 ms after, as a real modem sent it.
         let fs = 16_000.0;
         let tones = [
-            (150.0, 0.0), (300.0, 180.0), (450.0, 0.0), (600.0, 0.0), (750.0, 0.0),
-            (1050.0, 0.0), (1350.0, 0.0), (1500.0, 0.0), (1650.0, 180.0), (1950.0, 0.0),
-            (2100.0, 0.0), (2250.0, 180.0), (2550.0, 0.0), (2700.0, 180.0), (2850.0, 0.0),
-            (3000.0, 180.0), (3150.0, 180.0), (3300.0, 180.0), (3450.0, 180.0), (3600.0, 0.0),
+            (150.0, 0.0),
+            (300.0, 180.0),
+            (450.0, 0.0),
+            (600.0, 0.0),
+            (750.0, 0.0),
+            (1050.0, 0.0),
+            (1350.0, 0.0),
+            (1500.0, 0.0),
+            (1650.0, 180.0),
+            (1950.0, 0.0),
+            (2100.0, 0.0),
+            (2250.0, 180.0),
+            (2550.0, 0.0),
+            (2700.0, 180.0),
+            (2850.0, 0.0),
+            (3000.0, 180.0),
+            (3150.0, 180.0),
+            (3300.0, 180.0),
+            (3450.0, 180.0),
+            (3600.0, 0.0),
             (3750.0, 0.0f64),
         ];
         let heard = |restart: bool| {
@@ -505,7 +526,9 @@ mod tests {
                 let x = if t < 0.5 {
                     tones
                         .iter()
-                        .map(|&(f, ph)| 0.035 * (std::f64::consts::TAU * f * t + ph.to_radians()).cos())
+                        .map(|&(f, ph)| {
+                            0.035 * (std::f64::consts::TAU * f * t + ph.to_radians()).cos()
+                        })
                         .sum::<f64>()
                 } else if t < 0.562 {
                     let sign = if t < 0.55 { 1.0 } else { -1.0 };
@@ -523,8 +546,15 @@ mod tests {
             heard
         };
         let at_the_reversal = |h: &[f64]| h.iter().any(|&late| (0.0..0.010).contains(&late));
-        assert!(!at_the_reversal(&heard(false)), "the fault this is for is not the fault it thinks");
-        assert!(at_the_reversal(&heard(true)), "not heard after a restart: {:?}", heard(true));
+        assert!(
+            !at_the_reversal(&heard(false)),
+            "the fault this is for is not the fault it thinks"
+        );
+        assert!(
+            at_the_reversal(&heard(true)),
+            "not heard after a restart: {:?}",
+            heard(true)
+        );
     }
 
     #[test]
@@ -536,7 +566,11 @@ mod tests {
         // forty degrees in that window, so around twenty-four reaches a
         // hundred and thirty-five -- and then the detector fires as often as
         // it is allowed to, on a tone that never did anything.
-        assert_eq!(offset_tone(30.0, false), 0, "a steady tone, thirty hertz off");
+        assert_eq!(
+            offset_tone(30.0, false),
+            0,
+            "a steady tone, thirty hertz off"
+        );
         assert_eq!(offset_tone(-30.0, false), 0);
         assert_eq!(offset_tone(120.0, false), 0, "and a long way off");
     }
@@ -642,8 +676,7 @@ mod tests {
         for i in 0..(fs as usize * 2) {
             let t = i as f64 / fs;
             let sign = if i < turn { 1.0 } else { -1.0 };
-            let x = 0.2 * sign * (std::f64::consts::TAU * 600.0 * t + 1.1).sin()
-                + noise();
+            let x = 0.2 * sign * (std::f64::consts::TAU * 600.0 * t + 1.1).sin() + noise();
             if d.feed(x) && at.is_none() {
                 at = Some(i);
             }

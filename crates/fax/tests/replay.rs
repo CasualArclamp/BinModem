@@ -37,7 +37,10 @@ fn read(path: &str) -> Vec<(f64, usize, frames::Message)> {
         // there was one: a long burst that reads as one short DIS has had most
         // of itself lost.
         if reader.bad > 0 {
-            println!("channel {channel}: {} frames failed their check", reader.bad);
+            println!(
+                "channel {channel}: {} frames failed their check",
+                reader.bad
+            );
         }
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -46,10 +49,7 @@ fn read(path: &str) -> Vec<(f64, usize, frames::Message)> {
     // twice. The second copy is not a second frame.
     let mut once: Vec<(f64, usize, frames::Message)> = Vec::new();
     for (at, channel, m) in out {
-        if once
-            .iter()
-            .any(|(t, _, seen)| at - t < 0.5 && *seen == m)
-        {
+        if once.iter().any(|(t, _, seen)| at - t < 0.5 && *seen == m) {
             continue;
         }
         once.push((at, channel, m));
@@ -68,7 +68,13 @@ fn what_the_two_ends_said() {
         let text: String = m
             .fif
             .iter()
-            .map(|&c| if (32..127).contains(&c) { c as char } else { '.' })
+            .map(|&c| {
+                if (32..127).contains(&c) {
+                    c as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         println!(
             "{at:7.2}s {side} {:<4} {}{}",
@@ -92,17 +98,28 @@ fn what_the_two_ends_said() {
                     "the page will be",
                     how.name()
                 ),
-                None => println!("            {:<18} a rate this does not know", "the page will be"),
+                None => println!(
+                    "            {:<18} a rate this does not know",
+                    "the page will be"
+                ),
             }
             let caps = t30::capabilities(&m.fif);
             println!(
                 "            {:<18} {}",
                 "resolution",
-                if caps.fine_resolution { "7.7 lines/mm" } else { "3.85 lines/mm" }
+                if caps.fine_resolution {
+                    "7.7 lines/mm"
+                } else {
+                    "3.85 lines/mm"
+                }
             );
         }
         if matches!(m.frame, t30::Frame::Csi | t30::Frame::Tsi) {
-            println!("            {:<18} {}", "identification", t30::identification(&m.fif));
+            println!(
+                "            {:<18} {}",
+                "identification",
+                t30::identification(&m.fif)
+            );
         }
     }
     println!("\n{} frames", messages.len());
@@ -211,8 +228,14 @@ fn what_the_fast_receiver_saw() {
 #[ignore = "needs a recording"]
 fn what_the_page_carrier_carried() {
     let path = std::env::var("FAX_CAPTURE").expect("set FAX_CAPTURE");
-    let from: f64 = std::env::var("FAX_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let to: f64 = std::env::var("FAX_TO").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::MAX);
+    let from: f64 = std::env::var("FAX_FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let to: f64 = std::env::var("FAX_TO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(f64::MAX);
     let wav = line::wav::read(&path).expect("could not read the recording");
     let fs = f64::from(wav.sample_rate);
     let samples = wav.channel(0);

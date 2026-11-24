@@ -90,9 +90,15 @@ fn two_of_these_connect_on_v92_with_pcm_upstream_and_carry_text() {
         );
         assert_eq!(pair.caller.standard(), "V.92", "{up}/{down}:\n{notes}");
         assert_eq!(pair.host.standard(), "V.92", "{up}/{down}:\n{notes}");
-        let (down_rate, up_rate) = (pair.caller.rate().unwrap_or(0), pair.caller.transmit_rate().unwrap_or(0));
+        let (down_rate, up_rate) = (
+            pair.caller.rate().unwrap_or(0),
+            pair.caller.transmit_rate().unwrap_or(0),
+        );
         println!("{up}/{down}: {down_rate} down, {up_rate} up: {saw:?}");
-        assert!(down_rate >= 40_000 && up_rate >= 24_000, "{up}/{down}: {down_rate}/{up_rate}\n{notes}");
+        assert!(
+            down_rate >= 40_000 && up_rate >= 24_000,
+            "{up}/{down}: {down_rate}/{up_rate}\n{notes}"
+        );
 
         pair.run(2.0);
         for b in b"from the caller" {
@@ -104,9 +110,15 @@ fn two_of_these_connect_on_v92_with_pcm_upstream_and_carry_text() {
         pair.run(3.0);
         notes.push_str(&pair.notes());
         let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
-        assert!(host_saw.contains("from the caller"), "{up}/{down}: the server saw {host_saw:?}\n{notes}");
+        assert!(
+            host_saw.contains("from the caller"),
+            "{up}/{down}: the server saw {host_saw:?}\n{notes}"
+        );
         let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
-        assert!(caller_saw.contains("from the server"), "{up}/{down}: the caller saw {caller_saw:?}\n{notes}");
+        assert!(
+            caller_saw.contains("from the server"),
+            "{up}/{down}: the caller saw {caller_saw:?}\n{notes}"
+        );
     }
 }
 
@@ -116,7 +128,9 @@ fn two_of_these_connect_on_v92_with_pcm_upstream_and_carry_text() {
 #[test]
 #[ignore = "needs a recording"]
 fn replay_what_an_answerer_heard() {
-    let Some(path) = std::env::var_os("V92_REPLAY") else { return };
+    let Some(path) = std::env::var_os("V92_REPLAY") else {
+        return;
+    };
     let bytes = std::fs::read(path).expect("no recording");
     let mut host = Modem::new(16_000.0);
     host.set_pcm_upstream(true);
@@ -190,13 +204,22 @@ fn carries_text(pair: &mut Pair, what: &str, notes: &str) {
     }
     pair.run(3.0);
     let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
-    assert!(host_saw.contains("from the caller"), "{what}: the server saw {host_saw:?}\n{notes}");
+    assert!(
+        host_saw.contains("from the caller"),
+        "{what}: the server saw {host_saw:?}\n{notes}"
+    );
     let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
-    assert!(caller_saw.contains("from the server"), "{what}: the caller saw {caller_saw:?}\n{notes}");
+    assert!(
+        caller_saw.contains("from the server"),
+        "{what}: the caller saw {caller_saw:?}\n{notes}"
+    );
 }
 
 fn rates(pair: &Pair) -> (u32, u32) {
-    (pair.caller.rate().unwrap_or(0), pair.caller.transmit_rate().unwrap_or(0))
+    (
+        pair.caller.rate().unwrap_or(0),
+        pair.caller.transmit_rate().unwrap_or(0),
+    )
 }
 
 /// On a line with nothing on it but the two modems, each end measures as much
@@ -217,18 +240,38 @@ fn a_quiet_line_gets_the_fastest_upstream() {
 /// the downstream rate is the caller's CPt's.
 #[test]
 fn a_pinned_rate_is_the_rate_the_call_gets() {
-    for (who, up, down) in [("server", 7u8, None), ("caller", 13, None), ("caller", 4, Some(22u8)), ("caller", 1, Some(10))] {
+    for (who, up, down) in [
+        ("server", 7u8, None),
+        ("caller", 13, None),
+        ("caller", 4, Some(22u8)),
+        ("caller", 1, Some(10)),
+    ] {
         let mut pair = v92_pair();
-        let chooser = if who == "server" { &mut pair.host } else { &mut pair.caller };
-        assert_eq!(chooser.choose_upstream(Some(up)), modem::RateChosen::Pinned(Some(up)));
+        let chooser = if who == "server" {
+            &mut pair.host
+        } else {
+            &mut pair.caller
+        };
+        assert_eq!(
+            chooser.choose_upstream(Some(up)),
+            modem::RateChosen::Pinned(Some(up))
+        );
         if down.is_some() {
             pair.caller.choose_rate(down);
         }
         let notes = connect(&mut pair, 40);
         let wanted_up = (u32::from(up) + 17) * 8000 / 6;
         let wanted_down = down.map_or(56_000, |drn| (u32::from(drn) + 20) * 8000 / 6);
-        assert_eq!(rates(&pair), (wanted_down, wanted_up), "{who} pinned {up} up, {down:?} down\n{notes}");
-        carries_text(&mut pair, &format!("{who} pinned {up} up, {down:?} down"), &notes);
+        assert_eq!(
+            rates(&pair),
+            (wanted_down, wanted_up),
+            "{who} pinned {up} up, {down:?} down\n{notes}"
+        );
+        carries_text(
+            &mut pair,
+            &format!("{who} pinned {up} up, {down:?} down"),
+            &notes,
+        );
     }
 }
 
@@ -240,8 +283,16 @@ fn a_rate_chosen_during_a_call_retrains_to_it() {
         let mut pair = v92_pair();
         let mut notes = connect(&mut pair, 40);
         assert_eq!(rates(&pair).1, 48_000, "{who}\n{notes}");
-        let chooser = if who == "server" { &mut pair.host } else { &mut pair.caller };
-        assert_eq!(chooser.choose_upstream(Some(7)), modem::RateChosen::Retraining(Some(7)), "{who}");
+        let chooser = if who == "server" {
+            &mut pair.host
+        } else {
+            &mut pair.caller
+        };
+        assert_eq!(
+            chooser.choose_upstream(Some(7)),
+            modem::RateChosen::Retraining(Some(7)),
+            "{who}"
+        );
         pair.run(1.0);
         notes.push_str(&settle(&mut pair, 60));
         assert_eq!(rates(&pair), (56_000, 32_000), "{who}\n{notes}");
@@ -259,7 +310,10 @@ fn v8_bis_in_front_of_a_v92_call() {
     Pair::type_at(&mut pair.caller, "AT+A8E=,,,1");
     pair.run(0.05);
     let notes = connect(&mut pair, 50);
-    assert!(notes.contains("V.8 bis"), "no V.8 bis on the line:\n{notes}");
+    assert!(
+        notes.contains("V.8 bis"),
+        "no V.8 bis on the line:\n{notes}"
+    );
     assert_eq!(rates(&pair), (56_000, 48_000), "{notes}");
     carries_text(&mut pair, "after V.8 bis", &notes);
 }
@@ -281,10 +335,18 @@ fn timed_connect(pair: &mut Pair, what: &str) -> f64 {
             break;
         }
     }
-    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{what}:
-{notes}");
-    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{what}:
-{notes}");
+    assert_eq!(
+        (pair.caller.state(), pair.host.state()),
+        (State::Data, State::Data),
+        "{what}:
+{notes}"
+    );
+    assert_eq!(
+        (pair.caller.standard(), pair.host.standard()),
+        ("V.92", "V.92"),
+        "{what}:
+{notes}"
+    );
     pair.caller.call_seconds()
 }
 
@@ -303,17 +365,35 @@ fn hang_up(pair: &mut Pair) {
 fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     let mut pair = v92_pair();
     let first = timed_connect(&mut pair, "first call");
-    assert_eq!(pair.caller.quick_connected(), None, "nothing was known, so nothing was asked");
-    assert!(!pair.caller.short_phase2() && !pair.host.short_phase2(), "only the host asked for a short Phase 2");
+    assert_eq!(
+        pair.caller.quick_connected(),
+        None,
+        "nothing was known, so nothing was asked"
+    );
+    assert!(
+        !pair.caller.short_phase2() && !pair.host.short_phase2(),
+        "only the host asked for a short Phase 2"
+    );
     assert_eq!(pair.host.quick_connected(), None);
-    let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
+    let memo = pair
+        .caller
+        .learned()
+        .expect("a V.92 call in data mode teaches something");
     assert!(memo.pcm_upstream, "{memo:?}");
-    assert_eq!(pair.host.learned(), None, "the answering end has no number to remember");
+    assert_eq!(
+        pair.host.learned(),
+        None,
+        "the answering end has no number to remember"
+    );
     hang_up(&mut pair);
 
     pair.caller.set_quick_memo(Some(memo));
     let second = timed_connect(&mut pair, "second call");
-    assert_eq!(pair.caller.quick_connected(), Some(true), "QC1a and QCA1d both called for LAPM");
+    assert_eq!(
+        pair.caller.quick_connected(),
+        Some(true),
+        "QC1a and QCA1d both called for LAPM"
+    );
     assert_eq!(pair.host.quick_connected(), Some(true));
     // And Phase 2 was the short one at both ends: the memo says the last
     // call had PCM upstream, so the caller asked, and the host always does.
@@ -331,8 +411,18 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     // 9.2.5: both sequences called for LAPM, so there was no ODP and no ADP
     // -- and LAPM is up all the same.
     assert!(pair.caller.error_controlled() && pair.host.error_controlled());
-    let answered = |m: &Modem| m.distant().into_iter().find(|(what, _)| *what == "answered").map(|(_, said)| said);
-    assert_eq!(answered(&pair.caller).as_deref(), Some("nothing"), "an ADP came back: {:?}", pair.caller.distant());
+    let answered = |m: &Modem| {
+        m.distant()
+            .into_iter()
+            .find(|(what, _)| *what == "answered")
+            .map(|(_, said)| said)
+    };
+    assert_eq!(
+        answered(&pair.caller).as_deref(),
+        Some("nothing"),
+        "an ADP came back: {:?}",
+        pair.caller.distant()
+    );
     carries_text(&mut pair, "after a quick connect", "");
 }
 
@@ -350,8 +440,12 @@ fn noted_connect(pair: &mut Pair, what: &str) -> (String, f64) {
             break;
         }
     }
-    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{what}:
-{notes}");
+    assert_eq!(
+        (pair.caller.state(), pair.host.state()),
+        (State::Data, State::Data),
+        "{what}:
+{notes}"
+    );
     (notes, pair.caller.call_seconds())
 }
 
@@ -363,10 +457,20 @@ fn a_full_start_up_asks_for_a_dil_and_a_quick_connect_does_not() {
     let mut pair = v92_pair();
     let (notes, first) = noted_connect(&mut pair, "first call");
     assert_eq!(pair.caller.quick_connected(), None, "{notes}");
-    assert!(notes.contains("caller: V.92: PCM upstream (Table 18)") && notes.contains("asking for a DIL"), "{notes}");
-    assert!(notes.contains("caller: Jp' read, DIL of 3528 symbols"), "{notes}");
+    assert!(
+        notes.contains("caller: V.92: PCM upstream (Table 18)")
+            && notes.contains("asking for a DIL"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("caller: Jp' read, DIL of 3528 symbols"),
+        "{notes}"
+    );
     assert!(notes.contains("caller: the DIL chose"), "{notes}");
-    let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
+    let memo = pair
+        .caller
+        .learned()
+        .expect("a V.92 call in data mode teaches something");
     carries_text(&mut pair, "a full start-up with a DIL", &notes);
     hang_up(&mut pair);
 
@@ -374,7 +478,10 @@ fn a_full_start_up_asks_for_a_dil_and_a_quick_connect_does_not() {
     let (notes, second) = noted_connect(&mut pair, "second call");
     assert_eq!(pair.caller.quick_connected(), Some(true), "{notes}");
     assert!(notes.contains("no DIL after a quick connect"), "{notes}");
-    assert!(notes.contains("caller: Jp' read, DIL of 0 symbols"), "{notes}");
+    assert!(
+        notes.contains("caller: Jp' read, DIL of 0 symbols"),
+        "{notes}"
+    );
     assert!(!notes.contains("the DIL chose"), "{notes}");
     println!("full start-up with a DIL {first:.2} s, quick connect {second:.2} s");
     carries_text(&mut pair, "a quick connect with no DIL", &notes);
@@ -411,7 +518,10 @@ fn an_unanswered_anspcm_falls_back_to_v8_and_connects() {
         let said = pair.host.step(heard);
         // From the host's QCA1d silence on, nothing reaches the caller until
         // the host has given up.
-        let quick = matches!(pair.host.line_phase(), "QCA1d silence" | "QTS" | "QTS-bar" | "ANSpcm");
+        let quick = matches!(
+            pair.host.line_phase(),
+            "QCA1d silence" | "QTS" | "QTS-bar" | "ANSpcm"
+        );
         cut += usize::from(quick);
         pair.to_caller.push_back(if quick { 0.0 } else { said });
         if pair.caller.state() == State::Data && pair.host.state() == State::Data {
@@ -421,9 +531,20 @@ fn an_unanswered_anspcm_falls_back_to_v8_and_connects() {
     notes.push_str(&pair.notes());
     assert!(cut > 0, "the host never answered the QC1a:\n{notes}");
     assert!(notes.contains("no TONEq"), "{notes}");
-    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{notes}");
-    assert_eq!((pair.caller.quick_connected(), pair.host.quick_connected()), (None, None));
-    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{notes}");
+    assert_eq!(
+        (pair.caller.state(), pair.host.state()),
+        (State::Data, State::Data),
+        "{notes}"
+    );
+    assert_eq!(
+        (pair.caller.quick_connected(), pair.host.quick_connected()),
+        (None, None)
+    );
+    assert_eq!(
+        (pair.caller.standard(), pair.host.standard()),
+        ("V.92", "V.92"),
+        "{notes}"
+    );
 }
 
 /// A modem handed a file keeps the memos itself, by the string dialled: the
@@ -434,11 +555,16 @@ fn a_modem_with_a_file_remembers_the_number_it_dialled() {
     let file = std::env::temp_dir().join(format!("binmodem-v92-call-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&file);
     let mut pair = v92_pair();
-    pair.caller.remember_connections(Some(modem::memos::Memos::open(&file)));
+    pair.caller
+        .remember_connections(Some(modem::memos::Memos::open(&file)));
     timed_connect(&mut pair, "first call");
     assert_eq!(pair.caller.quick_connected(), None);
     hang_up(&mut pair);
-    assert!(modem::memos::Memos::open(&file).get("5551234").is_some_and(|m| m.pcm_upstream));
+    assert!(
+        modem::memos::Memos::open(&file)
+            .get("5551234")
+            .is_some_and(|m| m.pcm_upstream)
+    );
 
     timed_connect(&mut pair, "second call");
     assert_eq!(pair.caller.quick_connected(), Some(true));
@@ -466,11 +592,18 @@ fn a_modem_with_a_file_remembers_the_number_it_dialled() {
             break;
         }
     }
-    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data));
+    assert_eq!(
+        (pair.caller.state(), pair.host.state()),
+        (State::Data, State::Data)
+    );
     assert_eq!(pair.caller.standard(), "V.34");
     hang_up(&mut pair);
     let kept = modem::memos::Memos::open(&file);
-    assert_eq!(kept.get("5551234"), None, "a memo that did not get its call to V.92 is not spent twice");
+    assert_eq!(
+        kept.get("5551234"),
+        None,
+        "a memo that did not get its call to V.92 is not spent twice"
+    );
     assert!(kept.get("5559999").is_some());
     let _ = std::fs::remove_file(&file);
 }
@@ -490,10 +623,24 @@ struct Silenced {
 /// `restart`, the host also hangs up then and answers again, as a server
 /// whose quick connect went wrong might go back to ANSam and V.8 -- and from
 /// then on it is heard as usual.
-fn quick_connect_into_silence(pair: &mut Pair, file: &std::path::Path, restart: bool, seconds: f64) -> Silenced {
+fn quick_connect_into_silence(
+    pair: &mut Pair,
+    file: &std::path::Path,
+    restart: bool,
+    seconds: f64,
+) -> Silenced {
     let mut memos = modem::memos::Memos::open(file);
-    memos.put("5551234", modem::Recognized { uqts: 70, a_law: false, round_trip_ms: 133, pcm_upstream: true });
-    pair.caller.remember_connections(Some(modem::memos::Memos::open(file)));
+    memos.put(
+        "5551234",
+        modem::Recognized {
+            uqts: 70,
+            a_law: false,
+            round_trip_ms: 133,
+            pcm_upstream: true,
+        },
+    );
+    pair.caller
+        .remember_connections(Some(modem::memos::Memos::open(file)));
     Pair::type_at(&mut pair.host, "ATA");
     Pair::type_at(&mut pair.caller, "ATD5551234");
     let mut notes = String::new();
@@ -518,7 +665,8 @@ fn quick_connect_into_silence(pair: &mut Pair, file: &std::path::Path, restart: 
             }
         }
         was_anspcm |= anspcm;
-        pair.to_caller.push_back(if quiet && !restarted { 0.0 } else { said });
+        pair.to_caller
+            .push_back(if quiet && !restarted { 0.0 } else { said });
         notes.push_str(&pair.notes());
         if quiet && pair.caller.state() == State::Command {
             ended_at = Some(t);
@@ -530,7 +678,11 @@ fn quick_connect_into_silence(pair: &mut Pair, file: &std::path::Path, restart: 
     }
     notes.push_str(&pair.notes());
     assert!(quiet, "the host never sent ANSpcm:\n{notes}");
-    Silenced { notes, quiet_at, ended_at }
+    Silenced {
+        notes,
+        quiet_at,
+        ended_at,
+    }
 }
 
 /// live-1795315036: the server heard TONEq, stopped ANSpcm, and said nothing
@@ -546,14 +698,25 @@ fn a_server_that_goes_silent_after_toneq_loses_its_memo_and_the_call_ends() {
     let run = quick_connect_into_silence(&mut pair, &file, false, 30.0);
     let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
     let notes = format!("{}\nthe terminal saw {caller_saw:?}", run.notes);
-    assert!(run.notes.contains("no INFO0d or tone B after TONEq; memo dropped"), "{notes}");
+    assert!(
+        run.notes
+            .contains("no INFO0d or tone B after TONEq; memo dropped"),
+        "{notes}"
+    );
     assert!(run.notes.contains("no JM to the CM either"), "{notes}");
     assert_eq!(pair.caller.state(), State::Command, "{notes}");
     assert!(caller_saw.contains("NO CARRIER"), "{notes}");
     let took = run.ended_at.expect("the caller never hung up") - run.quiet_at;
     println!("on hook {took:.2} s after the server went quiet");
-    assert!(took < 12.0, "the call went on {took:.1} s after the server went quiet\n{notes}");
-    assert_eq!(modem::memos::Memos::open(&file).get("5551234"), None, "the memo is still there");
+    assert!(
+        took < 12.0,
+        "the call went on {took:.1} s after the server went quiet\n{notes}"
+    );
+    assert_eq!(
+        modem::memos::Memos::open(&file).get("5551234"),
+        None,
+        "the memo is still there"
+    );
     let _ = std::fs::remove_file(&file);
 }
 
@@ -562,16 +725,31 @@ fn a_server_that_goes_silent_after_toneq_loses_its_memo_and_the_call_ends() {
 /// to V.92 data mode, with no memo left to try the short way again.
 #[test]
 fn a_server_that_restarts_v8_after_a_failed_quick_connect_still_connects() {
-    let file = std::env::temp_dir().join(format!("binmodem-v92-restart-{}.txt", std::process::id()));
+    let file =
+        std::env::temp_dir().join(format!("binmodem-v92-restart-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&file);
     let mut pair = v92_pair();
     let run = quick_connect_into_silence(&mut pair, &file, true, 40.0);
     assert!(run.notes.contains("memo dropped"), "{}", run.notes);
-    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{}", run.notes);
-    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{}", run.notes);
+    assert_eq!(
+        (pair.caller.state(), pair.host.state()),
+        (State::Data, State::Data),
+        "{}",
+        run.notes
+    );
+    assert_eq!(
+        (pair.caller.standard(), pair.host.standard()),
+        ("V.92", "V.92"),
+        "{}",
+        run.notes
+    );
     assert_eq!(pair.caller.quick_connected(), None, "{}", run.notes);
     assert!(!pair.caller.short_phase2(), "{}", run.notes);
-    carries_text(&mut pair, "after a quick connect went back to V.8", &run.notes);
+    carries_text(
+        &mut pair,
+        "after a quick connect went back to V.8",
+        &run.notes,
+    );
     hang_up(&mut pair);
     // The call reached data mode, so it taught a memo afresh: a full
     // start-up's, which is what a quick connect next time would rest on.

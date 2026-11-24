@@ -170,7 +170,12 @@ pub fn read_pps(fif: &[u8]) -> Option<(PostMessage, u8, u8, usize)> {
     let [code, page, block, count, ..] = *fif else {
         return None;
     };
-    Some((PostMessage::from_code(code)?, page, block, usize::from(count) + 1))
+    Some((
+        PostMessage::from_code(code)?,
+        page,
+        block,
+        usize::from(count) + 1,
+    ))
 }
 
 /// A PPR's FIF: 256 bits, one to a frame, set for every frame wanted again.
@@ -191,7 +196,10 @@ pub fn ppr_field(frames: usize, have: impl Fn(usize) -> bool) -> Vec<u8> {
 /// The frames a PPR asks for, of a block of `frames`.
 pub fn read_ppr(fif: &[u8], frames: usize) -> Vec<usize> {
     (0..frames.min(BLOCK_FRAMES))
-        .filter(|&i| fif.get(i / 8).is_some_and(|octet| octet >> (i % 8) & 1 == 1))
+        .filter(|&i| {
+            fif.get(i / 8)
+                .is_some_and(|octet| octet >> (i % 8) & 1 == 1)
+        })
         .collect()
 }
 
@@ -310,7 +318,11 @@ mod tests {
     #[test]
     fn the_frame_codes_are_the_bits_the_annex_prints() {
         // T.4 A.3.5, first bit on the left.
-        let printed = |octet: u8| -> String { (0..8).map(|i| if octet >> i & 1 == 1 { '1' } else { '0' }).collect() };
+        let printed = |octet: u8| -> String {
+            (0..8)
+                .map(|i| if octet >> i & 1 == 1 { '1' } else { '0' })
+                .collect()
+        };
         assert_eq!(printed(FCD), "01100000");
         assert_eq!(printed(RCP), "01100001");
         // A.3.4's control field, 1100 X000 with X at 0.
@@ -368,7 +380,11 @@ mod tests {
     #[test]
     fn a_partial_page_is_collected_whole() {
         let data: Vec<Vec<u8>> = (0..5u8).map(|n| vec![n.wrapping_mul(37); 256]).collect();
-        let frames: Vec<(u8, &[u8])> = data.iter().enumerate().map(|(i, d)| (i as u8, d.as_slice())).collect();
+        let frames: Vec<(u8, &[u8])> = data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i as u8, d.as_slice()))
+            .collect();
         let bits = partial_page(&frames, 9600);
         let mut collector = Collector::new();
         collector.feed_bits(&bits);
@@ -381,7 +397,11 @@ mod tests {
     #[test]
     fn a_damaged_frame_is_missing_and_the_rest_are_not() {
         let data: Vec<Vec<u8>> = (0..4u8).map(|n| vec![n; 64]).collect();
-        let frames: Vec<(u8, &[u8])> = data.iter().enumerate().map(|(i, d)| (i as u8, d.as_slice())).collect();
+        let frames: Vec<(u8, &[u8])> = data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i as u8, d.as_slice()))
+            .collect();
         let mut bits = partial_page(&frames, 4800);
         // Somewhere in the middle of the frames, well past the flags.
         let at = bits.len() / 2;
@@ -393,9 +413,16 @@ mod tests {
         assert!(collector.ended());
         assert!(!collector.complete(4), "the damage went unnoticed");
         let missing: Vec<usize> = (0..4).filter(|&i| !collector.has(i)).collect();
-        assert_eq!(missing.len(), 1, "one burst of errors, one frame: {missing:?}");
+        assert_eq!(
+            missing.len(),
+            1,
+            "one burst of errors, one frame: {missing:?}"
+        );
         // Asked for again and sent again, the block is whole.
-        let again: Vec<(u8, &[u8])> = missing.iter().map(|&i| (i as u8, data[i].as_slice())).collect();
+        let again: Vec<(u8, &[u8])> = missing
+            .iter()
+            .map(|&i| (i as u8, data[i].as_slice()))
+            .collect();
         collector.next_partial_page();
         collector.feed_bits(&partial_page(&again, 4800));
         assert!(collector.complete(4));
@@ -407,7 +434,13 @@ mod tests {
         let bits = partial_page(&[], 9600);
         // 0.2 s at 9600 is 1920 bits, 240 flags; then three RCP frames and one
         // closing flag, which are a few dozen more.
-        let leading_flags = bits.chunks(8).take_while(|c| *c == [false, true, true, true, true, true, true, false]).count();
-        assert!((240..=242).contains(&leading_flags), "{leading_flags} flags");
+        let leading_flags = bits
+            .chunks(8)
+            .take_while(|c| *c == [false, true, true, true, true, true, true, false])
+            .count();
+        assert!(
+            (240..=242).contains(&leading_flags),
+            "{leading_flags} flags"
+        );
     }
 }

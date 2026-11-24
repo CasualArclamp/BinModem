@@ -238,21 +238,39 @@ mod tests {
                     .collect()
             })
             .collect();
-        for coding in [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig] {
+        for coding in [
+            Coding::ModifiedHuffman,
+            Coding::ModifiedRead,
+            Coding::Mmr,
+            Coding::Jbig,
+        ] {
             let bits = coding.encode(&lines, Resolution::Standard, 0);
             let ends = line_ends(coding, &bits);
-            assert_eq!(ends.len(), lines.len(), "{coding:?}: not every line decoded");
-            assert!(ends.windows(2).all(|w| w[0] <= w[1]), "{coding:?}: ends go backwards");
+            assert_eq!(
+                ends.len(),
+                lines.len(),
+                "{coding:?}: not every line decoded"
+            );
+            assert!(
+                ends.windows(2).all(|w| w[0] <= w[1]),
+                "{coding:?}: ends go backwards"
+            );
             assert!(*ends.last().unwrap() <= bits.len());
             let half = line_at(&ends, bits.len() / 2);
-            assert!(half > 220.0, "{coding:?}: half the bits is only line {half}");
+            assert!(
+                half > 220.0,
+                "{coding:?}: half the bits is only line {half}"
+            );
             assert!(line_at(&ends, 0) < 1.0);
             assert_eq!(line_at(&ends, bits.len()), lines.len() as f64);
             // Never backwards as the bits go out.
             let mut was = 0.0;
             for sent in (0..=bits.len()).step_by(97) {
                 let now = line_at(&ends, sent);
-                assert!(now >= was, "{coding:?}: back from {was} to {now} at bit {sent}");
+                assert!(
+                    now >= was,
+                    "{coding:?}: back from {was} to {now} at bit {sent}"
+                );
                 was = now;
             }
         }
@@ -273,15 +291,27 @@ mod tests {
     #[test]
     fn every_coding_decodes_what_it_encodes() {
         let lines = a_page(50);
-        for coding in [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig] {
+        for coding in [
+            Coding::ModifiedHuffman,
+            Coding::ModifiedRead,
+            Coding::Mmr,
+            Coding::Jbig,
+        ] {
             for resolution in [Resolution::Standard, Resolution::Fine] {
                 let bits = coding.encode(&lines, resolution, 0);
                 let mut decoder = Decoder::new(coding);
                 assert_eq!(decoder.coding(), coding);
                 decoder.feed_bits(&bits);
-                assert!(decoder.is_done(), "{coding:?} {resolution:?}: the page never ended");
+                assert!(
+                    decoder.is_done(),
+                    "{coding:?} {resolution:?}: the page never ended"
+                );
                 assert_eq!(decoder.damaged(), 0, "{coding:?} {resolution:?}");
-                assert_eq!(decoder.lines(), lines.as_slice(), "{coding:?} {resolution:?}");
+                assert_eq!(
+                    decoder.lines(),
+                    lines.as_slice(),
+                    "{coding:?} {resolution:?}"
+                );
             }
         }
     }
@@ -292,12 +322,18 @@ mod tests {
         let mut decoder = Decoder::new(Coding::ModifiedHuffman);
         decoder.feed_bits(&Coding::ModifiedHuffman.encode(&lines, Resolution::Standard, 0));
         decoder.reset_to(Coding::Mmr);
-        assert!(decoder.lines().is_empty(), "the last page's lines are still there");
+        assert!(
+            decoder.lines().is_empty(),
+            "the last page's lines are still there"
+        );
         decoder.feed_bits(&Coding::Mmr.encode(&lines, Resolution::Standard, 0));
         assert_eq!(decoder.lines(), lines.as_slice());
         decoder.reset_to(Coding::Jbig);
         assert_eq!(decoder.coding(), Coding::Jbig);
-        assert!(decoder.lines().is_empty(), "the last page's lines are still there");
+        assert!(
+            decoder.lines().is_empty(),
+            "the last page's lines are still there"
+        );
         decoder.feed_bits(&Coding::Jbig.encode(&lines, Resolution::Standard, 0));
         assert_eq!(decoder.lines(), lines.as_slice());
     }

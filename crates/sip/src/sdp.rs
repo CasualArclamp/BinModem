@@ -273,7 +273,9 @@ impl Sdp {
             return Err("the SDP body was empty".to_owned());
         }
         if !version_seen {
-            return Err("the SDP body has no v= line, so it is not a session description".to_owned());
+            return Err(
+                "the SDP body has no v= line, so it is not a session description".to_owned(),
+            );
         }
         let origin = origin.ok_or_else(|| {
             "the SDP body has no o= line, so there is no way to tell one of its descriptions from the next"
@@ -295,12 +297,16 @@ impl Sdp {
     /// agent places, and a far end that offers two gets an answer about the
     /// first.
     pub fn audio(&self) -> Option<&MediaLine> {
-        self.media.iter().find(|m| m.kind.eq_ignore_ascii_case("audio"))
+        self.media
+            .iter()
+            .find(|m| m.kind.eq_ignore_ascii_case("audio"))
     }
 
     /// The first `m=image` stream, which in practice means T.38 fax.
     pub fn image(&self) -> Option<&MediaLine> {
-        self.media.iter().find(|m| m.kind.eq_ignore_ascii_case("image"))
+        self.media
+            .iter()
+            .find(|m| m.kind.eq_ignore_ascii_case("image"))
     }
 
     /// A session-level attribute's value. Some far ends put `a=ptime` or a
@@ -454,8 +460,16 @@ pub const LINEAR_RATE: u32 = 16_000;
 ///
 /// These are the ones softphones list as "LPCM": 8, 16, 44.1 and 48 kHz,
 /// each mono and stereo.
-pub const LINEAR_FORMATS: [(u32, u8); 8] =
-    [(48_000, 1), (48_000, 2), (44_100, 1), (44_100, 2), (16_000, 1), (16_000, 2), (8_000, 1), (8_000, 2)];
+pub const LINEAR_FORMATS: [(u32, u8); 8] = [
+    (48_000, 1),
+    (48_000, 2),
+    (44_100, 1),
+    (44_100, 2),
+    (16_000, 1),
+    (16_000, 2),
+    (8_000, 1),
+    (8_000, 2),
+];
 
 /// The payload type each of [`LINEAR_FORMATS`] is offered under, in the
 /// same order. L16 at 44.1 kHz has static numbers, 11 and for two channels
@@ -480,7 +494,11 @@ fn linear_payload_types(dtmf: Option<u8>) -> [u8; 8] {
 /// An L16 coding as an rtpmap has it: the channels are left off when there
 /// is one (RFC 4566 6).
 fn linear_name(rate: u32, channels: u8) -> String {
-    if channels == 2 { format!("L16/{rate}/2") } else { format!("L16/{rate}") }
+    if channels == 2 {
+        format!("L16/{rate}/2")
+    } else {
+        format!("L16/{rate}")
+    }
 }
 
 /// [`offer`], with L16 in front of G.711 when `linear` is set: every one of
@@ -530,14 +548,23 @@ pub fn offer_only(
         }
     }
 
-    let mut formats: Vec<String> = chosen.iter().map(|l| l.payload_type().to_string()).collect();
+    let mut formats: Vec<String> = chosen
+        .iter()
+        .map(|l| l.payload_type().to_string())
+        .collect();
     let mut attributes: Vec<(String, Option<String>)> = Vec::new();
     if linear {
         let numbers = linear_payload_types(dtmf);
-        let wanted = LINEAR_FORMATS.iter().zip(numbers).filter(|(format, _)| only.is_none_or(|o| o == **format));
+        let wanted = LINEAR_FORMATS
+            .iter()
+            .zip(numbers)
+            .filter(|(format, _)| only.is_none_or(|o| o == **format));
         for (at, (&(rate, channels), pt)) in wanted.enumerate() {
             formats.insert(at, pt.to_string());
-            attributes.push(("rtpmap".to_owned(), Some(format!("{pt} {}", linear_name(rate, channels)))));
+            attributes.push((
+                "rtpmap".to_owned(),
+                Some(format!("{pt} {}", linear_name(rate, channels))),
+            ));
         }
     }
     for law in &chosen {
@@ -547,7 +574,11 @@ pub fn offer_only(
         // one that does it the other way round.
         attributes.push((
             "rtpmap".to_owned(),
-            Some(format!("{} {}/8000", law.payload_type(), law.encoding_name())),
+            Some(format!(
+                "{} {}/8000",
+                law.payload_type(),
+                law.encoding_name()
+            )),
         ));
     }
     if let Some(pt) = dtmf {
@@ -641,7 +672,9 @@ pub fn answer_only(
                     .to_owned(),
             );
         }
-        return Err("the offer has no m=audio line, so there is no call in it to answer".to_owned());
+        return Err(
+            "the offer has no m=audio line, so there is no call in it to answer".to_owned(),
+        );
     };
 
     if media.port == 0 {
@@ -702,7 +735,10 @@ pub fn answer_only(
         Some((rate, channels)) => linear_name(rate, channels),
         None => format!("{}/8000", law.encoding_name()),
     };
-    let mut attributes = vec![("rtpmap".to_owned(), Some(format!("{payload_type} {coding}")))];
+    let mut attributes = vec![(
+        "rtpmap".to_owned(),
+        Some(format!("{payload_type} {coding}")),
+    )];
     // RFC 3264 6.1: an answer may only contain payload types the offer had.
     // Telephone-event is mirrored when offered because refusing it makes some
     // trunks drop the call, and because an event we did not agree to still
@@ -965,7 +1001,11 @@ fn linear_of(media: &MediaLine, format: &str) -> Option<(u8, u32, u8)> {
     let name = fields.next()?.trim();
     let rate: u32 = fields.next()?.trim().parse().ok()?;
     let channels: u8 = fields.next().map_or(Some(1), |c| c.trim().parse().ok())?;
-    (name.eq_ignore_ascii_case("L16") && LINEAR_FORMATS.contains(&(rate, channels))).then_some((payload_type, rate, channels))
+    (name.eq_ignore_ascii_case("L16") && LINEAR_FORMATS.contains(&(rate, channels))).then_some((
+        payload_type,
+        rate,
+        channels,
+    ))
 }
 
 /// The payload type an RFC 4733 telephone-event was given, if there is one.
@@ -1121,16 +1161,33 @@ mod tests {
         let chosen = Some((16_000, 2));
         let offer = offer_only("192.0.2.1", 4000, &[Law::Mu], true, chosen, 20, None);
         assert_eq!(offer.matches("L16/").count(), 1, "{offer}");
-        assert!(offer.contains("L16/16000/2") && offer.contains("PCMU/8000"), "{offer}");
+        assert!(
+            offer.contains("L16/16000/2") && offer.contains("PCMU/8000"),
+            "{offer}"
+        );
 
         // An answerer that chose one takes it out of an offer of all eight.
         let all = Sdp::parse(&offer_with("192.0.2.1", 4000, &[Law::Mu], true, 20, None)).unwrap();
-        let (_, agreed) = answer_only(&all, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
-        assert_eq!((agreed.linear, agreed.rate, agreed.channels), (true, 16_000, 2));
+        let (_, agreed) =
+            answer_only(&all, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
+        assert_eq!(
+            (agreed.linear, agreed.rate, agreed.channels),
+            (true, 16_000, 2)
+        );
 
         // And G.711 when what it chose is not in the offer.
-        let other = Sdp::parse(&offer_only("192.0.2.1", 4000, &[Law::Mu], true, Some((8_000, 1)), 20, None)).unwrap();
-        let (_, agreed) = answer_only(&other, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
+        let other = Sdp::parse(&offer_only(
+            "192.0.2.1",
+            4000,
+            &[Law::Mu],
+            true,
+            Some((8_000, 1)),
+            20,
+            None,
+        ))
+        .unwrap();
+        let (_, agreed) =
+            answer_only(&other, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
         assert!(!agreed.linear);
     }
 
@@ -1225,41 +1282,70 @@ mod tests {
         let body = offer_with("192.0.2.1", 4000, &[Law::Mu, Law::A], true, 20, None);
         // Every linear coding, the fastest first and one channel before
         // two, with 44.1 kHz under its static numbers.
-        assert!(body.contains("m=audio 4000 RTP/AVP 97 98 11 10 96 99 100 101 0 8\r\n"), "{body}");
-        for map in ["97 L16/48000", "98 L16/48000/2", "11 L16/44100", "10 L16/44100/2", "96 L16/16000", "99 L16/16000/2", "100 L16/8000", "101 L16/8000/2"] {
-            assert!(body.contains(&format!("a=rtpmap:{map}\r\n")), "{map}\n{body}");
+        assert!(
+            body.contains("m=audio 4000 RTP/AVP 97 98 11 10 96 99 100 101 0 8\r\n"),
+            "{body}"
+        );
+        for map in [
+            "97 L16/48000",
+            "98 L16/48000/2",
+            "11 L16/44100",
+            "10 L16/44100/2",
+            "96 L16/16000",
+            "99 L16/16000/2",
+            "100 L16/8000",
+            "101 L16/8000/2",
+        ] {
+            assert!(
+                body.contains(&format!("a=rtpmap:{map}\r\n")),
+                "{map}\n{body}"
+            );
         }
         let offered = Sdp::parse(&body).unwrap();
 
         // Another of these takes the first of them, under the offerer's
         // number for it.
-        let (answer, agreed) = answer_with(&offered, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
+        let (answer, agreed) =
+            answer_with(&offered, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
         assert!(agreed.linear);
-        assert_eq!((agreed.payload_type, agreed.rate, agreed.channels), (97, 48_000, 1));
+        assert_eq!(
+            (agreed.payload_type, agreed.rate, agreed.channels),
+            (97, 48_000, 1)
+        );
         assert!(answer.contains("m=audio 5000 RTP/AVP 97\r\n"), "{answer}");
         assert!(answer.contains("a=rtpmap:97 L16/48000\r\n"), "{answer}");
-        let read = read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
+        let read =
+            read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
         assert!(read.linear);
-        assert_eq!((read.payload_type, read.port, read.rate, read.channels), (97, 5000, 48_000, 1));
+        assert_eq!(
+            (read.payload_type, read.port, read.rate, read.channels),
+            (97, 5000, 48_000, 1)
+        );
         assert_eq!(read.coding(), "L16 at 48000 Hz");
 
         // Telephone-event keeps its number and the linear ones step over it.
         let body = offer_with("192.0.2.1", 4000, &[Law::Mu], true, 20, Some(98));
-        assert!(body.contains("m=audio 4000 RTP/AVP 97 99 11 10 96 100 101 102 0 98\r\n"), "{body}");
+        assert!(
+            body.contains("m=audio 4000 RTP/AVP 97 99 11 10 96 100 101 102 0 98\r\n"),
+            "{body}"
+        );
 
         // Anything else has never heard of it and answers with G.711, and
         // that is a call like any other.
-        let (answer, agreed) = super::answer(&offered, "192.0.2.3", 6000, &[Law::Mu, Law::A], 20).unwrap();
+        let (answer, agreed) =
+            super::answer(&offered, "192.0.2.3", 6000, &[Law::Mu, Law::A], 20).unwrap();
         assert!(!agreed.linear);
         assert_eq!(agreed.law, Law::Mu);
-        let read = read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
+        let read =
+            read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
         assert!(!read.linear);
         assert_eq!(read.payload_type, 0);
 
         // And an offer without it is answered as it always was, whatever
         // this end would have liked.
         let plain = Sdp::parse(&offer("192.0.2.1", 4000, &[Law::A], 20, None)).unwrap();
-        let (_, agreed) = answer_with(&plain, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
+        let (_, agreed) =
+            answer_with(&plain, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
         assert!(!agreed.linear);
         assert_eq!(agreed.law, Law::A);
     }
@@ -1270,7 +1356,16 @@ mod tests {
             let text = format!(
                 "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 97 0\r\na=rtpmap:97 {map}\r\n"
             );
-            answer_with(&Sdp::parse(&text).unwrap(), "192.0.2.2", 5000, &[Law::Mu], true, 20).unwrap().1
+            answer_with(
+                &Sdp::parse(&text).unwrap(),
+                "192.0.2.2",
+                5000,
+                &[Law::Mu],
+                true,
+                20,
+            )
+            .unwrap()
+            .1
         };
         assert!(with("L16/16000").linear);
         assert!(with("l16/16000/1").linear);
@@ -1293,11 +1388,26 @@ mod tests {
         assert!(!with("L16/48000/6").linear);
         assert!(!with("L24/48000").linear);
         assert!(!with("G722/8000").linear);
-        assert_eq!((with("G722/8000").rate, with("G722/8000").channels), (8000, 1));
+        assert_eq!(
+            (with("G722/8000").rate, with("G722/8000").channels),
+            (8000, 1)
+        );
         // The static numbers need no rtpmap.
         let bare = "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 10 0\r\n";
-        let agreed = answer_with(&Sdp::parse(bare).unwrap(), "192.0.2.2", 5000, &[Law::Mu], true, 20).unwrap().1;
-        assert_eq!((agreed.linear, agreed.rate, agreed.channels), (true, 44_100, 2));
+        let agreed = answer_with(
+            &Sdp::parse(bare).unwrap(),
+            "192.0.2.2",
+            5000,
+            &[Law::Mu],
+            true,
+            20,
+        )
+        .unwrap()
+        .1;
+        assert_eq!(
+            (agreed.linear, agreed.rate, agreed.channels),
+            (true, 44_100, 2)
+        );
     }
 
     #[test]
@@ -1527,7 +1637,10 @@ mod tests {
         assert!(both.contains("m=audio 40006 RTP/AVP 8 0\r\n"), "{both}");
         // Asking for nothing gets both rather than an unusable m= line.
         let neither = offer("192.0.2.4", 40006, &[], 20, None);
-        assert!(neither.contains("m=audio 40006 RTP/AVP 0 8\r\n"), "{neither}");
+        assert!(
+            neither.contains("m=audio 40006 RTP/AVP 0 8\r\n"),
+            "{neither}"
+        );
     }
 
     #[test]
@@ -1627,7 +1740,10 @@ mod tests {
             "nonsense with no equals sign in it\r\n",
         );
         let sdp = Sdp::parse(text).unwrap();
-        assert_eq!(sdp.attribute("tool"), Some("something nobody here has heard of"));
+        assert_eq!(
+            sdp.attribute("tool"),
+            Some("something nobody here has heard of")
+        );
         let agreed = read_answer(&sdp, &[Law::Mu]).unwrap();
         assert_eq!(agreed.law, Law::Mu);
         assert_eq!(agreed.port, 19014);
@@ -1638,7 +1754,10 @@ mod tests {
         let sdp = Sdp::parse(RELAYED_ANSWER).unwrap();
         let audio = sdp.audio().unwrap();
         assert!(audio.has_attribute("rtcp-mux"));
-        assert!(audio.has_attribute("RTCP-MUX"), "names are case-insensitive");
+        assert!(
+            audio.has_attribute("RTCP-MUX"),
+            "names are case-insensitive"
+        );
         assert_eq!(audio.attribute("rtcp-mux"), None);
         assert!(!audio.has_attribute("rtcp-fb"));
     }
@@ -1735,7 +1854,10 @@ mod tests {
         assert_eq!(agreed.telephone_event, Some(96));
         assert_eq!(agreed.direction, Direction::ReceiveOnly);
         assert!(body.contains("m=audio 40020 RTP/AVP 8 96\r\n"), "{body}");
-        assert!(body.contains("a=rtpmap:96 telephone-event/8000\r\n"), "{body}");
+        assert!(
+            body.contains("a=rtpmap:96 telephone-event/8000\r\n"),
+            "{body}"
+        );
         // 3264 6.1: a sendonly offer is answered recvonly.
         assert!(body.contains("a=recvonly\r\n"), "{body}");
         // And what we wrote reads back as an answer we would accept.

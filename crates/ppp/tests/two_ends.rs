@@ -64,7 +64,10 @@ fn two_ends_agree_and_then_one_pings_the_other() {
     let _ = a.take_arrived();
     let _ = b.take_arrived();
 
-    assert!(a.ping(0x4269, 1, b"binmodem says hello"), "the ping was refused");
+    assert!(
+        a.ping(0x4269, 1, b"binmodem says hello"),
+        "the ping was refused"
+    );
     exchange(&mut a, &mut b, 50);
 
     // It arrived at the far end as a request...
@@ -119,7 +122,11 @@ fn each_ping_is_answered_with_its_own_sequence() {
         assert!(a.ping(0x1234, sequence, format!("ping {sequence}").as_bytes()));
         exchange(&mut a, &mut b, 20);
     }
-    let replies: Vec<_> = a.take_arrived().into_iter().filter(|p| p.echo.reply).collect();
+    let replies: Vec<_> = a
+        .take_arrived()
+        .into_iter()
+        .filter(|p| p.echo.reply)
+        .collect();
     assert_eq!(replies.len(), 8, "not every ping came back");
     for (i, reply) in replies.iter().enumerate() {
         let sequence = i as u16 + 1;
@@ -245,7 +252,9 @@ fn a_download_across(a: &mut Link, b: &mut Link) -> usize {
     let mut seq = 1000u32;
     let mut on_the_line = 0usize;
     for round in 0..ROUNDS {
-        let data: Vec<u8> = (0..PAYLOAD as u8).map(|i| i.wrapping_add(round as u8)).collect();
+        let data: Vec<u8> = (0..PAYLOAD as u8)
+            .map(|i| i.wrapping_add(round as u8))
+            .collect();
         assert!(a.send_payload(ppp::ip::PROTOCOL_TCP, &tcp_segment(seq, 5000, &data)));
         let wire = a.take_line();
         on_the_line += wire.len();
@@ -257,8 +266,14 @@ fn a_download_across(a: &mut Link, b: &mut Link) -> usize {
     assert_eq!(carried.len(), ROUNDS as usize, "not everything arrived");
     for (round, datagram) in carried.iter().enumerate() {
         assert_eq!(datagram.protocol, ppp::ip::PROTOCOL_TCP);
-        let expected: Vec<u8> = (0..PAYLOAD as u8).map(|i| i.wrapping_add(round as u8)).collect();
-        assert_eq!(&datagram.payload[20..], &expected[..], "round {round} came back wrong");
+        let expected: Vec<u8> = (0..PAYLOAD as u8)
+            .map(|i| i.wrapping_add(round as u8))
+            .collect();
+        assert_eq!(
+            &datagram.payload[20..],
+            &expected[..],
+            "round {round} came back wrong"
+        );
     }
     on_the_line
 }
@@ -277,8 +292,14 @@ fn header_compression_is_agreed_and_shrinks_what_crosses() {
     // RFC 1332 4: each direction is asked for separately, and between two of
     // these both are granted.
     let agreed = a.header_compression();
-    assert!(agreed.sending.is_some(), "nothing agreed towards the far end");
-    assert!(agreed.receiving.is_some(), "nothing agreed towards this end");
+    assert!(
+        agreed.sending.is_some(),
+        "nothing agreed towards the far end"
+    );
+    assert!(
+        agreed.receiving.is_some(),
+        "nothing agreed towards this end"
+    );
     assert_eq!(agreed.sending, b.header_compression().receiving);
 
     let compressed = a_download_across(&mut a, &mut b);
@@ -385,7 +406,13 @@ fn a_ping_crosses_a_compressed_link_untouched() {
 /// Frame a datagram the way a far end's router would put it on the line.
 fn framed(datagram: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::new();
-    ppp::Framer::new().frame(&ppp::Packet { protocol: ppp::protocol::IP, payload: datagram }, &mut out);
+    ppp::Framer::new().frame(
+        &ppp::Packet {
+            protocol: ppp::protocol::IP,
+            payload: datagram,
+        },
+        &mut out,
+    );
     out
 }
 
@@ -416,11 +443,20 @@ fn a_datagram_for_the_internet_is_addressed_to_the_internet() {
     let sent = datagrams_in(&caller.take_line());
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].from, [192, 168, 9, 40]);
-    assert_eq!(sent[0].to, web, "it went to the router rather than through it");
+    assert_eq!(
+        sent[0].to, web,
+        "it went to the router rather than through it"
+    );
     assert_eq!(sent[0].payload, b"a segment for a web server");
 
     // And the answer, from the web server, through the router.
-    let answer = ppp::ip::build(web, [192, 168, 9, 40], ppp::ip::PROTOCOL_TCP, b"the answer", 9);
+    let answer = ppp::ip::build(
+        web,
+        [192, 168, 9, 40],
+        ppp::ip::PROTOCOL_TCP,
+        b"the answer",
+        9,
+    );
     caller.feed(&framed(answer));
     let carried = caller.take_carried();
     assert_eq!(carried.len(), 1);
@@ -437,7 +473,13 @@ fn a_datagram_for_another_address_is_dropped_and_counted() {
     let mut router = Link::new([192, 168, 9, 1], [192, 168, 9, 40]).without_header_compression();
     let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]).without_header_compression();
     connect(&mut router, &mut caller, 30_000);
-    let stray = ppp::ip::build([93, 184, 216, 34], [192, 168, 9, 99], ppp::ip::PROTOCOL_TCP, b"not ours", 1);
+    let stray = ppp::ip::build(
+        [93, 184, 216, 34],
+        [192, 168, 9, 99],
+        ppp::ip::PROTOCOL_TCP,
+        b"not ours",
+        1,
+    );
     caller.feed(&framed(stray));
     assert!(caller.take_carried().is_empty());
     assert_eq!(caller.counters().dropped_in, 1);
@@ -451,13 +493,23 @@ fn a_datagram_the_far_end_would_not_take_is_not_sent() {
     let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]);
     connect(&mut router, &mut caller, 30_000);
     assert_eq!(router.mru().0, 576);
-    assert_eq!(caller.mru().1, 576, "the caller did not agree to the router's MRU");
+    assert_eq!(
+        caller.mru().1,
+        576,
+        "the caller did not agree to the router's MRU"
+    );
     assert_eq!(caller.mru().0, 1500);
 
     let web = [93, 184, 216, 34];
-    assert!(!caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 557]), "a 577 octet datagram was sent");
+    assert!(
+        !caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 557]),
+        "a 577 octet datagram was sent"
+    );
     assert_eq!(caller.counters().too_large, 1);
-    assert!(caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 556]), "a 576 octet one was not");
+    assert!(
+        caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 556]),
+        "a 576 octet one was not"
+    );
 }
 
 /// RFC 792: a router's word that a datagram of this end's went nowhere, with
@@ -469,12 +521,24 @@ fn a_router_saying_a_host_is_unreachable_is_reported() {
     connect(&mut router, &mut caller, 30_000);
 
     // The datagram that went nowhere: its header and eight octets of its data.
-    let original = ppp::ip::build([192, 168, 9, 40], [203, 0, 113, 7], ppp::ip::PROTOCOL_TCP, &[0u8; 20], 3);
+    let original = ppp::ip::build(
+        [192, 168, 9, 40],
+        [203, 0, 113, 7],
+        ppp::ip::PROTOCOL_TCP,
+        &[0u8; 20],
+        3,
+    );
     let mut icmp = vec![ppp::ip::DESTINATION_UNREACHABLE, 1, 0, 0, 0, 0, 0, 0];
     icmp.extend_from_slice(&original[..28]);
     let sum = ppp::ip::checksum(&icmp);
     icmp[2..4].copy_from_slice(&sum.to_be_bytes());
-    let datagram = ppp::ip::build([192, 168, 9, 1], [192, 168, 9, 40], ppp::ip::PROTOCOL_ICMP, &icmp, 4);
+    let datagram = ppp::ip::build(
+        [192, 168, 9, 1],
+        [192, 168, 9, 40],
+        ppp::ip::PROTOCOL_ICMP,
+        &icmp,
+        4,
+    );
     caller.feed(&framed(datagram));
 
     let problems = caller.take_problems();

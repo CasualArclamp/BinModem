@@ -444,7 +444,8 @@ impl Upstream {
             mode: Mode::Answer,
         };
         let decoder = UpDecoder::new(params);
-        self.rx.set_grid(decoder.grid_scale(), decoder.extent());
+        self.rx
+            .set_bent_grid(decoder.grid_scale(), decoder.extent(), decoder.bend());
         self.b1_left = framing.n;
         self.decoder = Some(decoder);
         self.stream.bps = Some(rate);

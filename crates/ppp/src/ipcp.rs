@@ -81,7 +81,10 @@ fn compression_params(value: &[u8]) -> Option<vj::Params> {
         1 => true,
         _ => return None,
     };
-    Some(vj::Params { max_slot, compress_slot })
+    Some(vj::Params {
+        max_slot,
+        compress_slot,
+    })
 }
 
 /// One end's view of the addresses.
@@ -190,8 +193,7 @@ impl Protocol for Ipcp {
                         } else {
                             theirs = Some(addr);
                         }
-                    } else if self.addresses.remote == UNSPECIFIED
-                        || self.addresses.remote == addr
+                    } else if self.addresses.remote == UNSPECIFIED || self.addresses.remote == addr
                     {
                         // Either this end had no opinion or the far end has
                         // named what this end was going to offer anyway.
@@ -320,7 +322,9 @@ mod tests {
                 value: vec![10, 0, 0, 2],
             }])
         );
-        let Review::Nak(counter) = review else { unreachable!() };
+        let Review::Nak(counter) = review else {
+            unreachable!()
+        };
         client.naked(&counter);
         assert_eq!(client.local(), [10, 0, 0, 2]);
 
@@ -381,8 +385,14 @@ mod tests {
     fn the_superseded_address_option_is_refused_outright() {
         let mut ipcp = Ipcp::new([10, 0, 0, 1], [10, 0, 0, 2]);
         let asking = vec![
-            ConfigOption { kind: option::IP_ADDRESSES, value: vec![10, 0, 0, 2, 10, 0, 0, 1] },
-            ConfigOption { kind: option::IP_ADDRESS, value: vec![10, 0, 0, 2] },
+            ConfigOption {
+                kind: option::IP_ADDRESSES,
+                value: vec![10, 0, 0, 2, 10, 0, 0, 1],
+            },
+            ConfigOption {
+                kind: option::IP_ADDRESS,
+                value: vec![10, 0, 0, 2],
+            },
         ];
         match ipcp.review(&asking) {
             Review::Reject(o) => {
@@ -399,13 +409,22 @@ mod tests {
     fn a_far_end_that_can_read_compressed_headers_gets_them() {
         let mut ipcp = Ipcp::new([10, 0, 0, 1], [10, 0, 0, 2]);
         let asking = vec![
-            ConfigOption { kind: option::IP_ADDRESS, value: vec![10, 0, 0, 2] },
-            ConfigOption { kind: option::IP_COMPRESSION, value: vec![0x00, 0x2d, 0x0f, 0x01] },
+            ConfigOption {
+                kind: option::IP_ADDRESS,
+                value: vec![10, 0, 0, 2],
+            },
+            ConfigOption {
+                kind: option::IP_COMPRESSION,
+                value: vec![0x00, 0x2d, 0x0f, 0x01],
+            },
         ];
         assert_eq!(ipcp.review(&asking), Review::Ack);
         assert_eq!(
             ipcp.compression.sending,
-            Some(vj::Params { max_slot: 15, compress_slot: true })
+            Some(vj::Params {
+                max_slot: 15,
+                compress_slot: true
+            })
         );
         // And nothing has been agreed in the other direction by that alone:
         // 4 negotiates each separately.
@@ -418,13 +437,22 @@ mod tests {
     fn the_slots_agreed_to_are_the_ones_the_far_end_asked_for() {
         let mut ipcp = Ipcp::new([10, 0, 0, 1], [10, 0, 0, 2]);
         let asking = vec![
-            ConfigOption { kind: option::IP_ADDRESS, value: vec![10, 0, 0, 2] },
-            ConfigOption { kind: option::IP_COMPRESSION, value: vec![0x00, 0x2d, 0x03, 0x00] },
+            ConfigOption {
+                kind: option::IP_ADDRESS,
+                value: vec![10, 0, 0, 2],
+            },
+            ConfigOption {
+                kind: option::IP_COMPRESSION,
+                value: vec![0x00, 0x2d, 0x03, 0x00],
+            },
         ];
         assert_eq!(ipcp.review(&asking), Review::Ack);
         assert_eq!(
             ipcp.compression.sending,
-            Some(vj::Params { max_slot: 3, compress_slot: false })
+            Some(vj::Params {
+                max_slot: 3,
+                compress_slot: false
+            })
         );
     }
 
@@ -441,7 +469,10 @@ mod tests {
             vec![0x00, 0x2d],
         ] {
             let mut ipcp = Ipcp::new([10, 0, 0, 1], [10, 0, 0, 2]);
-            let asking = vec![ConfigOption { kind: option::IP_COMPRESSION, value: value.clone() }];
+            let asking = vec![ConfigOption {
+                kind: option::IP_COMPRESSION,
+                value: value.clone(),
+            }];
             match ipcp.review(&asking) {
                 Review::Reject(o) => assert_eq!(o[0].kind, option::IP_COMPRESSION),
                 other => panic!("{value:02x?} got {other:?}"),
@@ -476,7 +507,13 @@ mod tests {
             kind: option::IP_COMPRESSION,
             value: vec![0x00, 0x2d, 0x03, 0x00],
         }]);
-        assert_eq!(ipcp.offering, Some(vj::Params { max_slot: 3, compress_slot: false }));
+        assert_eq!(
+            ipcp.offering,
+            Some(vj::Params {
+                max_slot: 3,
+                compress_slot: false
+            })
+        );
         let request = ipcp.request();
         assert_eq!(request[1].value, vec![0x00, 0x2d, 0x03, 0x00]);
     }
@@ -492,7 +529,10 @@ mod tests {
         // And an acknowledgement that came back without it, from a far end
         // that had already rejected it, settles nothing.
         let mut ipcp = Ipcp::new([10, 0, 0, 2], [10, 0, 0, 1]);
-        ipcp.acked(&[ConfigOption { kind: option::IP_ADDRESS, value: vec![10, 0, 0, 2] }]);
+        ipcp.acked(&[ConfigOption {
+            kind: option::IP_ADDRESS,
+            value: vec![10, 0, 0, 2],
+        }]);
         assert_eq!(ipcp.compression.receiving, None);
     }
 
@@ -509,7 +549,10 @@ mod tests {
     #[test]
     fn a_malformed_address_is_rejected() {
         let mut ipcp = Ipcp::new([10, 0, 0, 1], [10, 0, 0, 2]);
-        let asking = vec![ConfigOption { kind: option::IP_ADDRESS, value: vec![10, 0] }];
+        let asking = vec![ConfigOption {
+            kind: option::IP_ADDRESS,
+            value: vec![10, 0],
+        }];
         assert!(matches!(ipcp.review(&asking), Review::Reject(_)));
     }
 

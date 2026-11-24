@@ -36,12 +36,12 @@ use std::collections::VecDeque;
 use datapump::v32::Mode;
 use datapump::v34::data::{Decoder, Params};
 use datapump::v34::frame::Framing;
-use datapump::v34::trellis::Code;
 use datapump::v34::info::SymbolRate;
 use datapump::v34::mp::{Finder, Found};
 use datapump::v34::qam::Band;
 use datapump::v34::receiver::{Heard, Receiver, Reference};
 use datapump::v34::signals::{J_FOUR, J_PRIME, J_SIXTEEN, Reader, Size};
+use datapump::v34::trellis::Code;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -58,7 +58,12 @@ fn a_captured_end_of_phases_3_and_4() {
         println!("set V34_CAPTURE to a recording to run this");
         return;
     };
-    let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+    let number = |name: &str, default: f64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
     let channel = number("V34_CHANNEL", 0.0) as usize;
     let from = number("V34_FROM", 0.0);
     let to = number("V34_TO", 1e9);
@@ -67,7 +72,11 @@ fn a_captured_end_of_phases_3_and_4() {
         _ => Mode::Answer,
     };
     // Phase 4 is at sixteen points unless told otherwise.
-    let phase4_size = if number("V34_PHASE4_POINTS", 16.0) as u32 == 4 { Size::Four } else { Size::Sixteen };
+    let phase4_size = if number("V34_PHASE4_POINTS", 16.0) as u32 == 4 {
+        Size::Four
+    } else {
+        Size::Sixteen
+    };
     let rate = match number("V34_BAUD", 3429.0) as u32 {
         2400 => SymbolRate::S2400,
         2743 => SymbolRate::S2743,
@@ -83,13 +92,21 @@ fn a_captured_end_of_phases_3_and_4() {
     let samples = wav.channel(channel);
     let first = (from * fs) as usize;
     let last = ((to * fs) as usize).min(samples.len());
-    println!("{path} channel {channel}, {sender:?} modem's signal, {:.1} to {:.1} s", from, last as f64 / fs);
+    println!(
+        "{path} channel {channel}, {sender:?} modem's signal, {:.1} to {:.1} s",
+        from,
+        last as f64 / fs
+    );
 
     let mut rx = Receiver::new(band, fs);
     rx.hunt();
     // A rate renegotiation (11.6) is S, S-bar, TRN and MP at four points,
     // the way phase 4 is: `V34_RENEGOTIATION=1` starts there.
-    let mut stage = if number("V34_RENEGOTIATION", 0.0) != 0.0 { Stage::Phase4Hunt } else { Stage::Phase3Hunt };
+    let mut stage = if number("V34_RENEGOTIATION", 0.0) != 0.0 {
+        Stage::Phase4Hunt
+    } else {
+        Stage::Phase3Hunt
+    };
     let mut reader = Reader::new(sender);
     let mut finder = Finder::new();
     let mut size = Size::Four;
@@ -123,7 +140,9 @@ fn a_captured_end_of_phases_3_and_4() {
     let mut four_fit: VecDeque<f64> = VecDeque::new();
     // Equalised points between two times, for looking at.
     let (dump_from, dump_to) = (number("V34_DUMP_FROM", 0.0), number("V34_DUMP_TO", 0.0));
-    let mut dump = std::env::var("V34_DUMP").ok().map(|path| std::fs::File::create(path).expect("could not make the dump"));
+    let mut dump = std::env::var("V34_DUMP")
+        .ok()
+        .map(|path| std::fs::File::create(path).expect("could not make the dump"));
 
     for (i, &x) in samples[first..last].iter().enumerate() {
         let now = (first + i) as f64 / fs;
@@ -133,13 +152,28 @@ fn a_captured_end_of_phases_3_and_4() {
                 Heard::S => {}
                 Heard::Reversal { at } => {
                     println!("{now:8.3} S-bar");
-                    let reference = if stage == Stage::Phase3Hunt { Reference::PpThenTrn } else { Reference::Trn(phase4_size) };
+                    let reference = if stage == Stage::Phase3Hunt {
+                        Reference::PpThenTrn
+                    } else {
+                        Reference::Trn(phase4_size)
+                    };
                     rx.train(reference, sender, at);
                 }
                 Heard::Trained { snr_db } => {
-                    stage = if stage == Stage::Phase3Hunt { Stage::Phase3 } else { Stage::Phase4 };
+                    stage = if stage == Stage::Phase3Hunt {
+                        Stage::Phase3
+                    } else {
+                        Stage::Phase4
+                    };
                     size = rx.size();
-                    println!("{now:8.3} trained on {:?} to {snr_db:.1} dB", if stage == Stage::Phase3 { "PP and TRN" } else { "phase 4 TRN" });
+                    println!(
+                        "{now:8.3} trained on {:?} to {snr_db:.1} dB",
+                        if stage == Stage::Phase3 {
+                            "PP and TRN"
+                        } else {
+                            "phase 4 TRN"
+                        }
+                    );
                     trn = true;
                     grace = 24 / size.bits() + 1;
                     trn_symbols = 0;
@@ -159,7 +193,8 @@ fn a_captured_end_of_phases_3_and_4() {
                     }
                     if e_seen && data.is_none() {
                         let params = Params {
-                            framing: Framing::new(rate, data_rate, false, expanded).expect("a rate Table 8 has"),
+                            framing: Framing::new(rate, data_rate, false, expanded)
+                                .expect("a rate Table 8 has"),
                             code,
                             nonlinear,
                             precoding: [(0, 0); 3],
@@ -167,7 +202,10 @@ fn a_captured_end_of_phases_3_and_4() {
                         };
                         let decoder = Decoder::new(params);
                         rx.set_grid(decoder.grid_scale(), decoder.extent());
-                        println!("{now:8.3} B1 and data at {data_rate} from here, grid scale {:.2}", decoder.grid_scale());
+                        println!(
+                            "{now:8.3} B1 and data at {data_rate} from here, grid scale {:.2}",
+                            decoder.grid_scale()
+                        );
                         data = Some(decoder);
                     }
                     if let Some(dump) = dump.as_mut()
@@ -175,17 +213,28 @@ fn a_captured_end_of_phases_3_and_4() {
                     {
                         use std::io::Write;
                         let (scale, grid) = data.as_ref().map_or((1.0, 0), |d| (d.grid_scale(), 1));
-                        writeln!(dump, "{now:.5},{:.4},{:.4},{:.5},{grid}", symbol.point.re * scale, symbol.point.im * scale, symbol.error).unwrap();
+                        writeln!(
+                            dump,
+                            "{now:.5},{:.4},{:.4},{:.5},{grid}",
+                            symbol.point.re * scale,
+                            symbol.point.im * scale,
+                            symbol.error
+                        )
+                        .unwrap();
                     }
                     if data.is_some() {
                         let corner = std::f64::consts::FRAC_1_SQRT_2;
-                        let off = (symbol.point.re.abs() - corner).powi(2) + (symbol.point.im.abs() - corner).powi(2);
+                        let off = (symbol.point.re.abs() - corner).powi(2)
+                            + (symbol.point.im.abs() - corner).powi(2);
                         four_fit.push_back(off);
                         if four_fit.len() > 48 {
                             four_fit.pop_front();
                         }
                         if four_fit.len() == 48 && four_fit.iter().sum::<f64>() / 48.0 < 0.02 {
-                            println!("{now:8.3} four points again, after {} data bits: S, TRN and MP of a renegotiation", data_bits.len());
+                            println!(
+                                "{now:8.3} four points again, after {} data bits: S, TRN and MP of a renegotiation",
+                                data_bits.len()
+                            );
                             data = None;
                             four_fit.clear();
                             size = Size::Four;
@@ -215,7 +264,8 @@ fn a_captured_end_of_phases_3_and_4() {
                                 rx.snr_db(),
                                 decoder.path_cost(),
                                 data_bits.len(),
-                                recent.iter().filter(|b| **b).count() as f64 / recent.len().max(1) as f64,
+                                recent.iter().filter(|b| **b).count() as f64
+                                    / recent.len().max(1) as f64,
                                 rx.drift_ppm()
                             );
                         }
@@ -238,12 +288,19 @@ fn a_captured_end_of_phases_3_and_4() {
                     let mean = errors.iter().sum::<f64>() / errors.len() as f64;
                     if now - last_report > 0.25 {
                         last_report = now;
-                        println!("{now:8.3}   {:.1} dB, {} points, drift {:+.0} ppm", -10.0 * mean.log10(), if size == Size::Four { 4 } else { 16 }, rx.drift_ppm());
+                        println!(
+                            "{now:8.3}   {:.1} dB, {} points, drift {:+.0} ppm",
+                            -10.0 * mean.log10(),
+                            if size == Size::Four { 4 } else { 16 },
+                            rx.drift_ppm()
+                        );
                     }
                     // The end fell silent: phase 3's J is over, and phase 4's
                     // S is next.
                     if stage == Stage::Phase3 && j_seen && errors.len() == 64 && mean > 0.3 {
-                        println!("{now:8.3} gone quiet after {symbols} symbols; hunting for phase 4's S");
+                        println!(
+                            "{now:8.3} gone quiet after {symbols} symbols; hunting for phase 4's S"
+                        );
                         stage = Stage::Phase4Hunt;
                         rx.hunt();
                         errors.clear();
@@ -264,11 +321,19 @@ fn a_captured_end_of_phases_3_and_4() {
                         reader = before;
                         trn = false;
                     }
-                    let (trace_from, trace_to) = (number("V34_TRACE_FROM", 0.0), number("V34_TRACE_TO", 0.0));
+                    let (trace_from, trace_to) =
+                        (number("V34_TRACE_FROM", 0.0), number("V34_TRACE_TO", 0.0));
                     if (trace_from..trace_to).contains(&now) {
                         let mut probe = reader.clone();
-                        let bits: String = probe.differential(symbol.decided, size).iter().map(|b| if *b { '1' } else { '0' }).collect();
-                        println!("{now:9.4} {:+.3}{:+.3}j decided {:?} error {:.4} bits {bits}", symbol.point.re, symbol.point.im, symbol.decided, symbol.error);
+                        let bits: String = probe
+                            .differential(symbol.decided, size)
+                            .iter()
+                            .map(|b| if *b { '1' } else { '0' })
+                            .collect();
+                        println!(
+                            "{now:9.4} {:+.3}{:+.3}j decided {:?} error {:.4} bits {bits}",
+                            symbol.point.re, symbol.point.im, symbol.decided, symbol.error
+                        );
                     }
                     for bit in reader.differential(symbol.decided, size) {
                         if let Some(tail) = after_e.as_mut()
@@ -276,7 +341,8 @@ fn a_captured_end_of_phases_3_and_4() {
                         {
                             tail.push(bit);
                             if tail.len() == 400 {
-                                let text: String = tail.iter().map(|b| if *b { '1' } else { '0' }).collect();
+                                let text: String =
+                                    tail.iter().map(|b| if *b { '1' } else { '0' }).collect();
                                 println!("{now:8.3} 400 bits after E:");
                                 for chunk in text.as_bytes().chunks(80) {
                                     println!("           {}", std::str::from_utf8(chunk).unwrap());
@@ -291,7 +357,10 @@ fn a_captured_end_of_phases_3_and_4() {
                             Some(Found::Mp(mp)) => {
                                 mp_count += 1;
                                 if mp_count <= 3 || mp.acknowledge {
-                                    println!("{now:8.3} MP{} #{mp_count}: {mp:?}", if mp.acknowledge { "'" } else { "" });
+                                    println!(
+                                        "{now:8.3} MP{} #{mp_count}: {mp:?}",
+                                        if mp.acknowledge { "'" } else { "" }
+                                    );
                                 }
                             }
                             Some(Found::E) if mp_count > 0 && after_e.is_none() => {
@@ -329,14 +398,26 @@ fn a_captured_end_of_phases_3_and_4() {
     }
     println!("{mp_count} MP sequences in all");
     if !data_bits.is_empty() {
-        let text: String = data_bits.iter().take(2400).map(|b| if *b { '1' } else { '0' }).collect();
+        let text: String = data_bits
+            .iter()
+            .take(2400)
+            .map(|b| if *b { '1' } else { '0' })
+            .collect();
         println!("the first data bits:");
         for chunk in text.as_bytes().chunks(100) {
             println!("  {}", std::str::from_utf8(chunk).unwrap());
         }
         let ones = data_bits.iter().filter(|b| **b).count();
-        let flags = data_bits.windows(8).filter(|w| *w == [false, true, true, true, true, true, true, false]).count();
-        println!("{} data bits, {} ones, {} HDLC flags", data_bits.len(), ones, flags);
+        let flags = data_bits
+            .windows(8)
+            .filter(|w| *w == [false, true, true, true, true, true, true, false])
+            .count();
+        println!(
+            "{} data bits, {} ones, {} HDLC flags",
+            data_bits.len(),
+            ones,
+            flags
+        );
         // What V.42 made of it: frames whose FCS checks, and the ones that
         // did not.
         let mut hdlc = ec::hdlc::Decoder::new(ec::hdlc::Fcs::Bits16);
@@ -347,7 +428,11 @@ fn a_captured_end_of_phases_3_and_4() {
                 Some(Ok(frame)) => {
                     good += 1;
                     if good <= 6 {
-                        println!("  frame of {} octets: {:02x?}", frame.len(), &frame[..frame.len().min(24)]);
+                        println!(
+                            "  frame of {} octets: {:02x?}",
+                            frame.len(),
+                            &frame[..frame.len().min(24)]
+                        );
                     }
                 }
                 Some(Err(e)) => {
@@ -361,7 +446,10 @@ fn a_captured_end_of_phases_3_and_4() {
         }
         println!("{good} frames checked, {bad} did not");
         if let Ok(path) = std::env::var("V34_BITS") {
-            let text: String = data_bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
+            let text: String = data_bits
+                .iter()
+                .map(|b| if *b { '1' } else { '0' })
+                .collect();
             std::fs::write(path, text).unwrap();
         }
     }
@@ -384,7 +472,10 @@ fn a_captured_call_through_the_start_up() {
         println!("set V34_CAPTURE to a recording to run this");
         return;
     };
-    let skip = std::env::var("V34_SKIP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let skip = std::env::var("V34_SKIP")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
     let role = match std::env::var("V34_ROLE").as_deref() {
         Ok("answer") => Role::Answer,
         _ => Role::Call,
@@ -393,7 +484,10 @@ fn a_captured_call_through_the_start_up() {
     let fs = f64::from(wav.sample_rate);
     // Channel 0 unless told: channel 1, with `V34_ROLE` the other way round,
     // is this end's own signal heard as the far end heard it.
-    let channel = std::env::var("V34_CHANNEL").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let channel = std::env::var("V34_CHANNEL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
     let samples = wav.channel(channel);
     let mut modem = Modem::new(role, fs);
     let (mut phase, mut status) = ("", Status::Running);
@@ -413,7 +507,10 @@ fn a_captured_call_through_the_start_up() {
             && training.slips() != slips
         {
             slips = training.slips();
-            println!("{now:8.3} a slip followed ({slips} so far), {:.1} dB", training.snr());
+            println!(
+                "{now:8.3} a slip followed ({slips} so far), {:.1} dB",
+                training.snr()
+            );
         }
         if let Some(training) = modem.training()
             && matches!(status, Status::Connected { .. } | Status::Retraining)
@@ -429,7 +526,9 @@ fn a_captured_call_through_the_start_up() {
                 training.path_cost(),
                 training.snr(),
                 training.slips(),
-                training.far_mp().map(|m| (m.call_to_answer, m.answer_to_call, m.acknowledge)),
+                training
+                    .far_mp()
+                    .map(|m| (m.call_to_answer, m.answer_to_call, m.acknowledge)),
             );
         }
     }
@@ -453,7 +552,12 @@ fn every_info_sequence_in_a_capture() {
         println!("set V34_CAPTURE to a recording to run this");
         return;
     };
-    let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+    let number = |name: &str, default: f64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
     let channel = number("V34_CHANNEL", 0.0) as usize;
     let side = match std::env::var("V34_SENDER").as_deref() {
         Ok("call") => Side::Call,

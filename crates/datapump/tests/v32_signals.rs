@@ -55,7 +55,10 @@ fn a_repeated_state_is_the_bare_carrier() {
     // changes never turns the phasor, so nothing is left but the carrier.
     for signal in [Signal::StateA, Signal::StateC] {
         let (carrier, low, high, elsewhere) = lines(&emit(signal));
-        assert!(carrier > 0.5, "{signal:?} carries only {carrier:.3} at 1800 Hz");
+        assert!(
+            carrier > 0.5,
+            "{signal:?} carries only {carrier:.3} at 1800 Hz"
+        );
         for (name, level) in [("600", low), ("3000", high), ("elsewhere", elsewhere)] {
             assert!(
                 level < carrier / 20.0,
@@ -74,7 +77,10 @@ fn alternating_opposite_states_suppresses_the_carrier() {
     // opposite and average to nothing.
     for signal in [Signal::AlternateAC, Signal::AlternateCA] {
         let (carrier, low, high, elsewhere) = lines(&emit(signal));
-        assert!(low > 0.3 && high > 0.3, "{signal:?}: {low:.3} and {high:.3}");
+        assert!(
+            low > 0.3 && high > 0.3,
+            "{signal:?}: {low:.3} and {high:.3}"
+        );
         assert!(
             (low / high).max(high / low) < 1.2,
             "{signal:?} is lopsided: {low:.3} against {high:.3}"
@@ -101,8 +107,14 @@ fn the_conditioning_signal_leaves_the_carrier_standing() {
             "{signal:?} suppressed the carrier at {carrier:.4}, which only an \
              opposite pair should do"
         );
-        assert!(low > 0.2 && high > 0.2, "{signal:?}: {low:.3} and {high:.3}");
-        assert!(elsewhere < carrier / 20.0, "{signal:?} spills {elsewhere:.4}");
+        assert!(
+            low > 0.2 && high > 0.2,
+            "{signal:?}: {low:.3} and {high:.3}"
+        );
+        assert!(
+            elsewhere < carrier / 20.0,
+            "{signal:?} spills {elsewhere:.4}"
+        );
     }
 }
 
@@ -275,7 +287,14 @@ fn a_v32_far_end_is_read_and_answered_by_the_older_table() {
         usable_rate,
     };
     // 4800 and 9600, with trellis, and none of V.32bis.
-    let theirs = rate_signal_v32(Rates { at_4800: true, at_9600: true, ..Rates::default() }, true);
+    let theirs = rate_signal_v32(
+        Rates {
+            at_4800: true,
+            at_9600: true,
+            ..Rates::default()
+        },
+        true,
+    );
     assert!(!is_v32bis(theirs));
     let rates = rates_offered(theirs);
     assert!(rates.at_4800 && rates.at_9600);
@@ -301,8 +320,14 @@ fn a_v32_far_end_is_read_and_answered_by_the_older_table() {
 fn a_far_end_without_trellis_gets_the_other_9600() {
     use datapump::v32::Coding;
     use datapump::v32::startup::{agreed_coding, rate_signal, rate_signal_v32, usable_rate};
-    let theirs =
-        rate_signal_v32(Rates { at_4800: true, at_9600: true, ..Rates::default() }, false);
+    let theirs = rate_signal_v32(
+        Rates {
+            at_4800: true,
+            at_9600: true,
+            ..Rates::default()
+        },
+        false,
+    );
     let ours = rate_signal(Rates::between(4800, 14_400));
     assert_eq!(usable_rate(theirs, ours), 9600);
     assert_eq!(agreed_coding(theirs, ours, 9600), Coding::Uncoded);

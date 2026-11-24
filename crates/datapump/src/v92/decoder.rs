@@ -71,9 +71,18 @@ fn trace_etas(decoder: &Decoder, stage: u64, etas: [i32; TRELLIS_FRAME]) {
     // reader does not have to be told K and the moduli separately.
     if file.metadata().map(|meta| meta.len()).unwrap_or(1) == 0 {
         let moduli: Vec<String> = decoder.moduli.values().iter().map(u8::to_string).collect();
-        let _ = writeln!(file, "k {} moduli {}", decoder.bits_per_frame, moduli.join(" "));
+        let _ = writeln!(
+            file,
+            "k {} moduli {}",
+            decoder.bits_per_frame,
+            moduli.join(" ")
+        );
     }
-    let _ = writeln!(file, "{stage} {} {} {} {}", etas[0], etas[1], etas[2], etas[3]);
+    let _ = writeln!(
+        file,
+        "{stage} {} {} {} {}",
+        etas[0], etas[1], etas[2], etas[3]
+    );
 }
 
 /// The cheapest index of one symbol in each residue class modulo 4, which is
@@ -86,7 +95,10 @@ struct Bests {
 
 impl Default for Bests {
     fn default() -> Self {
-        Self { cost: [f64::MAX; 4], eta: [0; 4] }
+        Self {
+            cost: [f64::MAX; 4],
+            eta: [0; 4],
+        }
     }
 }
 
@@ -94,7 +106,9 @@ impl Bests {
     fn new(set: &Constellation, level: f64) -> Self {
         let mut bests = Self::default();
         for eta in set.lowest()..=set.highest() {
-            let Some(point) = set.level(eta) else { continue };
+            let Some(point) = set.level(eta) else {
+                continue;
+            };
             let residue = eta.rem_euclid(4) as usize;
             let cost = (level - point) * (level - point);
             if cost < bests.cost[residue] {
@@ -217,7 +231,9 @@ impl Decoder {
 
     /// The rung of 6.1's ladder this decoder was built for.
     pub fn drn(&self) -> u8 {
-        (1..=UP_RATES as u8).find(|&drn| up_bits(drn) == self.bits_per_frame).unwrap_or(0)
+        (1..=UP_RATES as u8)
+            .find(|&drn| up_bits(drn) == self.bits_per_frame)
+            .unwrap_or(0)
     }
 
     /// This frame's branch metrics, and one trellis step.
@@ -258,7 +274,9 @@ impl Decoder {
             // on noise.
             self.stages.clear();
             self.back.clear();
-            self.metrics.iter_mut().for_each(|metric| *metric = f64::MAX);
+            self.metrics
+                .iter_mut()
+                .for_each(|metric| *metric = f64::MAX);
             self.metrics[0] = 0.0;
             return;
         }
@@ -297,7 +315,10 @@ impl Decoder {
         for step in self.back.iter().rev() {
             state = step[usize::from(state)].0;
         }
-        let stage = self.stages.pop_front().expect("a stage is held before one is decided");
+        let stage = self
+            .stages
+            .pop_front()
+            .expect("a stage is held before one is decided");
         self.back.pop_front();
         let out = usize::from(self.code.output(state));
         let mut chosen = (f64::MAX, 0usize);
@@ -317,7 +338,8 @@ impl Decoder {
             etas[k] = stage.bests[k].eta[residue.rem_euclid(4) as usize];
         }
         debug_assert_eq!(
-            trellis::convert(label_of(etas[0], etas[1]), label_of(etas[2], etas[3])) & self.code.inputs(),
+            trellis::convert(label_of(etas[0], etas[1]), label_of(etas[2], etas[3]))
+                & self.code.inputs(),
             chosen.1 as u8,
             "the indices decided on do not carry the inputs the path took"
         );
@@ -339,9 +361,13 @@ impl Decoder {
             let modulus = self.moduli.modulus(interval);
             self.labels.push(index_to_ki(eta, modulus, k));
             if self.labels.len() == UP_INTERVALS {
-                let labels: [u8; UP_INTERVALS] =
-                    std::mem::take(&mut self.labels).try_into().expect("twelve intervals");
-                if let Ok(frame) = self.modulus.decode(&labels, &self.moduli, self.bits_per_frame) {
+                let labels: [u8; UP_INTERVALS] = std::mem::take(&mut self.labels)
+                    .try_into()
+                    .expect("twelve intervals");
+                if let Ok(frame) = self
+                    .modulus
+                    .decode(&labels, &self.moduli, self.bits_per_frame)
+                {
                     for bit in frame.bits() {
                         let out = self.descrambler.descramble(bit);
                         self.bits.push(out);
@@ -358,7 +384,12 @@ impl Decoder {
 /// label depends only on 2 x eta mod 8, and because the fourth index's parity
 /// is fixed by the first three and Y0 (6.4.2's class at k = 3).
 fn build(bests: &[Bests; TRELLIS_FRAME], code: Code) -> Stage {
-    let mut stage = Stage { table: [f64::MAX; 32], residues: [[(0, 0, 0, 0); 16]; 2], bests: *bests, index: 0 };
+    let mut stage = Stage {
+        table: [f64::MAX; 32],
+        residues: [[(0, 0, 0, 0); 16]; 2],
+        bests: *bests,
+        index: 0,
+    };
     for out in 0..2usize {
         for y in 0..16usize {
             if y & !code.inputs() as usize != 0 {
@@ -393,8 +424,10 @@ fn build(bests: &[Bests; TRELLIS_FRAME], code: Code) -> Stage {
                             if trellis::convert(first, second) & code.inputs() != y as u8 {
                                 continue;
                             }
-                            let total =
-                                bests[0].cost[r0] + bests[1].cost[r1] + bests[2].cost[r2] + bests[3].cost[r3];
+                            let total = bests[0].cost[r0]
+                                + bests[1].cost[r1]
+                                + bests[2].cost[r2]
+                                + bests[3].cost[r3];
                             if total < cost {
                                 cost = total;
                                 chosen = (r0 as i32, r1 as i32, r2 as i32, r3 as i32);
@@ -428,7 +461,10 @@ mod tests {
             extend_e2u: false,
             gain: 1.0,
             moduli: [1u8 << (up_bits(drn) / UP_INTERVALS as u32); UP_INTERVALS],
-            filters: Filters { z2: vec![1.0], ..Filters::default() },
+            filters: Filters {
+                z2: vec![1.0],
+                ..Filters::default()
+            },
             sets: vec![(0..64).map(|index| (2 * index + 1) as u16).collect()],
             indices: [0; CONSTELLATION_FRAME],
         }
@@ -476,11 +512,17 @@ mod tests {
                 }
                 assert_eq!(decoder.drn(), drn, "{trellis:?}");
                 assert_eq!(decoder.rate(), crate::v92::up_rate(drn), "{trellis:?}");
-                assert!(!received.is_empty(), "{trellis:?} drn {drn}: nothing decoded");
+                assert!(
+                    !received.is_empty(),
+                    "{trellis:?} drn {drn}: nothing decoded"
+                );
                 // The decoder's output starts SURVIVOR_DEPTH frames late, so
                 // the two streams are compared from where they line up.
                 let (skipped, errors) = align(&sent, &received);
-                assert!(skipped.is_some(), "{trellis:?} drn {drn}: the streams do not line up");
+                assert!(
+                    skipped.is_some(),
+                    "{trellis:?} drn {drn}: the streams do not line up"
+                );
                 assert_eq!(errors, 0, "{trellis:?} drn {drn}: {errors} bits wrong");
             }
         }
@@ -492,24 +534,41 @@ mod tests {
         let shortest = sent.len().min(received.len());
         let at = (0..shortest.min(300)).find(|&offset| {
             let length = shortest - offset;
-            length > 64 && sent[offset..offset + length].iter().zip(&received[..length]).all(|(a, b)| a == b)
+            length > 64
+                && sent[offset..offset + length]
+                    .iter()
+                    .zip(&received[..length])
+                    .all(|(a, b)| a == b)
         });
         if at.is_none() {
             let mut best = (usize::MAX, 0usize);
             for offset in 0..shortest.min(400) {
                 let length = shortest - offset;
-                let errors = sent[offset..offset + length].iter().zip(&received[..length]).filter(|(a, b)| a != b).count();
-                if errors < best.0 { best = (errors, offset); }
+                let errors = sent[offset..offset + length]
+                    .iter()
+                    .zip(&received[..length])
+                    .filter(|(a, b)| a != b)
+                    .count();
+                if errors < best.0 {
+                    best = (errors, offset);
+                }
             }
             eprintln!("align: shortest {shortest} best {best:?} (errors, offset)");
         }
         match at {
             Some(offset) => {
                 let length = shortest - offset;
-                let errors = sent[offset..].iter().zip(&received[..length]).filter(|(a, b)| a != b).count();
+                let errors = sent[offset..]
+                    .iter()
+                    .zip(&received[..length])
+                    .filter(|(a, b)| a != b)
+                    .count();
                 (Some(offset), errors)
             }
-            None => (None, sent.iter().zip(received).filter(|(a, b)| a != b).count()),
+            None => (
+                None,
+                sent.iter().zip(received).filter(|(a, b)| a != b).count(),
+            ),
         }
     }
 
@@ -534,11 +593,22 @@ mod tests {
             }
             decoded += got;
         }
-        assert_eq!(decoded % bits, 0, "{decoded} bits are not whole data frames");
-        assert!(early >= SURVIVOR_DEPTH * TRELLIS_FRAME, "bits came out before the window was past");
+        assert_eq!(
+            decoded % bits,
+            0,
+            "{decoded} bits are not whole data frames"
+        );
+        assert!(
+            early >= SURVIVOR_DEPTH * TRELLIS_FRAME,
+            "bits came out before the window was past"
+        );
         // 480 symbols are 120 trellis frames, forty of which the window holds,
         // so thirty data frames at most and a few short of that in practice.
-        assert!(decoded >= bits * 20, "{decoded} bits from {} symbols", decoder.symbols());
+        assert!(
+            decoded >= bits * 20,
+            "{decoded} bits from {} symbols",
+            decoder.symbols()
+        );
         let _: fn(&Parameters) -> Result<Chain, &'static str> = Chain::new;
     }
 
@@ -554,10 +624,12 @@ mod tests {
         for _ in 0..(SURVIVOR_DEPTH * 4 * UP_INTERVALS) {
             decoder.feed(0.0);
         }
-        assert_eq!(decoder.symbols(), (SURVIVOR_DEPTH * 4 * UP_INTERVALS) as u64);
+        assert_eq!(
+            decoder.symbols(),
+            (SURVIVOR_DEPTH * 4 * UP_INTERVALS) as u64
+        );
         assert!(decoder.stages.len() <= SURVIVOR_DEPTH);
         assert!(decoder.back.len() <= SURVIVOR_DEPTH);
         let _ = decoder.take_bits();
     }
 }
-

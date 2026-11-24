@@ -154,7 +154,14 @@ pub enum Slicer {
     /// Every odd grid point out to `limit`, a unit-power symbol being `scale`
     /// grid units: data mode, whose trellis decoder makes the real decisions
     /// some symbols later than the loops can wait.
-    Grid { scale: f64, limit: i32 },
+    ///
+    /// `bend` is theta over the constellation's average energy where the far
+    /// end encodes non-linearly (9.7), and zero where it does not. A point
+    /// sent that way is not on the grid: it is moved out by more the further
+    /// out it is, a tenth and more at the edge, and a slicer that takes the
+    /// grid as it stands decides the outer points wrong and teaches every
+    /// loop to pull them in.
+    Grid { scale: f64, limit: i32, bend: f64 },
 }
 
 impl Slicer {
@@ -162,10 +169,22 @@ impl Slicer {
     fn decide(self, z: Complex) -> (Point, Complex) {
         match self {
             Self::Points(size) => decide(z, size),
-            Self::Grid { scale, limit } => {
-                let odd = |v: f64| (2 * ((v * scale - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
-                let point = (odd(z.re), odd(z.im));
-                (point, Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale))
+            Self::Grid { scale, limit, bend } => {
+                // Phi of 9-34.
+                let phi = |zeta: f64| 1.0 + zeta / 6.0 + zeta * zeta / 120.0;
+                let arrived = z.scale(scale);
+                // The stretch taken back out: a point bent out by phi of its
+                // own energy is brought back by phi of the unbent one's.
+                let mut flat = arrived;
+                if bend > 0.0 {
+                    for _ in 0..crate::v34::data::UNBENT {
+                        flat = arrived.scale(1.0 / phi(bend * flat.norm_sqr()));
+                    }
+                }
+                let odd = |v: f64| (2 * ((v - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+                let point = (odd(flat.re), odd(flat.im));
+                let ideal = Complex::new(f64::from(point.0), f64::from(point.1));
+                (point, ideal.scale(phi(bend * ideal.norm_sqr()) / scale))
             }
         }
     }
@@ -278,9 +297,13 @@ pub enum Heard {
     S,
     /// S, and then the change to S-bar. `at` is the half-symbol sample S-bar
     /// is reckoned to start at, give or take one.
-    Reversal { at: u64 },
+    Reversal {
+        at: u64,
+    },
     /// Trained, with the signal to noise the training left.
-    Trained { snr_db: f64 },
+    Trained {
+        snr_db: f64,
+    },
     /// Nothing trained: the sequence was not where S-bar said. After PP alone
     /// the receiver is hunting again already, from just after that S-bar, and
     /// what it hears there follows this.
@@ -303,7 +326,12 @@ pub struct Symbol {
 enum Mode3 {
     Idle,
     Hunting(Hunt),
-    Collecting { reference: Reference, far: Mode, start: u64, second: bool },
+    Collecting {
+        reference: Reference,
+        far: Mode,
+        start: u64,
+        second: bool,
+    },
     Trained,
 }
 
@@ -357,7 +385,10 @@ impl Hunt {
             if self.matches.len() > 4 {
                 self.matches.pop_front();
             }
-            let (along, power) = self.matches.iter().fold((0.0, 0.0), |(a, p), &(x, y)| (a + x, p + y));
+            let (along, power) = self
+                .matches
+                .iter()
+                .fold((0.0, 0.0), |(a, p), &(x, y)| (a + x, p + y));
             let ratio = along / power.max(1e-12);
             if self.matches.len() == 4 && ratio < -0.5 {
                 // The first of the four that turned it.
@@ -386,8 +417,10 @@ impl Hunt {
             if self.correlations.len() > 8 {
                 self.correlations.pop_front();
             }
-            let (sum_c, sum_p) =
-                self.correlations.iter().fold((Complex::ZERO, 0.0), |(sc, sp), &(c, p)| (sc + c, sp + p));
+            let (sum_c, sum_p) = self
+                .correlations
+                .iter()
+                .fold((Complex::ZERO, 0.0), |(sc, sp), &(c, p)| (sc + c, sp + p));
             let s_like = sum_c.re > 0.7 * sum_p && sum_p / self.correlations.len() as f64 > AUDIBLE;
             if s_like {
                 self.held += 1;
@@ -454,6 +487,10 @@ pub struct Receiver {
     next_symbol: u64,
     size: Size,
     slicer: Slicer,
+    /// Where the far end precodes (9.6.2): the coefficients it was sent, and
+    /// the last three symbols as they were taken to have been sent, in grid
+    /// units, newest first. See [`Self::set_precoded_grid`].
+    precoded: Option<([Complex; 3], [Complex; 3])>,
     /// Carrier phase to take out of the next symbol, and its turn a symbol,
     /// in radians.
     rotation: f64,
@@ -507,11 +544,20 @@ impl Receiver {
         for ph in 0..FILTER_PHASES {
             let row = &mut table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
             for (i, tap) in row.iter_mut().enumerate() {
-                let tau = ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
+                let tau =
+                    ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
                 let x = 2.0 * cutoff * tau / fs;
-                let sinc = if x.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                let sinc = if x.abs() < 1e-12 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
                 let edge = (FILTER_TAPS / 2) as f64;
-                let taper = if tau.abs() >= edge { 0.0 } else { kaiser(tau / edge, 8.0) };
+                let taper = if tau.abs() >= edge {
+                    0.0
+                } else {
+                    kaiser(tau / edge, 8.0)
+                };
                 *tap = sinc * taper;
             }
             let sum: f64 = row.iter().sum();
@@ -542,6 +588,7 @@ impl Receiver {
             next_symbol: 0,
             size: Size::Four,
             slicer: Slicer::Points(Size::Four),
+            precoded: None,
             rotation: 0.0,
             turn: 0.0,
             slope: 1.0,
@@ -597,7 +644,12 @@ impl Receiver {
     /// is B1's first, is not made until the half-symbol sample after that.
     pub fn train(&mut self, reference: Reference, far: Mode, s_bar: u64) {
         let start = s_bar + 2 * signals::S_BAR_SYMBOLS as u64;
-        self.mode = Mode3::Collecting { reference, far, start, second: false };
+        self.mode = Mode3::Collecting {
+            reference,
+            far,
+            start,
+            second: false,
+        };
         if let Some(size) = reference.trn() {
             self.size = size;
             self.slicer = Slicer::Points(size);
@@ -647,7 +699,72 @@ impl Receiver {
     /// Decide against data mode's grid from here on: `scale` grid units to a
     /// unit-power symbol, out to `limit`.
     pub fn set_grid(&mut self, scale: f64, limit: i32) {
-        self.set_slicer(Slicer::Grid { scale, limit });
+        self.set_slicer(Slicer::Grid {
+            scale,
+            limit,
+            bend: 0.0,
+        });
+    }
+
+    /// The same for a far end that encodes non-linearly: `bend` is theta over
+    /// the average energy of its constellation in grid units, which is
+    /// [`crate::v34::data::Decoder::bend`].
+    pub fn set_bent_grid(&mut self, scale: f64, limit: i32, bend: f64) {
+        self.set_slicer(Slicer::Grid { scale, limit, bend });
+    }
+
+    /// The same again for a far end that precodes: `h` is h(1), h(2) and h(3)
+    /// as the MP it was sent carries them, 14 bits after the point, and this
+    /// is called for B1's first symbol, where the precoder's memory is empty.
+    ///
+    /// A precoded symbol is a point of the grid less what a channel of
+    /// 1 + h(1) z^-1 + h(2) z^-2 + h(3) z^-3 would have added to it from the
+    /// three before, which with coefficients of a few hundredths and symbols
+    /// forty grid units out is a grid step or several. This equaliser makes
+    /// the channel flat, so what it puts out is that and not a point, and a
+    /// slicer with no memory decides it wrong and takes every loop with it.
+    /// So the decision is made with the channel put in from the symbols
+    /// already decided, and what the symbol should have been is the point
+    /// found less the same.
+    pub fn set_precoded_grid(&mut self, scale: f64, limit: i32, bend: f64, h: [(i16, i16); 3]) {
+        self.set_slicer(Slicer::Grid { scale, limit, bend });
+        let h = h.map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0));
+        if h.iter().any(|c| c.norm_sqr() > 0.0) {
+            self.precoded = Some((h, [Complex::ZERO; 3]));
+        }
+    }
+
+    /// The nearest point to `z` and where it would have arrived, by the
+    /// slicer, or with the far end's precoding allowed for.
+    fn decide_tracked(&mut self, z: Complex) -> (Point, Complex) {
+        let (Slicer::Grid { scale, limit, bend }, Some((h, past))) =
+            (self.slicer, self.precoded.as_mut())
+        else {
+            return self.slicer.decide(z);
+        };
+        let phi = |zeta: f64| 1.0 + zeta / 6.0 + zeta * zeta / 120.0;
+        let arrived = z.scale(scale);
+        let mut flat = arrived;
+        if bend > 0.0 {
+            for _ in 0..crate::v34::data::UNBENT {
+                flat = arrived.scale(1.0 / phi(bend * flat.norm_sqr()));
+            }
+        }
+        let mut added = Complex::ZERO;
+        for (x, c) in past.iter().zip(h.iter()) {
+            added += *x * *c;
+        }
+        // The precoder moves a point by as much as it takes off, to the
+        // nearest 2w: with coefficients of a quarter and symbols forty units
+        // out that is ten units, and more than `limit` has room for.
+        let reach = h.iter().map(|c| c.re.abs() + c.im.abs()).sum::<f64>() * f64::from(limit);
+        let limit = limit + 2 * (reach / 2.0).ceil() as i32;
+        let odd = |v: f64| (2 * ((v - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+        let y = flat + added;
+        let point = (odd(y.re), odd(y.im));
+        let sent = Complex::new(f64::from(point.0), f64::from(point.1)) - added;
+        *past = [sent, past[0], past[1]];
+        (point, sent.scale(phi(bend * sent.norm_sqr()) / scale))
     }
 
     /// Decide against `slicer` from here, forgetting what the last one made of
@@ -661,6 +778,7 @@ impl Receiver {
     /// after it came in 25 dB down.
     fn set_slicer(&mut self, slicer: Slicer) {
         self.slicer = slicer;
+        self.precoded = None;
         self.lost = None;
         self.recent.clear();
     }
@@ -746,7 +864,9 @@ impl Receiver {
         }
         let offset = (from - self.history_first as i64) as usize;
         let row = &self.table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
-        Some(row.iter().enumerate().fold(Complex::ZERO, |sum, (i, tap)| sum + self.history[offset + i] * *tap))
+        Some(row.iter().enumerate().fold(Complex::ZERO, |sum, (i, tap)| {
+            sum + self.history[offset + i] * *tap
+        }))
     }
 
     fn on_half(&mut self, half: Complex, at: f64) {
@@ -770,7 +890,12 @@ impl Receiver {
                 }
                 None => {}
             },
-            Mode3::Collecting { reference, far, start, second } => {
+            Mode3::Collecting {
+                reference,
+                far,
+                start,
+                second,
+            } => {
                 let (reference, far, start, second) = (*reference, *far, *start, *second);
                 let (_, end) = windows(reference, second).1;
                 let search = if second { WIDE_SEARCH } else { SEARCH };
@@ -815,7 +940,9 @@ impl Receiver {
         let enough = |s: &Solution| -10.0 * s.mse.max(1e-9).log10() >= KNOWN_ENOUGH;
         let solution = match (known, reference) {
             (Some(s), _) if enough(&s) => Some(s),
-            (known, Reference::Trn(size)) if self.ever_trained && !second => self.reacquire(size, far, start).or(known),
+            (known, Reference::Trn(size)) if self.ever_trained && !second => {
+                self.reacquire(size, far, start).or(known)
+            }
             // PP alone has nothing known after it to try again in, and a fit
             // that is not good enough on the first try is the wrong one.
             (_, Reference::Pp) => None,
@@ -825,7 +952,12 @@ impl Receiver {
             // Nothing fitted where S-bar said. A slip in the middle of the
             // window spoils a fit that way; so try again further into TRN,
             // searching wide for where it went.
-            self.mode = Mode3::Collecting { reference, far, start, second: true };
+            self.mode = Mode3::Collecting {
+                reference,
+                far,
+                start,
+                second: true,
+            };
             return;
         }
         let Some(solution) = solution else {
@@ -861,7 +993,9 @@ impl Receiver {
         self.recent.clear();
         self.settled = solution.mse;
         self.mode = Mode3::Trained;
-        self.heard.push_back(Heard::Trained { snr_db: self.trained_snr });
+        self.heard.push_back(Heard::Trained {
+            snr_db: self.trained_snr,
+        });
         if reference == Reference::Pp {
             // The loops kept for a rewind were the last page's, on a carrier
             // phase and a timing this signal owes nothing to: a loss early in
@@ -880,7 +1014,13 @@ impl Receiver {
     }
 
     /// The equaliser solved for from the known sequence.
-    fn solve_known(&self, reference: Reference, far: Mode, start: u64, second: bool) -> Option<Solution> {
+    fn solve_known(
+        &self,
+        reference: Reference,
+        far: Mode,
+        start: u64,
+        second: bool,
+    ) -> Option<Solution> {
         let ((search_from, search_to), (from, to)) = windows(reference, second);
         let targets = sequence(reference, far, to);
         let deltas: Vec<i64> = if second {
@@ -892,7 +1032,8 @@ impl Receiver {
                 .filter_map(|delta| {
                     let origin = start.checked_add_signed(delta)?;
                     let mut sum = Complex::ZERO;
-                    for (k, target) in targets.iter().enumerate().take(search_to).skip(search_from) {
+                    for (k, target) in targets.iter().enumerate().take(search_to).skip(search_from)
+                    {
                         let index = (origin + 2 * k as u64).checked_sub(self.first)? as usize;
                         sum += *self.halves.get(index)? * target.conj();
                     }
@@ -908,12 +1049,18 @@ impl Receiver {
         // Each alignment either side of where S-bar put the sequence.
         let mut best: Option<(f64, i64, Vec<Complex>)> = None;
         for delta in deltas {
-            let Some(origin) = start.checked_add_signed(delta) else { continue };
-            let rows: Option<Vec<Vec<Complex>>> = (search_from..search_to).map(|k| self.row(origin + 2 * k as u64)).collect();
+            let Some(origin) = start.checked_add_signed(delta) else {
+                continue;
+            };
+            let rows: Option<Vec<Vec<Complex>>> = (search_from..search_to)
+                .map(|k| self.row(origin + 2 * k as u64))
+                .collect();
             let Some(rows) = rows else { continue };
             let refs: Vec<&[Complex]> = rows.iter().map(Vec::as_slice).collect();
             let wanted = &targets[search_from..search_to];
-            let Some(taps) = least_squares(&refs, wanted, ridge(&rows)) else { continue };
+            let Some(taps) = least_squares(&refs, wanted, ridge(&rows)) else {
+                continue;
+            };
             let mse = residual(&rows, wanted, &taps);
             if best.as_ref().is_none_or(|b| mse < b.0) {
                 best = Some((mse, delta, taps));
@@ -923,22 +1070,37 @@ impl Receiver {
         let origin = start.saturating_add_signed(delta);
         // How fast the constellation turns, from the rough fit's residual
         // phase early and late in its window.
-        let rows: Vec<Vec<Complex>> = (search_from..search_to).filter_map(|k| self.row(origin + 2 * k as u64)).collect();
+        let rows: Vec<Vec<Complex>> = (search_from..search_to)
+            .filter_map(|k| self.row(origin + 2 * k as u64))
+            .collect();
         let middle = rows.len() / 2;
         let lean = |range: std::ops::Range<usize>| {
-            range.fold(Complex::ZERO, |sum, i| sum + apply(&taps, &rows[i]) * targets[search_from + i].conj())
+            range.fold(Complex::ZERO, |sum, i| {
+                sum + apply(&taps, &rows[i]) * targets[search_from + i].conj()
+            })
         };
         let (early, late) = (lean(0..middle), lean(middle..rows.len()));
         let turn = (late * early.conj()).arg() / middle.max(1) as f64;
         // The whole window, with the turn put into the targets for the
         // equaliser to follow and the carrier loop to take back out.
-        let rows: Option<Vec<Vec<Complex>>> = (from..to).map(|k| self.row(origin + 2 * k as u64)).collect();
+        let rows: Option<Vec<Vec<Complex>>> = (from..to)
+            .map(|k| self.row(origin + 2 * k as u64))
+            .collect();
         let rows = rows?;
-        let turned: Vec<Complex> = (from..to).map(|k| targets[k] * Complex::from_polar(1.0, turn * k as f64)).collect();
+        let turned: Vec<Complex> = (from..to)
+            .map(|k| targets[k] * Complex::from_polar(1.0, turn * k as f64))
+            .collect();
         let refs: Vec<&[Complex]> = rows.iter().map(Vec::as_slice).collect();
         let taps = least_squares(&refs, &turned, ridge(&rows))?;
         let mse = residual(&rows, &turned, &taps);
-        Some(Solution { taps, turn, rotation: turn * to as f64, origin, end: to, mse })
+        Some(Solution {
+            taps,
+            turn,
+            rotation: turn * to as f64,
+            origin,
+            end: to,
+            mse,
+        })
     }
 
     /// Phase 4's TRN read with the equaliser the last training left, for a far
@@ -955,9 +1117,15 @@ impl Receiver {
         let (from, to) = (TRN_SKIPPED, 256);
         let mut best: Option<(f64, Solution)> = None;
         for delta in -SEARCH..=SEARCH {
-            let Some(origin) = start.checked_add_signed(delta) else { continue };
-            let outputs: Option<Vec<Complex>> =
-                (from..to).map(|k| self.row(origin + 2 * k as u64).map(|row| apply(&self.taps, &row))).collect();
+            let Some(origin) = start.checked_add_signed(delta) else {
+                continue;
+            };
+            let outputs: Option<Vec<Complex>> = (from..to)
+                .map(|k| {
+                    self.row(origin + 2 * k as u64)
+                        .map(|row| apply(&self.taps, &row))
+                })
+                .collect();
             let Some(outputs) = outputs else { continue };
             let power = outputs.iter().map(|y| y.norm_sqr()).sum::<f64>() / outputs.len() as f64;
             if power < 1e-12 {
@@ -966,7 +1134,9 @@ impl Receiver {
             // A square constellation's fourth power points the opposite way to
             // the real axis on average, which gives the turn to within a
             // quarter.
-            let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
+            let fourth = outputs
+                .iter()
+                .fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
             let base = (fourth.arg() - std::f64::consts::PI) / 4.0;
             for quarter in 0..4 {
                 let turned = base + std::f64::consts::FRAC_PI_2 * f64::from(quarter);
@@ -999,12 +1169,15 @@ impl Receiver {
                 }
             }
         }
-        best.filter(|(share, _)| *share > 0.95).map(|(_, solution)| solution)
+        best.filter(|(share, _)| *share > 0.95)
+            .map(|(_, solution)| solution)
     }
 
     /// Equalise, decide and track the symbol at `next_symbol`.
     fn symbol(&mut self) -> Symbol {
-        let wide = self.samples(self.next_symbol, REACH + 1).expect("the caller checked the samples are here");
+        let wide = self
+            .samples(self.next_symbol, REACH + 1)
+            .expect("the caller checked the samples are here");
         self.next_symbol += 2;
         let row = &wide[1..wide.len() - 1];
         let y = apply(&self.taps, row);
@@ -1014,10 +1187,12 @@ impl Receiver {
             .taps
             .iter()
             .enumerate()
-            .fold(Complex::ZERO, |sum, (i, w)| sum + *w * (wide[i + 2] - wide[i]).scale(0.5));
+            .fold(Complex::ZERO, |sum, (i, w)| {
+                sum + *w * (wide[i + 2] - wide[i]).scale(0.5)
+            });
         let spin = Complex::from_polar(1.0, -self.rotation);
         let z = y * spin;
-        let (decided, target) = self.slicer.decide(z);
+        let (decided, target) = self.decide_tracked(z);
         let e = z - target;
         let squared = e.norm_sqr();
         // Half the way to the nearest other point, squared: an error past it
@@ -1030,7 +1205,9 @@ impl Receiver {
         }
         let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;
         match self.lost {
-            None if self.recent.len() == judged && recent > self.slicer.lost_threshold(self.settled) => {
+            None if self.recent.len() == judged
+                && recent > self.slicer.lost_threshold(self.settled) =>
+            {
                 // The signal has jumped, or gone. Hold everything -- as it was
                 // before the symbols that showed it, which every loop has
                 // been learning from as though they were right.
@@ -1084,7 +1261,11 @@ impl Receiver {
         self.rotation = self.rotation.rem_euclid(std::f64::consts::TAU);
         self.error += 0.01 * (squared - self.error);
         self.last = z;
-        Symbol { point: z, decided, error: squared }
+        Symbol {
+            point: z,
+            decided,
+            error: squared,
+        }
     }
 
     /// Put the loops back as they were at least `back` symbols ago, carrying
@@ -1093,7 +1274,13 @@ impl Receiver {
     /// every loop has learnt from the decisions.
     pub fn rewind(&mut self, back: u64) {
         let now = self.next_symbol / 2;
-        let Some(kept) = self.earlier.iter().rposition(|l| now.saturating_sub(l.symbol) >= back) else { return };
+        let Some(kept) = self
+            .earlier
+            .iter()
+            .rposition(|l| now.saturating_sub(l.symbol) >= back)
+        else {
+            return;
+        };
         // The copies after it were made from the loops being put right.
         self.earlier.truncate(kept + 1);
         let loops = self.earlier[kept].clone();
@@ -1126,27 +1313,45 @@ impl Receiver {
         let reach = REACH as u64 + 1;
         // Four symbols short of the newest, so that reading them later still
         // has samples to read.
-        let Some(last) = self.next_symbol.checked_sub(10) else { return };
-        let Some(first_centre) = last.checked_sub(2 * (DENSE_WINDOW as u64 - 1)) else { return };
-        let Some(from) = first_centre.checked_sub(reach) else { return };
+        let Some(last) = self.next_symbol.checked_sub(10) else {
+            return;
+        };
+        let Some(first_centre) = last.checked_sub(2 * (DENSE_WINDOW as u64 - 1)) else {
+            return;
+        };
+        let Some(from) = first_centre.checked_sub(reach) else {
+            return;
+        };
         if from < self.first || last + reach >= self.made {
             return;
         }
         let start_time = self.times[(from - self.first) as usize];
         let count = (last + reach - from + 1) as usize;
         let outputs_at = |receiver: &Self, moved: f64| -> Option<Vec<Complex>> {
-            let read: Vec<Complex> =
-                (0..count).map(|m| receiver.interpolate(start_time + m as f64 * half + moved)).collect::<Option<_>>()?;
-            Some((0..DENSE_WINDOW).map(|j| apply(&receiver.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH])).collect())
+            let read: Vec<Complex> = (0..count)
+                .map(|m| receiver.interpolate(start_time + m as f64 * half + moved))
+                .collect::<Option<_>>()?;
+            Some(
+                (0..DENSE_WINDOW)
+                    .map(|j| apply(&receiver.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH]))
+                    .collect(),
+            )
         };
         let mse = |outputs: &[Complex], c: Complex| {
-            outputs.iter().map(|y| (*y * c - self.slicer.decide(*y * c).1).norm_sqr()).sum::<f64>() / outputs.len() as f64
+            outputs
+                .iter()
+                .map(|y| (*y * c - self.slicer.decide(*y * c).1).norm_sqr())
+                .sum::<f64>()
+                / outputs.len() as f64
         };
         // Gain and phase, least squares against the decisions, a few rounds.
         let fit = |outputs: &[Complex], mut c: Complex| {
             for _ in 0..4 {
                 let (num, den) = outputs.iter().fold((Complex::ZERO, 0.0), |(num, den), y| {
-                    (num + self.slicer.decide(*y * c).1 * y.conj(), den + y.norm_sqr())
+                    (
+                        num + self.slicer.decide(*y * c).1 * y.conj(),
+                        den + y.norm_sqr(),
+                    )
                 });
                 if den > 0.0 {
                     c = num.scale(1.0 / den);
@@ -1157,7 +1362,12 @@ impl Receiver {
         let settle = |outputs: &[Complex]| {
             let turns = (90.0 / DENSE_DEGREES) as usize;
             let coarse = (0..turns)
-                .map(|q| Complex::from_polar(1.0, -(self.rotation + (q as f64 * DENSE_DEGREES).to_radians())))
+                .map(|q| {
+                    Complex::from_polar(
+                        1.0,
+                        -(self.rotation + (q as f64 * DENSE_DEGREES).to_radians()),
+                    )
+                })
                 .map(|c| (mse(outputs, c), c))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map_or(Complex::ONE, |(_, c)| c);
@@ -1167,19 +1377,25 @@ impl Receiver {
         let mut best: Option<(f64, f64, Complex)> = None;
         for step in 0..2 * DENSE_STEPS {
             let moved = (step as f64 / DENSE_STEPS as f64 - 1.0) * half;
-            let Some(outputs) = outputs_at(self, moved) else { continue };
+            let Some(outputs) = outputs_at(self, moved) else {
+                continue;
+            };
             let (found, c) = settle(&outputs);
             readings.push(found);
             if best.is_none_or(|b| found < b.0) {
                 best = Some((found, moved, c));
             }
         }
-        let Some((mut found, mut moved, mut c)) = best else { return };
+        let Some((mut found, mut moved, mut c)) = best else {
+            return;
+        };
         let coarse = moved;
         for fine in 1..DENSE_FINE / DENSE_STEPS {
             for sign in [-1.0, 1.0] {
                 let tried = coarse + sign * fine as f64 * half / DENSE_FINE as f64;
-                let Some(outputs) = outputs_at(self, tried) else { continue };
+                let Some(outputs) = outputs_at(self, tried) else {
+                    continue;
+                };
                 let (e, g) = fit(&outputs, c);
                 if e < found {
                     (found, moved, c) = (e, tried, g);
@@ -1226,7 +1442,8 @@ impl Receiver {
         } else {
             self.due += moved;
         }
-        self.rotation = (turned + self.turn * (window as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
+        self.rotation =
+            (turned + self.turn * (window as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
         self.lost = None;
         self.recent.clear();
         self.slips += 1;
@@ -1251,9 +1468,15 @@ impl Receiver {
         let (window, _) = self.slicer.window();
         // The newest window of symbols that every shift can be read for.
         let reach = REACH as u64 + 1;
-        let Some(last) = self.next_symbol.checked_sub(2) else { return };
-        let Some(first_centre) = last.checked_sub(2 * (window as u64 - 1)) else { return };
-        let Some(from) = first_centre.checked_sub(reach) else { return };
+        let Some(last) = self.next_symbol.checked_sub(2) else {
+            return;
+        };
+        let Some(first_centre) = last.checked_sub(2 * (window as u64 - 1)) else {
+            return;
+        };
+        let Some(from) = first_centre.checked_sub(reach) else {
+            return;
+        };
         if from < self.first || last + reach >= self.made {
             return;
         }
@@ -1263,17 +1486,23 @@ impl Receiver {
         let mut best: Option<(f64, f64, f64)> = None;
         for step in 0..2 * RESYNC_STEPS {
             let shift = (step as f64 - RESYNC_STEPS as f64) / RESYNC_STEPS as f64;
-            let read: Option<Vec<Complex>> = (0..count).map(|m| self.interpolate(start_time + (m as f64 + shift) * half)).collect();
+            let read: Option<Vec<Complex>> = (0..count)
+                .map(|m| self.interpolate(start_time + (m as f64 + shift) * half))
+                .collect();
             let Some(read) = read else { continue };
             let outputs: Vec<Complex> = (0..window)
                 .map(|j| apply(&self.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH]))
                 .collect();
-            let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
+            let fourth = outputs
+                .iter()
+                .fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
             let base = (fourth.arg() - std::f64::consts::PI) / 4.0;
             // Of the four turns that fit, the one nearest the turn before.
             let mut turned = (0..4)
                 .map(|q| base + std::f64::consts::FRAC_PI_2 * f64::from(q))
-                .min_by(|a, b| angle_between(*a, self.rotation).total_cmp(&angle_between(*b, self.rotation)))
+                .min_by(|a, b| {
+                    angle_between(*a, self.rotation).total_cmp(&angle_between(*b, self.rotation))
+                })
                 .unwrap_or(base);
             // The fourth power only gets close on a dense constellation; the
             // decisions it then allows take the rest of the way.
@@ -1286,18 +1515,26 @@ impl Receiver {
                 turned += lean.arg();
             }
             let spin = Complex::from_polar(1.0, -turned);
-            let mse = outputs.iter().map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr()).sum::<f64>()
+            let mse = outputs
+                .iter()
+                .map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr())
+                .sum::<f64>()
                 / window as f64;
             readings.push(mse);
             if best.is_none_or(|b| mse < b.0) {
                 best = Some((mse, shift, turned));
             }
         }
-        let Some((mse, shift, turned)) = best else { return };
+        let Some((mse, shift, turned)) = best else {
+            return;
+        };
         // The shifts that are wrong read as what the signal reads out of step;
         // a real jump found stands clear of them.
         readings.sort_by(f64::total_cmp);
-        let wrong = readings.get(readings.len() / 2).copied().unwrap_or(f64::MAX);
+        let wrong = readings
+            .get(readings.len() / 2)
+            .copied()
+            .unwrap_or(f64::MAX);
         if mse > self.slicer.found_level(self.settled) || mse > 0.6 * wrong {
             return;
         }
@@ -1319,8 +1556,12 @@ fn windows(reference: Reference, second: bool) -> ((usize, usize), (usize, usize
     let trn = signals::PP_SYMBOLS;
     match (reference, second) {
         (Reference::PpThenTrn, false) => ((PP_SKIPPED, trn), (PP_SKIPPED, trn + TRN_AFTER_PP)),
-        (Reference::PpThenTrnAt(_), false) | (Reference::Pp, _) => ((PP_SKIPPED, trn), (PP_SKIPPED, trn)),
-        (Reference::PpThenTrn | Reference::PpThenTrnAt(_), true) => ((trn + 256, trn + 512), (trn + 256, trn + 512)),
+        (Reference::PpThenTrnAt(_), false) | (Reference::Pp, _) => {
+            ((PP_SKIPPED, trn), (PP_SKIPPED, trn))
+        }
+        (Reference::PpThenTrn | Reference::PpThenTrnAt(_), true) => {
+            ((trn + 256, trn + 512), (trn + 256, trn + 512))
+        }
         (Reference::Trn(_), false) => ((TRN_SKIPPED, 256), (TRN_SKIPPED, TRN_ALONE)),
         (Reference::Trn(_), true) => ((TRN_ALONE - 64, 512), (TRN_ALONE - 64, 512)),
     }
@@ -1329,8 +1570,13 @@ fn windows(reference: Reference, second: bool) -> ((usize, usize), (usize, usize
 /// The first `length` symbols of a training sequence, at unit mean power.
 fn sequence(reference: Reference, far: Mode, length: usize) -> Vec<Complex> {
     let mut sender = signals::Sender::new(far);
-    let point = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
-    let pp = if matches!(reference, Reference::Trn(_)) { 0 } else { signals::PP_SYMBOLS };
+    let point =
+        |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+    let pp = if matches!(reference, Reference::Trn(_)) {
+        0
+    } else {
+        signals::PP_SYMBOLS
+    };
     (0..length)
         .map(|k| match reference.trn() {
             _ if k < pp => signals::pp(k).into(),
@@ -1356,7 +1602,10 @@ pub fn unit(size: Size) -> f64 {
 fn decide(z: Complex, size: Size) -> (Point, Complex) {
     let scale = unit(size);
     let grid = signals::decide((z.re / scale, z.im / scale), size);
-    (grid, Complex::new(f64::from(grid.0), f64::from(grid.1)).scale(scale))
+    (
+        grid,
+        Complex::new(f64::from(grid.0), f64::from(grid.1)).scale(scale),
+    )
 }
 
 /// The least squared distance between two points of a constellation at unit
@@ -1373,11 +1622,17 @@ fn angle_between(a: f64, b: f64) -> f64 {
 }
 
 fn apply(taps: &[Complex], row: &[Complex]) -> Complex {
-    taps.iter().zip(row).fold(Complex::ZERO, |sum, (w, x)| sum + *w * *x)
+    taps.iter()
+        .zip(row)
+        .fold(Complex::ZERO, |sum, (w, x)| sum + *w * *x)
 }
 
 fn residual(rows: &[Vec<Complex>], targets: &[Complex], taps: &[Complex]) -> f64 {
-    rows.iter().zip(targets).map(|(row, &d)| (apply(taps, row) - d).norm_sqr()).sum::<f64>() / rows.len().max(1) as f64
+    rows.iter()
+        .zip(targets)
+        .map(|(row, &d)| (apply(taps, row) - d).norm_sqr())
+        .sum::<f64>()
+        / rows.len().max(1) as f64
 }
 
 /// A ridge a thousandth of the signal's own weight on the diagonal.
@@ -1424,14 +1679,20 @@ mod tests {
         let mut tx = Transmitter::new(band, 0, 0, FS);
         let mut sender = Sender::new(Mode::Answer);
         let mut symbols: VecDeque<Complex> = VecDeque::new();
-        let grid = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+        let grid =
+            |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
         symbols.extend(std::iter::repeat_n(Complex::ZERO, 400));
         symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
         symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
         symbols.extend((0..signals::PP_SYMBOLS).map(|n| Complex::from(signals::pp(n))));
         symbols.extend((0..trn).map(|_| grid(sender.trn(Size::Four), Size::Four)));
         let j: Vec<bool> = J_SIXTEEN.repeat(js);
-        symbols.extend(sender.sequence(&j, Size::Four).into_iter().map(|p| grid(p, Size::Four)));
+        symbols.extend(
+            sender
+                .sequence(&j, Size::Four)
+                .into_iter()
+                .map(|p| grid(p, Size::Four)),
+        );
         symbols.extend(std::iter::repeat_n(Complex::ZERO, 200));
         let total = symbols.len();
         let mut out = Vec::new();
@@ -1476,7 +1737,12 @@ mod tests {
         let mut reader = Reader::new(Mode::Answer);
         let mut in_trn = true;
         let mut bits: Vec<bool> = Vec::new();
-        let mut result = Heard3 { reversal: None, snr: None, j: None, errors: Vec::new() };
+        let mut result = Heard3 {
+            reversal: None,
+            snr: None,
+            j: None,
+            errors: Vec::new(),
+        };
         for &x in samples {
             rx.feed(x);
             while let Some(heard) = rx.heard() {
@@ -1500,7 +1766,11 @@ mod tests {
                         }
                         bits.extend(reader.differential(symbol.decided, Size::Four));
                         let tail = &bits[bits.len().saturating_sub(32)..];
-                        if result.j.is_none() && tail.len() == 32 && tail[..16] == J_SIXTEEN && tail[16..] == J_SIXTEEN {
+                        if result.j.is_none()
+                            && tail.len() == 32
+                            && tail[..16] == J_SIXTEEN
+                            && tail[16..] == J_SIXTEEN
+                        {
                             result.j = Some(bits.len());
                         }
                     }
@@ -1552,7 +1822,10 @@ mod tests {
         // change from S to S-bar spread across two whole symbols.
         let band = Band::new(SymbolRate::S3429, false);
         let sent = phase3(band, 1500, 40);
-        let (mut down, mut up) = (dsp::Resampler::new(FS, 8000.0), dsp::Resampler::new(8000.0, FS));
+        let (mut down, mut up) = (
+            dsp::Resampler::new(FS, 8000.0),
+            dsp::Resampler::new(8000.0, FS),
+        );
         let (mut narrow, mut back) = (Vec::new(), Vec::new());
         for &x in &sent {
             down.process(x, &mut narrow);
@@ -1572,7 +1845,8 @@ mod tests {
     fn phases_3_and_4(band: Band, restarted: bool) -> Vec<f64> {
         let mut tx = Transmitter::new(band, 0, 0, FS);
         let mut sender = Sender::new(Mode::Answer);
-        let grid = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+        let grid =
+            |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
         let mut symbols: VecDeque<Complex> = VecDeque::new();
         symbols.extend(std::iter::repeat_n(Complex::ZERO, 400));
         symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
@@ -1580,7 +1854,12 @@ mod tests {
         symbols.extend((0..signals::PP_SYMBOLS).map(|n| Complex::from(signals::pp(n))));
         symbols.extend((0..900).map(|_| grid(sender.trn(Size::Four), Size::Four)));
         let j: Vec<bool> = J_SIXTEEN.repeat(20);
-        symbols.extend(sender.sequence(&j, Size::Four).into_iter().map(|p| grid(p, Size::Four)));
+        symbols.extend(
+            sender
+                .sequence(&j, Size::Four)
+                .into_iter()
+                .map(|p| grid(p, Size::Four)),
+        );
         symbols.extend(std::iter::repeat_n(Complex::ZERO, 1500));
         symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
         symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
@@ -1617,7 +1896,9 @@ mod tests {
                 while let Some(heard) = rx.heard() {
                     match heard {
                         Heard::S => {}
-                        Heard::Reversal { at } if !phase4 && trainings.is_empty() => rx.train(Reference::PpThenTrn, Mode::Answer, at),
+                        Heard::Reversal { at } if !phase4 && trainings.is_empty() => {
+                            rx.train(Reference::PpThenTrn, Mode::Answer, at)
+                        }
                         Heard::Reversal { at } => {
                             phase4 = true;
                             rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at);
@@ -1628,7 +1909,10 @@ mod tests {
                                 reader = Reader::new(Mode::Answer);
                             }
                         }
-                        Heard::Untrained => panic!("restarted {restarted}: training {} failed", trainings.len() + 1),
+                        Heard::Untrained => panic!(
+                            "restarted {restarted}: training {} failed",
+                            trainings.len() + 1
+                        ),
                         Heard::Symbol(symbol) => {
                             if trainings.len() == 1 && symbol.error > 0.2 && !phase4 {
                                 // Phase 3's J is over and the line has gone quiet.
@@ -1644,9 +1928,21 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(trainings.len(), 2, "restarted {restarted}: trained {trainings:?}");
-            assert!(trainings[1] > 25.0, "restarted {restarted}: phase 4 trained to {:.1} dB", trainings[1]);
-            assert!(ones > 4 * (read - 12) * 99 / 100, "restarted {restarted}: {ones} ones of {} bits", 4 * (read - 12));
+            assert_eq!(
+                trainings.len(),
+                2,
+                "restarted {restarted}: trained {trainings:?}"
+            );
+            assert!(
+                trainings[1] > 25.0,
+                "restarted {restarted}: phase 4 trained to {:.1} dB",
+                trainings[1]
+            );
+            assert!(
+                ones > 4 * (read - 12) * 99 / 100,
+                "restarted {restarted}: {ones} ones of {} bits",
+                4 * (read - 12)
+            );
         }
     }
 
@@ -1655,17 +1951,29 @@ mod tests {
     fn phase4_with_mps(band: Band, seconds: f64) -> Vec<f64> {
         let mut tx = Transmitter::new(band, 0, 0, FS);
         let mut sender = Sender::new(Mode::Answer);
-        let grid = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+        let grid =
+            |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
         let mut symbols: VecDeque<Complex> = VecDeque::new();
         symbols.extend(std::iter::repeat_n(Complex::ZERO, 400));
         symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
         symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
         sender.restart();
         symbols.extend((0..800).map(|_| grid(sender.trn(Size::Sixteen), Size::Sixteen)));
-        let mp = crate::v34::mp::Mp { call_to_answer: 14, answer_to_call: 14, rates: 0x3fff, asymmetric: true, ..Default::default() }
-            .acknowledged();
+        let mp = crate::v34::mp::Mp {
+            call_to_answer: 14,
+            answer_to_call: 14,
+            rates: 0x3fff,
+            asymmetric: true,
+            ..Default::default()
+        }
+        .acknowledged();
         let bits: Vec<bool> = mp.to_bits().repeat((seconds * band.baud() / 22.0) as usize);
-        symbols.extend(sender.sequence(&bits, Size::Sixteen).into_iter().map(|p| grid(p, Size::Sixteen)));
+        symbols.extend(
+            sender
+                .sequence(&bits, Size::Sixteen)
+                .into_iter()
+                .map(|p| grid(p, Size::Sixteen)),
+        );
         let total = symbols.len();
         let mut out = Vec::new();
         while tx.symbols() < total as u64 + 50 {
@@ -1714,7 +2022,9 @@ mod tests {
             while let Some(heard) = rx.heard() {
                 match heard {
                     Heard::S => {}
-                    Heard::Reversal { at } => rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at),
+                    Heard::Reversal { at } => {
+                        rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at)
+                    }
                     Heard::Trained { .. } => {}
                     Heard::Untrained => panic!("did not train"),
                     Heard::Symbol(symbol) => {
@@ -1747,8 +2057,16 @@ mod tests {
         let first_after = |t: f64| found.iter().copied().find(|&x| x > t).unwrap_or(f64::MAX);
         let before = found.iter().filter(|&&t| t < 1.49).count();
         assert!(before > 50, "{before} MPs before the first slip");
-        assert!(first_after(1.51) < 1.65, "first MP after the insertion at {:.3} s", first_after(1.51));
-        assert!(first_after(3.03) < 3.17, "first MP after the drop at {:.3} s", first_after(3.03));
+        assert!(
+            first_after(1.51) < 1.65,
+            "first MP after the insertion at {:.3} s",
+            first_after(1.51)
+        );
+        assert!(
+            first_after(3.03) < 3.17,
+            "first MP after the drop at {:.3} s",
+            first_after(3.03)
+        );
         let after = found.iter().filter(|&&t| t > 3.2).count();
         assert!(after > 100, "{after} MPs after the second slip");
     }
@@ -1775,7 +2093,9 @@ mod tests {
             for high in [false, true] {
                 let band = Band::new(rate, high);
                 let heard = listen(&line(&phase3(band, 800, 20), 50.0, 10.0, 40.0), band);
-                let snr = heard.snr.unwrap_or_else(|| panic!("{rate:?} high {high} never trained"));
+                let snr = heard
+                    .snr
+                    .unwrap_or_else(|| panic!("{rate:?} high {high} never trained"));
                 assert!(snr > 28.0, "{rate:?} high {high}: {snr:.1} dB");
                 assert!(heard.j.is_some(), "{rate:?} high {high}: no J");
             }
@@ -1824,7 +2144,13 @@ mod tests {
     /// sends it with no precoding.
     fn data_mode(rate: SymbolRate, primary: u32, code: Code, mode: Mode) -> Params {
         let framing = Framing::new(rate, primary, false, false).expect("a rate Table 8 has");
-        Params { framing, code, nonlinear: false, precoding: [(0, 0); 3], mode }
+        Params {
+            framing,
+            code,
+            nonlinear: false,
+            precoding: [(0, 0); 3],
+            mode,
+        }
     }
 
     /// A page as the source sends it: S, S-bar and PP, B1 (10.1.3.1), `data`,
@@ -1905,11 +2231,20 @@ mod tests {
     /// a phase 3, and idle once TRN is over by the count; then at each of
     /// `hunts` a hunt for a page's S, training on its PP alone, and data mode
     /// read with `params` from the symbol after PP on (12.5.2).
-    fn recipient(samples: &[f64], band: Band, far: Mode, phase3: Option<(Reference, usize)>, hunts: &[usize], params: Option<Params>) -> Heard12 {
+    fn recipient(
+        samples: &[f64],
+        band: Band,
+        far: Mode,
+        phase3: Option<(Reference, usize)>,
+        hunts: &[usize],
+        params: Option<Params>,
+    ) -> Heard12 {
         let mut rx = Receiver::new(band, FS);
         let mut heard = Heard12::default();
         let mut reader = Reader::new(far);
-        let size = phase3.and_then(|(reference, _)| reference.trn()).unwrap_or(Size::Four);
+        let size = phase3
+            .and_then(|(reference, _)| reference.trn())
+            .unwrap_or(Size::Four);
         let (mut in_phase3, mut trn_left, mut read) = (phase3.is_some(), 0, 0);
         let mut decoder: Option<Decoder> = None;
         let mut hunts = hunts.iter().copied().peekable();
@@ -1956,8 +2291,16 @@ mod tests {
                     Heard::Symbol(symbol) => {
                         if let Some(decoder) = decoder.as_mut() {
                             decoder.feed(symbol.point);
-                            heard.pages.last_mut().expect("a page").extend(decoder.take_bits());
-                            heard.page_errors.last_mut().expect("a page").push(symbol.error);
+                            heard
+                                .pages
+                                .last_mut()
+                                .expect("a page")
+                                .extend(decoder.take_bits());
+                            heard
+                                .page_errors
+                                .last_mut()
+                                .expect("a page")
+                                .push(symbol.error);
                         } else if in_phase3 && trn_left > 0 {
                             let bits = reader.trn(symbol.decided, size);
                             heard.trn_errors.push(symbol.error);
@@ -2023,22 +2366,61 @@ mod tests {
             let band = Band::new(rate, rate == SymbolRate::S3200);
             let trn = 2000;
             let mut results = Vec::new();
-            for reference in [Reference::PpThenTrn, Reference::PpThenTrnAt(Size::Four), Reference::PpThenTrnAt(Size::Sixteen)] {
+            for reference in [
+                Reference::PpThenTrn,
+                Reference::PpThenTrnAt(Size::Four),
+                Reference::PpThenTrnAt(Size::Sixteen),
+            ] {
                 let sent = hdx_phase3(band, Mode::Call, reference.trn().expect("TRN"), trn);
-                let heard = recipient(&line(&sent, 50.0, 10.0, 45.0), band, Mode::Call, Some((reference, trn)), &[], None);
-                let trained = heard.phase3_snr.unwrap_or_else(|| panic!("{rate:?} {reference:?} never trained"));
+                let heard = recipient(
+                    &line(&sent, 50.0, 10.0, 45.0),
+                    band,
+                    Mode::Call,
+                    Some((reference, trn)),
+                    &[],
+                    None,
+                );
+                let trained = heard
+                    .phase3_snr
+                    .unwrap_or_else(|| panic!("{rate:?} {reference:?} never trained"));
                 let made = heard.trn_errors.len();
-                assert_eq!(made, trn - windows(reference, false).1.1 + signals::PP_SYMBOLS, "{rate:?} {reference:?}: TRN's symbols");
-                assert_eq!(heard.trn_ones, heard.trn_bits, "{rate:?} {reference:?}: TRN not all ones");
+                assert_eq!(
+                    made,
+                    trn - windows(reference, false).1.1 + signals::PP_SYMBOLS,
+                    "{rate:?} {reference:?}: TRN's symbols"
+                );
+                assert_eq!(
+                    heard.trn_ones, heard.trn_bits,
+                    "{rate:?} {reference:?}: TRN not all ones"
+                );
                 results.push((trained, snr_of(&heard.trn_errors[made / 2..])));
             }
-            let [(duplex, duplex_tracked), (four, _), (sixteen, sixteen_tracked)] = results[..] else { unreachable!() };
-            assert!(duplex > 40.0, "{rate:?}: duplex phase 3 trained to {duplex:.1} dB");
-            assert!(sixteen >= duplex, "{rate:?}: sixteen points trained to {sixteen:.2} dB, duplex's four {duplex:.2} dB");
-            assert!((sixteen - four).abs() < 0.1, "{rate:?}: sixteen points {sixteen:.2} dB, four {four:.2} dB");
+            let [
+                (duplex, duplex_tracked),
+                (four, _),
+                (sixteen, sixteen_tracked),
+            ] = results[..]
+            else {
+                unreachable!()
+            };
+            assert!(
+                duplex > 40.0,
+                "{rate:?}: duplex phase 3 trained to {duplex:.1} dB"
+            );
+            assert!(
+                sixteen >= duplex,
+                "{rate:?}: sixteen points trained to {sixteen:.2} dB, duplex's four {duplex:.2} dB"
+            );
+            assert!(
+                (sixteen - four).abs() < 0.1,
+                "{rate:?}: sixteen points {sixteen:.2} dB, four {four:.2} dB"
+            );
             // Followed through TRN, sixteen points come out a few tenths of a
             // decibel under four.
-            assert!(sixteen_tracked > duplex_tracked - 1.0, "{rate:?}: tracked {sixteen_tracked:.2} dB, duplex's {duplex_tracked:.2} dB");
+            assert!(
+                sixteen_tracked > duplex_tracked - 1.0,
+                "{rate:?}: tracked {sixteen_tracked:.2} dB, duplex's {duplex_tracked:.2} dB"
+            );
         }
     }
 
@@ -2055,11 +2437,21 @@ mod tests {
             // The 70 ms of silence before the control channel (12.4.1.1).
             sent.extend(std::iter::repeat_n(0.0, (0.070 * FS) as usize));
             let reference = Reference::PpThenTrnAt(Size::Sixteen);
-            let heard = recipient(&line(&sent, 114.0, 15.0, 45.0), band, Mode::Answer, Some((reference, trn)), &[], None);
+            let heard = recipient(
+                &line(&sent, 114.0, 15.0, 45.0),
+                band,
+                Mode::Answer,
+                Some((reference, trn)),
+                &[],
+                None,
+            );
             let trained = heard.phase3_snr.expect("never trained");
             assert!(trained > 35.0, "{steps} steps: trained to {trained:.1} dB");
             assert_eq!(heard.trn_errors.len(), trn, "{steps} steps: TRN's symbols");
-            assert_eq!(heard.trn_ones, heard.trn_bits, "{steps} steps: TRN not all ones");
+            assert_eq!(
+                heard.trn_ones, heard.trn_bits,
+                "{steps} steps: TRN not all ones"
+            );
             if trn > 0 {
                 let late = snr_of(&heard.trn_errors[trn - 2000..]);
                 assert!(late > 40.0, "tracked to {late:.1} dB at the end of TRN");
@@ -2077,9 +2469,15 @@ mod tests {
         // answer modem's in one case in three, whose guard tone, alone for a
         // moment at its end, passes for S-bar at three of these carriers.
         for (r, rate) in SymbolRate::ALL.into_iter().enumerate() {
-            for (variant, (shift, turn)) in [(0usize, 0.0), (1, 2.2), (3, 4.1)].into_iter().enumerate() {
+            for (variant, (shift, turn)) in
+                [(0usize, 0.0), (1, 2.2), (3, 4.1)].into_iter().enumerate()
+            {
                 let band = Band::new(rate, (r + variant) % 2 == 1);
-                let (side, far) = if variant == 1 { (dpsk::Side::Answer, Mode::Answer) } else { (dpsk::Side::Call, Mode::Call) };
+                let (side, far) = if variant == 1 {
+                    (dpsk::Side::Answer, Mode::Answer)
+                } else {
+                    (dpsk::Side::Call, Mode::Call)
+                };
                 let params = data_mode(rate, fastest(rate), Code::States16, far);
                 let data = random_bits(fastest(rate) as usize / 2, 0x1234_5679 + variant as u32);
                 let mut sent = hdx_phase3(band, far, Size::Sixteen, 1000);
@@ -2090,18 +2488,38 @@ mod tests {
                 sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
                 let hunt = page_at - FS as usize / 2;
                 let reference = Reference::PpThenTrnAt(Size::Sixteen);
-                let heard = recipient(&line(&sent, 0.0, 10.0, 50.0), band, far, Some((reference, 1000)), &[hunt], Some(params));
-                let what = format!("{rate:?} high {} shift {shift} turn {turn}", band.high_carrier);
-                let phase3 = heard.phase3_snr.unwrap_or_else(|| panic!("{what}: phase 3 never trained"));
+                let heard = recipient(
+                    &line(&sent, 0.0, 10.0, 50.0),
+                    band,
+                    far,
+                    Some((reference, 1000)),
+                    &[hunt],
+                    Some(params),
+                );
+                let what = format!(
+                    "{rate:?} high {} shift {shift} turn {turn}",
+                    band.high_carrier
+                );
+                let phase3 = heard
+                    .phase3_snr
+                    .unwrap_or_else(|| panic!("{what}: phase 3 never trained"));
                 assert_eq!(heard.page_snrs.len(), 1, "{what}: pages trained");
                 let resync = heard.page_snrs[0];
                 // PP alone does as well as phase 3 did, from nothing.
-                assert!(resync > phase3 - 1.5, "{what}: resync {resync:.1} dB, phase 3 {phase3:.1} dB");
+                assert!(
+                    resync > phase3 - 1.5,
+                    "{what}: resync {resync:.1} dB, phase 3 {phase3:.1} dB"
+                );
                 let errors = &heard.page_errors[0];
                 let tracked = data_snr(params, data.len(), errors);
                 assert!(tracked > 45.0, "{what}: data at {tracked:.1} dB");
                 let wrong = wrong_bits(params, &data, &heard.pages[0]);
-                assert_eq!(wrong, 0, "{what}: {wrong} bits wrong of B1 and {}", data.len());
+                assert_eq!(
+                    wrong,
+                    0,
+                    "{what}: {wrong} bits wrong of B1 and {}",
+                    data.len()
+                );
             }
         }
     }
@@ -2113,13 +2531,25 @@ mod tests {
         // its noise and a far clock tens of ppm off: every page trains on its
         // PP alone to about what phase 3 did, 37 dB, and decodes from B1 on
         // without a bit wrong.
-        for (rate, primary, ppm) in [(SymbolRate::S3429, 28_800, 40.0), (SymbolRate::S2400, 19_200, -70.0), (SymbolRate::S3000, 24_000, 25.0)] {
+        for (rate, primary, ppm) in [
+            (SymbolRate::S3429, 28_800, 40.0),
+            (SymbolRate::S2400, 19_200, -70.0),
+            (SymbolRate::S3000, 24_000, 25.0),
+        ] {
             let band = Band::new(rate, false);
             let far = Mode::Call;
             let params = data_mode(rate, primary, Code::States64, far);
             let mut sent = hdx_phase3(band, far, Size::Four, 600);
             let (mut hunts, mut datas) = (Vec::new(), Vec::new());
-            for (n, (seconds, inserted, turn)) in [(2.0, true, 0.7), (4.0, false, 3.0), (2.5, true, 5.1), (3.0, false, 1.9)].into_iter().enumerate() {
+            for (n, (seconds, inserted, turn)) in [
+                (2.0, true, 0.7),
+                (4.0, false, 3.0),
+                (2.5, true, 5.1),
+                (3.0, false, 1.9),
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let gap = sent.len();
                 sent.extend(control(dpsk::Side::Call, seconds));
                 slip(&mut sent, gap + (seconds * FS / 2.0) as usize, inserted);
@@ -2132,15 +2562,33 @@ mod tests {
             }
             sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
             let reference = Reference::PpThenTrnAt(Size::Four);
-            let heard = recipient(&line(&sent, ppm, 20.0, 33.0), band, far, Some((reference, 600)), &hunts, Some(params));
-            assert_eq!(heard.page_snrs.len(), datas.len(), "{rate:?} at {ppm} ppm: pages trained {:?}", heard.page_snrs);
+            let heard = recipient(
+                &line(&sent, ppm, 20.0, 33.0),
+                band,
+                far,
+                Some((reference, 600)),
+                &hunts,
+                Some(params),
+            );
+            assert_eq!(
+                heard.page_snrs.len(),
+                datas.len(),
+                "{rate:?} at {ppm} ppm: pages trained {:?}",
+                heard.page_snrs
+            );
             let phase3 = heard.phase3_snr.expect("phase 3 trained");
             for (n, data) in datas.iter().enumerate() {
                 let (snr, errors) = (heard.page_snrs[n], &heard.page_errors[n]);
-                assert!(snr > 35.0 && snr > phase3 - 1.0, "{rate:?} page {n}: resync {snr:.1} dB, phase 3 {phase3:.1} dB");
+                assert!(
+                    snr > 35.0 && snr > phase3 - 1.0,
+                    "{rate:?} page {n}: resync {snr:.1} dB, phase 3 {phase3:.1} dB"
+                );
                 let tracked = data_snr(params, data.len(), errors);
                 let wrong = wrong_bits(params, data, &heard.pages[n]);
-                assert_eq!(wrong, 0, "{rate:?} at {ppm} ppm, page {n} ({snr:.1} dB, data {tracked:.1} dB): {wrong} bits wrong");
+                assert_eq!(
+                    wrong, 0,
+                    "{rate:?} at {ppm} ppm, page {n} ({snr:.1} dB, data {tracked:.1} dB): {wrong} bits wrong"
+                );
             }
         }
     }
@@ -2196,18 +2644,97 @@ mod tests {
                 let band = Band::new(rate, false);
                 let params = data_mode(rate, 14_400, Code::States16, Mode::Call);
                 let data = random_bits(10_000, 9);
-                let mut symbols: Vec<Complex> = (0..60).map(|n| at_unit(signals::s(n), Size::Four)).collect();
-                symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| at_unit(signals::s_bar(n), Size::Four)));
+                let mut symbols: Vec<Complex> = (0..60)
+                    .map(|n| at_unit(signals::s(n), Size::Four))
+                    .collect();
+                symbols.extend(
+                    (0..signals::S_BAR_SYMBOLS).map(|n| at_unit(signals::s_bar(n), Size::Four)),
+                );
                 let page = page_symbols(band, params, &data, 0.0);
-                let skipped = if silent { 0 } else { (0.070 * band.baud()) as usize };
+                let skipped = if silent {
+                    0
+                } else {
+                    (0.070 * band.baud()) as usize
+                };
                 symbols.extend(&page[skipped..]);
                 let mut sent = burst(band, symbols);
                 sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
-                let heard = recipient(&line(&sent, 0.0, 10.0, 45.0), band, Mode::Call, None, &[0], Some(params));
-                assert_eq!(heard.untrained, 1, "{rate:?} silent {silent}: the first S-bar");
-                assert_eq!(heard.page_snrs.len(), 1, "{rate:?} silent {silent}: the page's");
-                assert_eq!(wrong_bits(params, &data, &heard.pages[0]), 0, "{rate:?} silent {silent}");
+                let heard = recipient(
+                    &line(&sent, 0.0, 10.0, 45.0),
+                    band,
+                    Mode::Call,
+                    None,
+                    &[0],
+                    Some(params),
+                );
+                assert_eq!(
+                    heard.untrained, 1,
+                    "{rate:?} silent {silent}: the first S-bar"
+                );
+                assert_eq!(
+                    heard.page_snrs.len(),
+                    1,
+                    "{rate:?} silent {silent}: the page's"
+                );
+                assert_eq!(
+                    wrong_bits(params, &data, &heard.pages[0]),
+                    0,
+                    "{rate:?} silent {silent}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn a_precoded_and_stretched_symbol_is_decided_where_it_was_sent() {
+        // The loops are steered by how far each symbol is from where the
+        // slicer says it should have been. For a far end that precodes and
+        // encodes non-linearly that is nowhere near a point of the grid, and
+        // a slicer told of both finds every symbol where it was sent.
+        let framing =
+            Framing::new(SymbolRate::S3429, 31_200, false, true).expect("a rate Table 8 has");
+        let precoding = [(4096, -2048), (-1024, 512), (256, 0)];
+        let params = Params {
+            framing,
+            code: Code::States16,
+            nonlinear: true,
+            precoding,
+            mode: Mode::Answer,
+        };
+        let decoder = Decoder::new(params);
+        let (scale, limit, bend) = (decoder.grid_scale(), decoder.extent(), decoder.bend());
+        assert!(bend > 0.0);
+        let symbols: Vec<Complex> = {
+            let mut encoder = Encoder::new(params);
+            let mut seed = 77u32;
+            (0..4000)
+                .map(|_| {
+                    encoder.next_symbol(&mut || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        seed & 1 == 1
+                    })
+                })
+                .collect()
+        };
+        let band = Band::new(SymbolRate::S3429, false);
+        let out_by = |rx: &mut Receiver| {
+            let total: f64 = symbols
+                .iter()
+                .map(|x| (rx.decide_tracked(*x).1 - *x).norm_sqr())
+                .sum();
+            (total / symbols.len() as f64).sqrt() * scale
+        };
+        let mut told = Receiver::new(band, FS);
+        told.set_precoded_grid(scale, limit, bend, precoding);
+        // The precoder rounds what it takes off to 1/128 of a grid unit.
+        let out = out_by(&mut told);
+        assert!(out < 0.02, "{out}");
+        // And one told only of the grid is out by a good part of the
+        // half-step that is as far out as a decision can be.
+        let mut plain = Receiver::new(band, FS);
+        plain.set_grid(scale, limit);
+        assert!(out_by(&mut plain) > 0.5);
     }
 }

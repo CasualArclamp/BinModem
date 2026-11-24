@@ -46,7 +46,10 @@ struct Hiss {
 
 impl Hiss {
     fn new(sigma: f64, seed: u64) -> Self {
-        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, sigma }
+        Self {
+            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+            sigma,
+        }
     }
 
     fn unit(&mut self) -> f64 {
@@ -104,7 +107,12 @@ fn call(page: &Page, sigma: f64, spoiled: usize, seed: u64) -> Outcome {
         let b = answerer.step(to_answerer);
         if trace && (caller.phase(), answerer.phase()) != was {
             was = (caller.phase(), answerer.phase());
-            eprintln!("{:6.2}s caller {:<32} answerer {}", i as f64 / FS, was.0.name(), was.1.name());
+            eprintln!(
+                "{:6.2}s caller {:<32} answerer {}",
+                i as f64 / FS,
+                was.0.name(),
+                was.1.name()
+            );
         }
         let training = caller.phase() == Phase::Training;
         if training && !was_training {
@@ -112,14 +120,22 @@ fn call(page: &Page, sigma: f64, spoiled: usize, seed: u64) -> Outcome {
             tried.push((speed.modulation, speed.bits_per_second));
         }
         was_training = training;
-        let drowned = if training && tried.len() <= spoiled { drown.next() } else { 0.0 };
+        let drowned = if training && tried.len() <= spoiled {
+            drown.next()
+        } else {
+            0.0
+        };
         to_answerer = a + up.next() + drowned;
         to_caller = b + down.next();
         if caller.phase().is_over() && answerer.phase().is_over() {
             break;
         }
     }
-    Outcome { page: answerer.received().cloned(), rate: caller.rate(), tried }
+    Outcome {
+        page: answerer.received().cloned(),
+        rate: caller.rate(),
+        tried,
+    }
 }
 
 /// A page at 9600 over a clean line, over hiss just past the level that used
@@ -129,11 +145,17 @@ fn call(page: &Page, sigma: f64, spoiled: usize, seed: u64) -> Outcome {
 fn a_page_crosses_at_9600_over_a_line_with_hiss_on_it() {
     let page = a_page(40);
     let mut wrong = Vec::new();
-    for (k, sigma) in [0.0, 3.0e-3, 3.0e-2, sigma_at(25.0)].into_iter().enumerate() {
+    for (k, sigma) in [0.0, 3.0e-3, 3.0e-2, sigma_at(25.0)]
+        .into_iter()
+        .enumerate()
+    {
         let outcome = call(&page, sigma, 0, 0x2900 + k as u64);
         let arrived = outcome.page.as_ref().is_some_and(|p| p.lines == page.lines);
         let state = if arrived { "intact" } else { "LOST" };
-        println!("hiss {sigma:.1e}: page {state}, at {}, trained at {:?}", outcome.rate, outcome.tried);
+        println!(
+            "hiss {sigma:.1e}: page {state}, at {}, trained at {:?}",
+            outcome.rate, outcome.tried
+        );
         if !arrived || outcome.rate != 9600 {
             wrong.push((sigma, arrived, outcome.rate));
         }
@@ -148,10 +170,18 @@ fn a_spoiled_check_at_9600_falls_back_to_7200() {
     let page = a_page(40);
     let outcome = call(&page, 1.0e-3, 1, 0x2972);
     let arrived = outcome.page.as_ref().is_some_and(|p| p.lines == page.lines);
-    println!("page {}, at {}, trained at {:?}", if arrived { "intact" } else { "LOST" }, outcome.rate, outcome.tried);
+    println!(
+        "page {}, at {}, trained at {:?}",
+        if arrived { "intact" } else { "LOST" },
+        outcome.rate,
+        outcome.tried
+    );
     assert!(arrived, "the page did not arrive");
     assert_eq!(outcome.rate, 7200);
-    assert_eq!(outcome.tried, [(Modulation::V29, 9600), (Modulation::V29, 7200)]);
+    assert_eq!(
+        outcome.tried,
+        [(Modulation::V29, 9600), (Modulation::V29, 7200)]
+    );
 }
 
 /// Two drowned in a row: 9600, then 7200, then the page at 4800, which T.30
@@ -161,11 +191,20 @@ fn two_spoiled_checks_fall_back_through_7200_to_4800() {
     let page = a_page(40);
     let outcome = call(&page, 1.0e-3, 2, 0x2948);
     let arrived = outcome.page.as_ref().is_some_and(|p| p.lines == page.lines);
-    println!("page {}, at {}, trained at {:?}", if arrived { "intact" } else { "LOST" }, outcome.rate, outcome.tried);
+    println!(
+        "page {}, at {}, trained at {:?}",
+        if arrived { "intact" } else { "LOST" },
+        outcome.rate,
+        outcome.tried
+    );
     assert!(arrived, "the page did not arrive");
     assert_eq!(outcome.rate, 4800);
     assert_eq!(
         outcome.tried,
-        [(Modulation::V29, 9600), (Modulation::V29, 7200), (Modulation::V27ter, 4800)]
+        [
+            (Modulation::V29, 9600),
+            (Modulation::V29, 7200),
+            (Modulation::V27ter, 4800)
+        ]
     );
 }

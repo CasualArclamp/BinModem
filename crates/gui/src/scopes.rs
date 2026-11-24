@@ -1,8 +1,8 @@
 //! Scope painting: waterfall, spectrum, eye and the LED faceplate.
 
 use eframe::egui::{
-    Align2, Color32, ColorImage, Context, FontId, Painter, Pos2, Rect, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, Vec2, pos2, vec2,
+    Align2, Color32, ColorImage, Context, FontId, Painter, Pos2, Rect, Sense, Stroke,
+    TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
 };
 
 /// Upper edge of the display in Hz. The voiceband ends well below Nyquist, so
@@ -22,7 +22,11 @@ pub fn tick_hz(span_hz: f64) -> f64 {
 /// A frequency as a tick says it: in hertz on a telephone channel, in
 /// kilohertz once the ticks are that far apart.
 pub fn tick_label(hz: f64, span_hz: f64) -> String {
-    if tick_hz(span_hz) >= 1000.0 { format!("{:.0}k", hz / 1000.0) } else { format!("{hz:.0}") }
+    if tick_hz(span_hz) >= 1000.0 {
+        format!("{:.0}k", hz / 1000.0)
+    } else {
+        format!("{hz:.0}")
+    }
 }
 
 const BACKDROP: Color32 = Color32::from_rgb(12, 14, 18);
@@ -209,7 +213,13 @@ impl Waterfall {
                 [pos2(x, rect.top()), pos2(x, rect.top() + 4.0)],
                 Stroke::new(1.0, LABEL),
             );
-            tag(&painter, pos2(x, rect.top() + 5.0), Align2::CENTER_TOP, tick_label(hz, span_hz), LABEL);
+            tag(
+                &painter,
+                pos2(x, rect.top() + 5.0),
+                Align2::CENTER_TOP,
+                tick_label(hz, span_hz),
+                LABEL,
+            );
             hz += step;
         }
 
@@ -228,7 +238,13 @@ impl Waterfall {
                     [pos2(rect.left(), y), pos2(rect.left() + 5.0, y)],
                     Stroke::new(1.0, LABEL),
                 );
-                tag(&painter, pos2(rect.left() + 7.0, y), Align2::LEFT_CENTER, format!("-{ago:.0} s"), LABEL);
+                tag(
+                    &painter,
+                    pos2(rect.left() + 7.0, y),
+                    Align2::LEFT_CENTER,
+                    format!("-{ago:.0} s"),
+                    LABEL,
+                );
                 ago += step;
             }
         }
@@ -247,9 +263,26 @@ impl Waterfall {
                     Stroke::new(1.0, heat(1.0 - k as f32 / steps as f32)),
                 );
             }
-            painter.rect_stroke(bar, 0.0, Stroke::new(1.0, GRID), eframe::egui::StrokeKind::Outside);
-            tag(&painter, pos2(rect.right() - 3.0, bar.top() - 3.0), Align2::RIGHT_BOTTOM, format!("{:.0} dB", self.ceiling_db), LABEL);
-            tag(&painter, pos2(rect.right() - 3.0, bar.bottom() + 3.0), Align2::RIGHT_TOP, format!("{:.0} dB", self.floor_db), LABEL);
+            painter.rect_stroke(
+                bar,
+                0.0,
+                Stroke::new(1.0, GRID),
+                eframe::egui::StrokeKind::Outside,
+            );
+            tag(
+                &painter,
+                pos2(rect.right() - 3.0, bar.top() - 3.0),
+                Align2::RIGHT_BOTTOM,
+                format!("{:.0} dB", self.ceiling_db),
+                LABEL,
+            );
+            tag(
+                &painter,
+                pos2(rect.right() - 3.0, bar.bottom() + 3.0),
+                Align2::RIGHT_TOP,
+                format!("{:.0} dB", self.floor_db),
+                LABEL,
+            );
         }
 
         // Under the pointer: which frequency, and how long ago.
@@ -264,9 +297,19 @@ impl Waterfall {
                 [pos2(rect.left(), at.y), pos2(rect.right(), at.y)],
                 Stroke::new(1.0, Color32::from_white_alpha(90)),
             );
-            let side = if at.x > rect.center().x { Align2::RIGHT_BOTTOM } else { Align2::LEFT_BOTTOM };
+            let side = if at.x > rect.center().x {
+                Align2::RIGHT_BOTTOM
+            } else {
+                Align2::LEFT_BOTTOM
+            };
             let dx = if at.x > rect.center().x { -8.0 } else { 8.0 };
-            tag(&painter, pos2(at.x + dx, at.y - 6.0), side, format!("{hz:.0} Hz  {ago:.1} s ago"), Color32::WHITE);
+            tag(
+                &painter,
+                pos2(at.x + dx, at.y - 6.0),
+                side,
+                format!("{hz:.0} Hz  {ago:.1} s ago"),
+                Color32::WHITE,
+            );
         }
         frame_border(&painter, rect);
     }
@@ -277,7 +320,11 @@ impl Waterfall {
 fn tag(painter: &Painter, at: Pos2, anchor: Align2, text: String, colour: Color32) {
     let galley = painter.layout_no_wrap(text, FontId::monospace(10.0), colour);
     let rect = anchor.anchor_size(at, galley.size());
-    painter.rect_filled(rect.expand2(vec2(3.0, 1.0)), 0.0, Color32::from_black_alpha(190));
+    painter.rect_filled(
+        rect.expand2(vec2(3.0, 1.0)),
+        0.0,
+        Color32::from_black_alpha(190),
+    );
     painter.galley(rect.min, galley, colour);
 }
 
@@ -322,7 +369,13 @@ pub fn measure(bins: &[f32], hz_per_bin: f64, span_hz: f64) -> Option<Measured> 
     let low = band.iter().position(|&v| v >= edge)?;
     let high = band.iter().rposition(|&v| v >= edge)?;
     let hz = |k: usize| (first + k) as f64 * hz_per_bin;
-    Some(Measured { peak_hz: hz(at), peak_db, floor_db, low_hz: hz(low), high_hz: hz(high) })
+    Some(Measured {
+        peak_hz: hz(at),
+        peak_db,
+        floor_db,
+        low_hz: hz(low),
+        high_hz: hz(high),
+    })
 }
 
 /// The line samples' own figures: the largest, the root mean square, and how
@@ -357,10 +410,16 @@ pub fn oscilloscope(ui: &mut Ui, samples: &[f32], sample_rate: f64, size: Vec2) 
     let rect = response.rect;
     painter.rect_filled(rect, 0.0, BACKDROP);
     let mid = rect.center().y;
-    painter.line_segment([pos2(rect.left(), mid), pos2(rect.right(), mid)], Stroke::new(1.0, GRID));
+    painter.line_segment(
+        [pos2(rect.left(), mid), pos2(rect.right(), mid)],
+        Stroke::new(1.0, GRID),
+    );
     for quarter in 1..4 {
         let x = rect.left() + rect.width() * quarter as f32 / 4.0;
-        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0, GRID),
+        );
     }
 
     let span = ((sample_rate * 0.020) as usize).clamp(2, samples.len().max(2));
@@ -417,13 +476,19 @@ pub fn loading(ui: &mut Ui, carriers: &[(f32, f32, f32)], size: Vec2) {
     let (response, painter) = ui.allocate_painter(size, Sense::hover());
     let rect = response.rect;
     painter.rect_filled(rect, 0.0, BACKDROP);
-    let plot = Rect::from_min_max(pos2(rect.left() + 2.0, rect.top() + 16.0), pos2(rect.right() - 2.0, rect.bottom() - 16.0));
+    let plot = Rect::from_min_max(
+        pos2(rect.left() + 2.0, rect.top() + 16.0),
+        pos2(rect.right() - 2.0, rect.bottom() - 16.0),
+    );
     // Twenty-four bits is the most a carrier takes: 80 dB on the same axis.
     const MOST_BITS: f32 = 24.0;
     let height_of = |bits: f32| plot.height() * (bits / MOST_BITS).clamp(0.0, 1.0);
     for eighth in 1..3 {
         let y = plot.bottom() - height_of(8.0 * eighth as f32);
-        painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0, GRID));
+        painter.line_segment(
+            [pos2(plot.left(), y), pos2(plot.right(), y)],
+            Stroke::new(1.0, GRID),
+        );
     }
     let top_hz = carriers.last().map_or(1.0, |c| c.0.max(1.0));
     let most = carriers.iter().fold(0.0f32, |m, c| m.max(c.2));
@@ -434,16 +499,25 @@ pub fn loading(ui: &mut Ui, carriers: &[(f32, f32, f32)], size: Vec2) {
         for &(hz, snr_db, bits) in carriers {
             let x = plot.left() + plot.width() * hz / top_hz;
             if bits > 0.0 {
-                let bar = Rect::from_min_max(pos2(x - width, plot.bottom() - height_of(bits)), pos2(x, plot.bottom()));
+                let bar = Rect::from_min_max(
+                    pos2(x - width, plot.bottom() - height_of(bits)),
+                    pos2(x, plot.bottom()),
+                );
                 painter.rect_filled(bar, 0.0, TRACE.gamma_multiply(0.55));
             }
             if snr_db > 0.0 {
                 // The bits this ratio would bear, on the bars' own scale.
-                ratio.push(pos2(x - width * 0.5, plot.bottom() - height_of((snr_db - 8.0) / 3.01)));
+                ratio.push(pos2(
+                    x - width * 0.5,
+                    plot.bottom() - height_of((snr_db - 8.0) / 3.01),
+                ));
             }
         }
         for pair in ratio.windows(2) {
-            painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, Color32::from_rgb(240, 200, 90)));
+            painter.line_segment(
+                [pair[0], pair[1]],
+                Stroke::new(1.2, Color32::from_rgb(240, 200, 90)),
+            );
         }
     }
     let khz = top_hz / 1000.0;
@@ -452,13 +526,25 @@ pub fn loading(ui: &mut Ui, carriers: &[(f32, f32, f32)], size: Vec2) {
     } else {
         "bits a carrier".to_owned()
     };
-    painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, head, FontId::monospace(10.0), LABEL);
+    painter.text(
+        pos2(rect.left() + 5.0, rect.top() + 3.0),
+        Align2::LEFT_TOP,
+        head,
+        FontId::monospace(10.0),
+        LABEL,
+    );
     let foot = if carriers.len() > 1 {
         format!("most {most:.0}  line: SNR to {best:.0} dB")
     } else {
         "one carrier: nothing to lay out".to_owned()
     };
-    painter.text(pos2(rect.left() + 5.0, rect.bottom() - 3.0), Align2::LEFT_BOTTOM, foot, FontId::monospace(10.0), LABEL);
+    painter.text(
+        pos2(rect.left() + 5.0, rect.bottom() - 3.0),
+        Align2::LEFT_BOTTOM,
+        foot,
+        FontId::monospace(10.0),
+        LABEL,
+    );
     frame_border(&painter, rect);
 }
 
@@ -474,10 +560,16 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
     let rect = response_area.rect;
     painter.rect_filled(rect, 0.0, BACKDROP);
     let mid = rect.center().y;
-    painter.line_segment([pos2(rect.left(), mid), pos2(rect.right(), mid)], Stroke::new(1.0, GRID));
+    painter.line_segment(
+        [pos2(rect.left(), mid), pos2(rect.right(), mid)],
+        Stroke::new(1.0, GRID),
+    );
     for quarter in 1..4 {
         let x = rect.left() + rect.width() * quarter as f32 / 4.0;
-        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0, GRID),
+        );
     }
     if response.len() > 1 {
         let peak = response.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
@@ -485,7 +577,12 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
         let points: Vec<Pos2> = response
             .iter()
             .enumerate()
-            .map(|(i, v)| pos2(rect.left() + rect.width() * i as f32 / (response.len() - 1) as f32, mid - half * v / peak))
+            .map(|(i, v)| {
+                pos2(
+                    rect.left() + rect.width() * i as f32 / (response.len() - 1) as f32,
+                    mid - half * v / peak,
+                )
+            })
             .collect();
         for pair in points.windows(2) {
             painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, TRACE));
@@ -505,7 +602,13 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
             LABEL,
         );
     } else {
-        painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, "echo", FontId::monospace(10.0), LABEL);
+        painter.text(
+            pos2(rect.left() + 5.0, rect.top() + 3.0),
+            Align2::LEFT_TOP,
+            "echo",
+            FontId::monospace(10.0),
+            LABEL,
+        );
         // A delay below nought is a canceller that is there and has found
         // nothing yet, which is not the same as there being none.
         let why = if delay_ms < 0.0 {
@@ -513,7 +616,13 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
         } else {
             "a wire each way:\nno echo to cancel"
         };
-        painter.text(rect.center(), Align2::CENTER_CENTER, why, FontId::monospace(10.0), LABEL);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            why,
+            FontId::monospace(10.0),
+            LABEL,
+        );
     }
     frame_border(&painter, rect);
 }
@@ -538,7 +647,13 @@ fn frame_border(painter: &Painter, rect: Rect) {
 /// Bell 103's tones sit 200 Hz apart, which is only a few pixels wide, so the
 /// labels are staggered vertically. Drawn on one line they overlap into an
 /// unreadable smear.
-fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool, modulation: &str, span_hz: f64) {
+fn paint_tone_markers(
+    painter: &Painter,
+    rect: Rect,
+    with_text: bool,
+    modulation: &str,
+    span_hz: f64,
+) {
     for (i, (hz, name, colour)) in markers(modulation).iter().enumerate() {
         let x = rect.left() + rect.width() * (*hz / span_hz) as f32;
         painter.line_segment(
@@ -577,7 +692,16 @@ pub struct Trace<'a> {
 /// peak, the noise floor, the band the signal occupies, and the frequency
 /// and level under the pointer.
 pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
-    let Trace { bins, hold, hz_per_bin, span_hz, floor, ceiling, modulation, measured } = trace;
+    let Trace {
+        bins,
+        hold,
+        hz_per_bin,
+        span_hz,
+        floor,
+        ceiling,
+        modulation,
+        measured,
+    } = trace;
     let (response, painter) = allocate(ui, height);
     let whole = response.rect;
     painter.rect_filled(whole, 0.0, BACKDROP);
@@ -593,7 +717,10 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
     let mut db = (ceiling / 20.0).floor() * 20.0;
     while db >= floor {
         let y = y_of(db);
-        painter.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(1.0, GRID));
+        painter.line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(1.0, GRID),
+        );
         painter.text(
             pos2(rect.left() + 3.0, y - 1.0),
             Align2::LEFT_BOTTOM,
@@ -615,7 +742,10 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
     let mut hz = 0.0;
     while hz <= span_hz {
         let x = x_of(hz);
-        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0, GRID),
+        );
         let (anchor, text) = if hz == 0.0 {
             (Align2::LEFT_BOTTOM, "0 Hz".to_owned())
         } else if hz >= span_hz {
@@ -623,7 +753,13 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
         } else {
             (Align2::CENTER_BOTTOM, tick_label(hz, span_hz))
         };
-        painter.text(pos2(x, whole.bottom() - 1.0), anchor, text, FontId::monospace(9.0), LABEL);
+        painter.text(
+            pos2(x, whole.bottom() - 1.0),
+            anchor,
+            text,
+            FontId::monospace(9.0),
+            LABEL,
+        );
         hz += step;
     }
     paint_tone_markers(&painter, rect, true, modulation, span_hz);
@@ -634,7 +770,10 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
             .map(|x| {
                 let hz = span_hz * x as f64 / w as f64;
                 let bin = (hz / hz_per_bin).round() as usize;
-                pos2(rect.left() + x as f32, y_of(source.get(bin).copied().unwrap_or(-120.0)))
+                pos2(
+                    rect.left() + x as f32,
+                    y_of(source.get(bin).copied().unwrap_or(-120.0)),
+                )
             })
             .collect();
         for pair in points.windows(2) {
@@ -652,7 +791,13 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
             [pos2(rect.left(), y), pos2(rect.right(), y)],
             Stroke::new(1.0, faint.gamma_multiply(0.5)),
         );
-        tag(&painter, pos2(rect.right() - 4.0, y - 2.0), Align2::RIGHT_BOTTOM, format!("floor {:.0} dB", m.floor_db), faint);
+        tag(
+            &painter,
+            pos2(rect.right() - 4.0, y - 2.0),
+            Align2::RIGHT_BOTTOM,
+            format!("floor {:.0} dB", m.floor_db),
+            faint,
+        );
 
         // The band the signal occupies, bracketed.
         let (a, b) = (x_of(m.low_hz), x_of(m.high_hz));
@@ -666,7 +811,12 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
                 &painter,
                 pos2((a + b) * 0.5, top + 3.0),
                 Align2::CENTER_TOP,
-                format!("{:.0} - {:.0} Hz, {:.0} wide", m.low_hz, m.high_hz, m.high_hz - m.low_hz),
+                format!(
+                    "{:.0} - {:.0} Hz, {:.0} wide",
+                    m.low_hz,
+                    m.high_hz,
+                    m.high_hz - m.low_hz
+                ),
                 Color32::from_rgb(130, 190, 240),
             );
         }
@@ -674,12 +824,21 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
         // The peak, named where it stands.
         let at = pos2(x_of(m.peak_hz), y_of(m.peak_db));
         painter.circle_stroke(at, 3.5, Stroke::new(1.2, Color32::WHITE));
-        let (anchor, dx) = if at.x > rect.center().x { (Align2::RIGHT_CENTER, -8.0) } else { (Align2::LEFT_CENTER, 8.0) };
+        let (anchor, dx) = if at.x > rect.center().x {
+            (Align2::RIGHT_CENTER, -8.0)
+        } else {
+            (Align2::LEFT_CENTER, 8.0)
+        };
         tag(
             &painter,
             pos2(at.x + dx, (at.y + 12.0).max(rect.top() + 62.0)),
             anchor,
-            format!("peak {:.0} Hz  {:.1} dB  {:.0} over the floor", m.peak_hz, m.peak_db, m.peak_db - m.floor_db),
+            format!(
+                "peak {:.0} Hz  {:.1} dB  {:.0} over the floor",
+                m.peak_hz,
+                m.peak_db,
+                m.peak_db - m.floor_db
+            ),
             Color32::WHITE,
         );
     }
@@ -687,13 +846,26 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
     // Under the pointer: the frequency, and the level of the bin there.
     if let Some(at) = response.hover_pos().filter(|p| rect.contains(*p)) {
         let hz = span_hz * ((at.x - rect.left()) / rect.width()) as f64;
-        let level = bins.get((hz / hz_per_bin).round() as usize).copied().unwrap_or(-120.0);
+        let level = bins
+            .get((hz / hz_per_bin).round() as usize)
+            .copied()
+            .unwrap_or(-120.0);
         painter.line_segment(
             [pos2(at.x, rect.top()), pos2(at.x, rect.bottom())],
             Stroke::new(1.0, Color32::from_white_alpha(90)),
         );
-        let (anchor, dx) = if at.x > rect.center().x { (Align2::RIGHT_BOTTOM, -8.0) } else { (Align2::LEFT_BOTTOM, 8.0) };
-        tag(&painter, pos2(at.x + dx, at.y - 6.0), anchor, format!("{hz:.0} Hz  {level:.1} dBFS"), Color32::WHITE);
+        let (anchor, dx) = if at.x > rect.center().x {
+            (Align2::RIGHT_BOTTOM, -8.0)
+        } else {
+            (Align2::LEFT_BOTTOM, 8.0)
+        };
+        tag(
+            &painter,
+            pos2(at.x + dx, at.y - 6.0),
+            anchor,
+            format!("{hz:.0} Hz  {level:.1} dBFS"),
+            Color32::WHITE,
+        );
     }
     frame_border(&painter, whole);
 }
@@ -766,7 +938,12 @@ pub fn symbol_scope(
     quality: Option<u32>,
     height: f32,
 ) -> eframe::egui::Response {
-    let Constellation { points: constellation, tones, peak, pcm } = dots;
+    let Constellation {
+        points: constellation,
+        tones,
+        peak,
+        pcm,
+    } = dots;
     let pairs = pcm.is_some();
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::click());
@@ -780,12 +957,18 @@ pub fn symbol_scope(
 
     let quadrature = tones > 2 || !constellation.is_empty();
     painter.line_segment(
-        [pos2(centre.x - radius, centre.y), pos2(centre.x + radius, centre.y)],
+        [
+            pos2(centre.x - radius, centre.y),
+            pos2(centre.x + radius, centre.y),
+        ],
         Stroke::new(1.5, axis),
     );
     if quadrature {
         painter.line_segment(
-            [pos2(centre.x, centre.y - radius), pos2(centre.x, centre.y + radius)],
+            [
+                pos2(centre.x, centre.y - radius),
+                pos2(centre.x, centre.y + radius),
+            ],
             Stroke::new(1.5, axis),
         );
     }
@@ -868,7 +1051,11 @@ pub fn symbol_scope(
     // from one. And where there are thousands, one pixel each is the most
     // that leaves the shape they make to be seen.
     let pixels = ui.ctx().pixels_per_point();
-    let across = if many || crowded { 1.0 } else { (side * pixels).round().max(1.0) };
+    let across = if many || crowded {
+        1.0
+    } else {
+        (side * pixels).round().max(1.0)
+    };
     let dot = |centre: Pos2| {
         let corner = pos2(
             (centre.x * pixels - across / 2.0).round() / pixels,
@@ -876,7 +1063,18 @@ pub fn symbol_scope(
         );
         Rect::from_min_size(corner, vec2(across / pixels, across / pixels))
     };
-    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
+    let colour = Color32::from_rgba_unmultiplied(
+        120,
+        220,
+        160,
+        if few {
+            255
+        } else if crowded {
+            110
+        } else {
+            150
+        },
+    );
     match pcm {
         Some(PcmView::Ladder) => {
             // Oldest on the left; the level is the second of each pair.
@@ -895,7 +1093,10 @@ pub fn symbol_scope(
                 let ideal = (2.0 * nearest - steps) / steps;
                 let miss = (level - ideal) * steps;
                 mesh.add_colored_rect(
-                    dot(pos2(centre.x + ideal * radius, centre.y - miss.clamp(-1.0, 1.0) * radius)),
+                    dot(pos2(
+                        centre.x + ideal * radius,
+                        centre.y - miss.clamp(-1.0, 1.0) * radius,
+                    )),
                     colour,
                 );
             }
@@ -919,24 +1120,48 @@ pub fn symbol_scope(
             // Top and bottom of the box are the decision lines.
             PcmView::Error => ("level", "miss"),
         };
-        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, across, FontId::monospace(10.0), faint);
-        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, up, FontId::monospace(10.0), faint);
+        painter.text(
+            pos2(centre.x + radius - 2.0, centre.y + 4.0),
+            Align2::RIGHT_TOP,
+            across,
+            FontId::monospace(10.0),
+            faint,
+        );
+        painter.text(
+            pos2(centre.x + 4.0, centre.y - radius + 2.0),
+            Align2::LEFT_TOP,
+            up,
+            FontId::monospace(10.0),
+            faint,
+        );
     }
     let (text, colour) = match quality {
         _ if pairs && !constellation.is_empty() => (
-            format!("{label} {tones} points, last {} samples", constellation.len()),
+            format!(
+                "{label} {tones} points, last {} samples",
+                constellation.len()
+            ),
             Color32::from_rgb(150, 160, 175),
         ),
-        Some(q) => (format!("{label} Quality: {q}"), margin_colour(q as f32 / 100.0)),
+        Some(q) => (
+            format!("{label} Quality: {q}"),
+            margin_colour(q as f32 / 100.0),
+        ),
         None if tones > 128 && !constellation.is_empty() => (
-            format!("{label}  {tones} points, last {} symbols", constellation.len()),
+            format!(
+                "{label}  {tones} points, last {} symbols",
+                constellation.len()
+            ),
             Color32::from_rgb(150, 160, 175),
         ),
         None if !constellation.is_empty() => (
             format!("{label}  {} points", constellation.len()),
             Color32::from_rgb(150, 160, 175),
         ),
-        None => (format!("{label}  no symbols"), Color32::from_rgb(120, 100, 100)),
+        None => (
+            format!("{label}  no symbols"),
+            Color32::from_rgb(120, 100, 100),
+        ),
     };
     painter.text(
         pos2(rect.left() + 6.0, rect.bottom() - 4.0),
@@ -1053,7 +1278,6 @@ pub fn request_animation(ctx: &Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(16));
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,11 +1292,19 @@ mod tests {
         bins[tone - 1] = -42.0;
         bins[tone + 1] = -42.0;
         let m = measure(&bins, hz_per_bin, DISPLAY_HZ).expect("a tone 60 dB over the noise");
-        assert!((m.peak_hz - 2225.0).abs() < hz_per_bin, "peak at {}", m.peak_hz);
+        assert!(
+            (m.peak_hz - 2225.0).abs() < hz_per_bin,
+            "peak at {}",
+            m.peak_hz
+        );
         assert_eq!(m.peak_db, -30.0);
         assert_eq!(m.floor_db, -90.0);
         assert!(m.low_hz < m.peak_hz && m.peak_hz < m.high_hz);
-        assert!(m.high_hz - m.low_hz < 4.0 * hz_per_bin, "{} wide", m.high_hz - m.low_hz);
+        assert!(
+            m.high_hz - m.low_hz < 4.0 * hz_per_bin,
+            "{} wide",
+            m.high_hz - m.low_hz
+        );
     }
 
     #[test]
@@ -1096,7 +1328,11 @@ mod tests {
         let samples: Vec<f32> = (0..800).map(|i| (i as f32 * 0.25).sin()).collect();
         let w = wave(&samples).unwrap();
         assert!(w.peak_db.abs() < 0.1, "peak {}", w.peak_db);
-        assert!((w.peak_db - w.rms_db - 3.01).abs() < 0.1, "crest {}", w.peak_db - w.rms_db);
+        assert!(
+            (w.peak_db - w.rms_db - 3.01).abs() < 0.1,
+            "crest {}",
+            w.peak_db - w.rms_db
+        );
         assert_eq!(wave(&[]), None);
     }
 }

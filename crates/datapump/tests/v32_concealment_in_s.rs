@@ -59,7 +59,11 @@ fn connects_with_hole(at: f64, into_answering: bool, delay: usize, fill: Fill) -
         to_calling.push_back(from_answering);
         let mut heard_calling = to_calling.pop_front().unwrap_or(0.0);
         let mut heard_answering = to_answering.pop_front().unwrap_or(0.0);
-        let x = if into_answering { &mut heard_answering } else { &mut heard_calling };
+        let x = if into_answering {
+            &mut heard_answering
+        } else {
+            &mut heard_calling
+        };
         if i == start {
             let rms = (recent.iter().map(|v| v * v).sum::<f64>() / HOLE as f64).sqrt();
             let last: Vec<f64> = recent.iter().copied().collect();
@@ -82,7 +86,9 @@ fn connects_with_hole(at: f64, into_answering: bool, delay: usize, fill: Fill) -
         from_calling = calling.step(heard_calling);
         from_answering = answering.step(heard_answering);
         let _ = (calling.take_bits(), answering.take_bits());
-        if matches!(calling.status(), Status::Connected(_)) && matches!(answering.status(), Status::Connected(_)) {
+        if matches!(calling.status(), Status::Connected(_))
+            && matches!(answering.status(), Status::Connected(_))
+        {
             return Some(i as f64 / FS);
         }
     }
@@ -105,10 +111,21 @@ fn a_hole_in_the_far_end_s_does_not_stop_the_call() {
         let handles: Vec<_> = cases
             .iter()
             .map(|&(at, into_answering, delay, fill)| {
-                s.spawn(move || (at, into_answering, delay, fill, connects_with_hole(at, into_answering, delay, fill)))
+                s.spawn(move || {
+                    (
+                        at,
+                        into_answering,
+                        delay,
+                        fill,
+                        connects_with_hole(at, into_answering, delay, fill),
+                    )
+                })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("a call panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a call panicked"))
+            .collect()
     });
     let failed: Vec<_> = results.iter().filter(|r| r.4.is_none()).collect();
     assert!(failed.is_empty(), "never connected: {failed:?}");

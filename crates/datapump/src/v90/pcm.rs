@@ -67,7 +67,6 @@ const KEPT: usize = 8192;
 /// its clock is known.
 const HISTORY_SECONDS: f64 = 1.0;
 
-
 /// Sd's period, in half-symbol samples.
 const PERIOD: usize = 2 * INTERVALS;
 
@@ -181,17 +180,25 @@ impl Slicer {
 
 /// The nearest of `levels`, sorted either way, to `y`.
 fn nearest(levels: &[f64], y: f64) -> Option<f64> {
-    levels.iter().copied().min_by(|a, b| (a - y).abs().total_cmp(&(b - y).abs()))
+    levels
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - y).abs().total_cmp(&(b - y).abs()))
 }
 
 /// What the receiver has to report.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Heard {
     /// Sd, and then the change to S-bar-d at about this half-symbol sample.
-    Reversal { at: u64 },
+    Reversal {
+        at: u64,
+    },
     /// Trained on TRN1d, with the signal to noise the training left and
     /// whether the line turns the signal over.
-    Trained { snr_db: f64, inverted: bool },
+    Trained {
+        snr_db: f64,
+        inverted: bool,
+    },
     /// Nothing trained: TRN1d was not where the reversal said.
     Untrained,
     Symbol(Symbol),
@@ -307,7 +314,11 @@ enum Stage {
     /// TRN1d arriving: the half-symbol sample its first symbol is near, the
     /// symbol of it the training stretch begins at, and how many stretches
     /// have been tried.
-    Collecting { start: u64, base: usize, tries: u32 },
+    Collecting {
+        start: u64,
+        base: usize,
+        tries: u32,
+    },
     Trained,
 }
 
@@ -340,7 +351,10 @@ impl Hunt {
         if self.products.len() > PERIOD {
             self.products.pop_front();
         }
-        let (together, power) = self.products.iter().fold((0.0, 0.0), |(c, p), &(x, y)| (c + x, p + y));
+        let (together, power) = self
+            .products
+            .iter()
+            .fold((0.0, 0.0), |(c, p), &(x, y)| (c + x, p + y));
         let share = together / power.max(1e-30);
         let mean_power = power / self.products.len() as f64;
         if mean_power < AUDIBLE {
@@ -483,7 +497,12 @@ impl Residue {
         // noise looks like residue, and is not.
         let misread = response.len() as f64 * error / (power * n);
         let carried = (response.iter().map(|c| c * c).sum::<f64>() - misread).max(0.0) * power;
-        Some(Leftover { response, noise: (error - carried).max(0.0), power, misread })
+        Some(Leftover {
+            response,
+            noise: (error - carried).max(0.0),
+            power,
+            misread,
+        })
     }
 }
 
@@ -579,11 +598,20 @@ impl Receiver {
         for ph in 0..FILTER_PHASES {
             let row = &mut table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
             for (i, tap) in row.iter_mut().enumerate() {
-                let tau = ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
+                let tau =
+                    ph as f64 / FILTER_PHASES as f64 + (FILTER_TAPS / 2) as f64 - 1.0 - i as f64;
                 let x = 2.0 * cutoff * tau / fs;
-                let sinc = if x.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                let sinc = if x.abs() < 1e-12 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
                 let edge = (FILTER_TAPS / 2) as f64;
-                let taper = if tau.abs() >= edge { 0.0 } else { kaiser(tau / edge, 8.0) };
+                let taper = if tau.abs() >= edge {
+                    0.0
+                } else {
+                    kaiser(tau / edge, 8.0)
+                };
                 *tap = sinc * taper;
             }
             let sum: f64 = row.iter().sum();
@@ -686,14 +714,22 @@ impl Receiver {
     /// [`Slicer::Known`], forgetting what was said before: a slip has moved
     /// them.
     pub fn expect_from(&mut self, first: u64, levels: impl IntoIterator<Item = f64>) {
-        self.set_slicer(Slicer::Known { first, levels: levels.into_iter().collect() });
+        self.set_slicer(Slicer::Known {
+            first,
+            levels: levels.into_iter().collect(),
+        });
     }
 
     /// Say what the next symbols are, for [`Slicer::Known`].
     pub fn expect(&mut self, levels: impl IntoIterator<Item = f64>) {
         match &mut self.slicer {
             Slicer::Known { levels: queue, .. } => queue.extend(levels),
-            other => *other = Slicer::Known { first: self.next_symbol, levels: levels.into_iter().collect() },
+            other => {
+                *other = Slicer::Known {
+                    first: self.next_symbol,
+                    levels: levels.into_iter().collect(),
+                }
+            }
         }
     }
 
@@ -749,7 +785,13 @@ impl Receiver {
         // stretch that `solve` then gave up on. Neither is a rate to put on
         // the line, so the reported one waits for the training to stand.
         let drift = if trained { self.drift } else { 0.0 };
-        SymbolClock { period: nominal * (1.0 + drift), nominal, at, index: self.next_symbol, trained }
+        SymbolClock {
+            period: nominal * (1.0 + drift),
+            nominal,
+            at,
+            index: self.next_symbol,
+            trained,
+        }
     }
 
     /// The equaliser, for looking at.
@@ -798,7 +840,12 @@ impl Receiver {
         }
         let offset = (from - self.history_first as i64) as usize;
         let row = &self.table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
-        Some(row.iter().enumerate().map(|(i, tap)| self.history[offset + i] * tap).sum())
+        Some(
+            row.iter()
+                .enumerate()
+                .map(|(i, tap)| self.history[offset + i] * tap)
+                .sum(),
+        )
     }
 
     fn on_half(&mut self, half: f64, at: f64) {
@@ -817,15 +864,29 @@ impl Receiver {
                 if let Some(at) = hunt.feed(half, index) {
                     self.heard.push_back(Heard::Reversal { at });
                     // TRN1d follows S-bar-d's 48 symbols.
-                    self.stage = Stage::Collecting { start: at + 2 * SD_BAR_SYMBOLS as u64, base: 0, tries: 0 };
+                    self.stage = Stage::Collecting {
+                        start: at + 2 * SD_BAR_SYMBOLS as u64,
+                        base: 0,
+                        tries: 0,
+                    };
                 }
             }
             Stage::Collecting { start, base, tries } => {
                 let (start, base, tries) = (*start, *base, *tries);
                 // A later stretch is looked for a slip either way of where
                 // it should be, and all of that has to have arrived.
-                let reach = if tries > 0 { 2 * COARSE_SYMBOLS as u64 } else { 0 };
-                let needed = start + 2 * base as u64 + reach + SEARCH as u64 + 2 * TRAIN_TO as u64 + REACH as u64 + 1;
+                let reach = if tries > 0 {
+                    2 * COARSE_SYMBOLS as u64
+                } else {
+                    0
+                };
+                let needed = start
+                    + 2 * base as u64
+                    + reach
+                    + SEARCH as u64
+                    + 2 * TRAIN_TO as u64
+                    + REACH as u64
+                    + 1;
                 if self.made > needed {
                     self.finish_training(start, base, tries);
                 }
@@ -860,7 +921,13 @@ impl Receiver {
         let level = ucode::level(self.law, self.uinfo);
         let mut scrambler = Scrambler::new(Mode::Call);
         (0..to)
-            .map(|_| if scrambler.scramble(true) { level } else { -level })
+            .map(|_| {
+                if scrambler.scramble(true) {
+                    level
+                } else {
+                    -level
+                }
+            })
             .skip(from)
             .collect()
     }
@@ -874,8 +941,15 @@ impl Receiver {
         for lag in -reach..=reach {
             let mut sum = 0.0;
             for (k, &target) in targets.iter().enumerate().skip(TRAIN_FROM) {
-                let Some(at) = (start + 2 * k as u64).checked_add_signed(lag).and_then(|a| a.checked_sub(self.first)) else { continue };
-                let Some(&v) = self.halves.get(at as usize) else { continue };
+                let Some(at) = (start + 2 * k as u64)
+                    .checked_add_signed(lag)
+                    .and_then(|a| a.checked_sub(self.first))
+                else {
+                    continue;
+                };
+                let Some(&v) = self.halves.get(at as usize) else {
+                    continue;
+                };
                 sum += v * target;
             }
             if best.is_none_or(|(b, _)| sum.abs() > b) {
@@ -901,7 +975,9 @@ impl Receiver {
         let pulse = |from: usize, lag: i64| -> Option<f64> {
             let mut sum = 0.0;
             for (k, &target) in targets.iter().enumerate().skip(from).take(length) {
-                let at = (origin + 2 * k as u64).checked_add_signed(lag)?.checked_sub(self.first)? as usize;
+                let at = (origin + 2 * k as u64)
+                    .checked_add_signed(lag)?
+                    .checked_sub(self.first)? as usize;
                 sum += self.halves.get(at)? * target;
             }
             Some(sum)
@@ -915,16 +991,28 @@ impl Receiver {
         let mut points = Vec::with_capacity(4);
         for n in 0..4 {
             let from = TRAIN_FROM + n * length;
-            let (a, b, c) = (pulse(from, peak - 1)?.abs(), pulse(from, peak)?.abs(), pulse(from, peak + 1)?.abs());
+            let (a, b, c) = (
+                pulse(from, peak - 1)?.abs(),
+                pulse(from, peak)?.abs(),
+                pulse(from, peak + 1)?.abs(),
+            );
             let bend = a - 2.0 * b + c;
-            let frac = if bend.abs() > 1e-30 { 0.5 * (a - c) / bend } else { 0.0 };
+            let frac = if bend.abs() > 1e-30 {
+                0.5 * (a - c) / bend
+            } else {
+                0.0
+            };
             // Half-symbol samples of where the stretch's middle is, and where
             // its peak is.
             points.push((2.0 * (from + length / 2) as f64, frac));
         }
         let n = points.len() as f64;
-        let (mx, my) = points.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
-        let (sxy, sxx) = points.iter().fold((0.0, 0.0), |(xy, xx), p| (xy + (p.0 - mx) * (p.1 - my), xx + (p.0 - mx).powi(2)));
+        let (mx, my) = points
+            .iter()
+            .fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+        let (sxy, sxx) = points.iter().fold((0.0, 0.0), |(xy, xx), p| {
+            (xy + (p.0 - mx) * (p.1 - my), xx + (p.0 - mx).powi(2))
+        });
         Some(sxy / sxx.max(1e-30))
     }
 
@@ -932,8 +1020,12 @@ impl Receiver {
     /// off the line's, from the line kept. False if the line kept does not
     /// reach back that far.
     fn resample(&mut self, from: u64, drift: f64) -> bool {
-        let Some(k0) = from.checked_sub(self.first).map(|k| k as usize) else { return false };
-        let Some(&t0) = self.times.get(k0) else { return false };
+        let Some(k0) = from.checked_sub(self.first).map(|k| k as usize) else {
+            return false;
+        };
+        let Some(&t0) = self.times.get(k0) else {
+            return false;
+        };
         let step = self.half * (1.0 + drift);
         let count = self.halves.len() - k0;
         let mut again = Vec::with_capacity(count);
@@ -977,7 +1069,9 @@ impl Receiver {
         if let Some(origin) = self.align(start, base) {
             let targets = self.trn1d(base, base + TRAIN_TO);
             for _ in 0..8 {
-                let Some(off) = self.drift_across(origin, &targets) else { break };
+                let Some(off) = self.drift_across(origin, &targets) else {
+                    break;
+                };
                 if off.abs() < 0.5e-6 {
                     break;
                 }
@@ -988,8 +1082,12 @@ impl Receiver {
             }
         }
         match self.solve(start, base) {
-            Some(solution) if -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10() >= KNOWN_ENOUGH => {
-                self.trained_snr = -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10();
+            Some(solution)
+                if -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10()
+                    >= KNOWN_ENOUGH =>
+            {
+                self.trained_snr =
+                    -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10();
                 // Which way round the line has the signal: the main tap's
                 // sign, against a line that passes it straight through.
                 let main = self.taps_peak(&solution.taps);
@@ -1005,11 +1103,18 @@ impl Receiver {
                 self.slicer = Slicer::Binary(ucode::level(self.law, self.uinfo));
                 self.residue.open(true);
                 self.stage = Stage::Trained;
-                self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, inverted: self.inverted });
+                self.heard.push_back(Heard::Trained {
+                    snr_db: self.trained_snr,
+                    inverted: self.inverted,
+                });
                 self.symbols();
             }
             _ if tries + 1 < TRAIN_TRIES => {
-                self.stage = Stage::Collecting { start: first, base: base + TRAIN_TO, tries: tries + 1 };
+                self.stage = Stage::Collecting {
+                    start: first,
+                    base: base + TRAIN_TO,
+                    tries: tries + 1,
+                };
             }
             _ => {
                 self.stage = Stage::Idle;
@@ -1024,7 +1129,9 @@ impl Receiver {
 
     /// The tap of largest size, with its sign.
     fn taps_peak(&self, taps: &[f64]) -> f64 {
-        taps.iter().copied().fold(0.0, |best, t| if t.abs() > best.abs() { t } else { best })
+        taps.iter()
+            .copied()
+            .fold(0.0, |best, t| if t.abs() > best.abs() { t } else { best })
     }
 
     /// Where TRN1d's first symbol is, near `start`: the alignment whose
@@ -1033,8 +1140,12 @@ impl Receiver {
         let targets = self.trn1d(base, base + SEARCH_TO);
         let mut best: Option<(f64, u64)> = None;
         for delta in -SEARCH..=SEARCH {
-            let Some(origin) = start.checked_add_signed(delta) else { continue };
-            let Some(solution) = self.fit(origin, &targets, SEARCH_FROM, SEARCH_TO) else { continue };
+            let Some(origin) = start.checked_add_signed(delta) else {
+                continue;
+            };
+            let Some(solution) = self.fit(origin, &targets, SEARCH_FROM, SEARCH_TO) else {
+                continue;
+            };
             if best.is_none_or(|(mse, _)| solution.mse < mse) {
                 best = Some((solution.mse, origin));
             }
@@ -1057,7 +1168,10 @@ impl Receiver {
         let mut targets = self.trn1d(base, base + TRAIN_TO);
         let first = self.fit(origin, &targets, TRAIN_FROM, TRAIN_TO)?;
         let outputs = self.outputs(origin, &targets, &first, TRAIN_FROM, TRAIN_TO)?;
-        let mut misses: Vec<f64> = outputs.iter().map(|&(k, y)| (y - targets[k]).abs()).collect();
+        let mut misses: Vec<f64> = outputs
+            .iter()
+            .map(|&(k, y)| (y - targets[k]).abs())
+            .collect();
         misses.sort_by(f64::total_cmp);
         // The noise, from the middle of the misses: a robbed sixth cannot
         // move that.
@@ -1066,7 +1180,10 @@ impl Receiver {
         for &(k, y) in &outputs {
             let arrived = self.nearest_codeword(y);
             let apart = (arrived - targets[k]).abs();
-            if self.neighbours(arrived, targets[k]) && (y - arrived).abs() < 0.4 * apart && apart > 2.5 * noise {
+            if self.neighbours(arrived, targets[k])
+                && (y - arrived).abs() < 0.4 * apart
+                && apart > 2.5 * noise
+            {
                 targets[k] = arrived;
                 moved += 1;
             }
@@ -1078,12 +1195,22 @@ impl Receiver {
     }
 
     /// What a fit makes of symbols `from` to `to`, as (symbol, output).
-    fn outputs(&self, origin: u64, targets: &[f64], solution: &Solution, from: usize, to: usize) -> Option<Vec<(usize, f64)>> {
+    fn outputs(
+        &self,
+        origin: u64,
+        targets: &[f64],
+        solution: &Solution,
+        from: usize,
+        to: usize,
+    ) -> Option<Vec<(usize, f64)>> {
         let mut out = Vec::with_capacity(to - from);
         for k in from.max(FEEDBACK)..to.min(targets.len()) {
             let row = self.samples(origin + 2 * k as u64, REACH)?;
             let fed: Vec<f64> = (1..=FEEDBACK).map(|m| targets[k - m]).collect();
-            out.push((k, apply(&solution.taps, &row) - apply(&solution.feedback, &fed)));
+            out.push((
+                k,
+                apply(&solution.taps, &row) - apply(&solution.feedback, &fed),
+            ));
         }
         Some(out)
     }
@@ -1122,21 +1249,37 @@ impl Receiver {
             }
         }
         let mut taps = solve_symmetric(&a, &b)?;
-        let mse = rows.iter().map(|(row, target)| (apply(&taps, row) - target).powi(2)).sum::<f64>() / rows.len().max(1) as f64;
+        let mse = rows
+            .iter()
+            .map(|(row, target)| (apply(&taps, row) - target).powi(2))
+            .sum::<f64>()
+            / rows.len().max(1) as f64;
         let feedback = taps.split_off(forward);
-        Some(Solution { taps, feedback, origin, mse })
+        Some(Solution {
+            taps,
+            feedback,
+            origin,
+            mse,
+        })
     }
 
     /// Equalise, decide and track the symbol at `next_half`.
     fn symbol(&mut self) -> Symbol {
-        let wide = self.samples(self.next_half, REACH + 1).expect("the caller checked the samples are here");
+        let wide = self
+            .samples(self.next_half, REACH + 1)
+            .expect("the caller checked the samples are here");
         let index = self.next_symbol;
         self.next_half += 2;
         self.next_symbol += 1;
         let row = &wide[1..wide.len() - 1];
         let line = row.iter().map(|x| x * x).sum::<f64>() / row.len() as f64;
         let y = apply(&self.taps, row) - apply(&self.feedback, self.past.make_contiguous());
-        let rate: f64 = self.taps.iter().enumerate().map(|(i, w)| w * 0.5 * (wide[i + 2] - wide[i])).sum();
+        let rate: f64 = self
+            .taps
+            .iter()
+            .enumerate()
+            .map(|(i, w)| w * 0.5 * (wide[i + 2] - wide[i]))
+            .sum();
         let interval = ((index + self.frame_offset) % INTERVALS as u64) as usize;
         let mut decided = self.slicer.decide(y, interval, index);
         if let (Some(sent), Slicer::Known { .. }) = (decided, &self.slicer) {
@@ -1150,7 +1293,10 @@ impl Receiver {
             let arrived = self.nearest_codeword(y);
             let apart = (arrived - sent).abs();
             let floor = ucode::level(self.law, self.uinfo) * 10f64.powf(-self.trained_snr / 20.0);
-            if self.neighbours(arrived, sent) && (y - arrived).abs() < 0.25 * apart && apart > 4.0 * floor {
+            if self.neighbours(arrived, sent)
+                && (y - arrived).abs() < 0.25 * apart
+                && apart > 4.0 * floor
+            {
                 decided = Some(arrived);
             }
         }
@@ -1171,11 +1317,21 @@ impl Receiver {
                     Slicer::Binary(level) => (y.abs() - level).abs() > 0.3 * level,
                     _ => false,
                 };
-                let fed = if guess { self.nearest_codeword(y) } else { target };
+                let fed = if guess {
+                    self.nearest_codeword(y)
+                } else {
+                    target
+                };
                 self.past.pop_back();
                 self.past.push_front(fed);
                 self.residue.gap();
-                return Symbol { index: index + self.frame_offset, raw: index, value: y, decided, line };
+                return Symbol {
+                    index: index + self.frame_offset,
+                    raw: index,
+                    value: y,
+                    decided,
+                    line,
+                };
             }
             if let Slicer::Binary(level) = self.slicer {
                 // One codeword either sign: a decision is sure unless the
@@ -1186,7 +1342,12 @@ impl Receiver {
                     self.residue.gap();
                 }
             }
-            let energy: f64 = row.iter().chain(self.past.iter()).map(|x| x * x).sum::<f64>() + 1e-18;
+            let energy: f64 = row
+                .iter()
+                .chain(self.past.iter())
+                .map(|x| x * x)
+                .sum::<f64>()
+                + 1e-18;
             let back = e * STEP / energy;
             for (tap, x) in self.taps.iter_mut().zip(row) {
                 *tap -= back * x;
@@ -1216,20 +1377,34 @@ impl Receiver {
             (None, _) => y,
         };
         self.past.push_front(fed);
-        Symbol { index: index + self.frame_offset, raw: index, value: y, decided, line }
+        Symbol {
+            index: index + self.frame_offset,
+            raw: index,
+            value: y,
+            decided,
+            line,
+        }
     }
 
     /// Whether two levels are codewords one step apart, on the same side of
     /// zero: all a robbed bit ever moves one by.
     fn neighbours(&self, a: f64, b: f64) -> bool {
-        let code = |v: f64| ucode::nearest(self.law, (v * 32768.0).round().clamp(-32768.0, 32767.0) as i32);
+        let code = |v: f64| {
+            ucode::nearest(
+                self.law,
+                (v * 32768.0).round().clamp(-32768.0, 32767.0) as i32,
+            )
+        };
         let ((ua, na), (ub, nb)) = (code(a), code(b));
         na == nb && ua.abs_diff(ub) == 1
     }
 
     /// The G.711 level nearest `y`.
     fn nearest_codeword(&self, y: f64) -> f64 {
-        let (u, negative) = ucode::nearest(self.law, (y * 32768.0).round().clamp(-32768.0, 32767.0) as i32);
+        let (u, negative) = ucode::nearest(
+            self.law,
+            (y * 32768.0).round().clamp(-32768.0, 32767.0) as i32,
+        );
         ucode::level(self.law, u) * if negative { -1.0 } else { 1.0 }
     }
 
@@ -1285,7 +1460,8 @@ impl Receiver {
         let moved = moved.clamp(-0.25, 0.25);
         self.due += moved * self.half;
         self.timed += moved * self.half;
-        self.drift = (self.drift + CENTRE_DRIFT_GAIN * moved / (2 * CENTRE_EVERY) as f64).clamp(-0.002, 0.002);
+        self.drift = (self.drift + CENTRE_DRIFT_GAIN * moved / (2 * CENTRE_EVERY) as f64)
+            .clamp(-0.002, 0.002);
         // The taps at i + moved, to first order.
         let old = self.taps.clone();
         for i in 1..old.len() - 1 {
@@ -1296,7 +1472,9 @@ impl Receiver {
 
 /// Where a set of taps has its weight, in taps.
 fn centre_of(taps: &[f64]) -> f64 {
-    let (moment, weight) = taps.iter().enumerate().fold((0.0, 0.0), |(m, w), (i, t)| (m + i as f64 * t * t, w + t * t));
+    let (moment, weight) = taps.iter().enumerate().fold((0.0, 0.0), |(m, w), (i, t)| {
+        (m + i as f64 * t * t, w + t * t)
+    });
     moment / weight.max(1e-30)
 }
 
@@ -1477,7 +1655,11 @@ mod tests {
                     }
                     let tau = t - k as f64;
                     let x = 2.0 * cutoff * tau;
-                    let sinc = if x.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                    let sinc = if x.abs() < 1e-12 {
+                        1.0
+                    } else {
+                        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                    };
                     let taper = kaiser(tau / (span as f64 + 1.0), 6.0);
                     sum += levels[k as usize] * 2.0 * cutoff * sinc * taper;
                 }
@@ -1537,12 +1719,26 @@ mod tests {
 
     #[test]
     fn a_clean_line_trains_and_reads_jd() {
-        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() };
+        let jd = Jd {
+            rates: Jd::ALL_RATES,
+            lookahead: 1,
+            ..Jd::default()
+        };
         let levels = phase3_levels(Law::Mu, 2400, &jd, 6);
         let samples = line(&levels, 0.0, 0.3, 50.0, false);
         let (heard, rx) = listen(&samples);
-        let trained = heard.iter().find_map(|h| if let Heard::Trained { snr_db, .. } = h { Some(*snr_db) } else { None });
-        assert!(trained.is_some_and(|snr| snr > 45.0), "trained to {trained:?}: {:?}", &heard[..heard.len().min(3)]);
+        let trained = heard.iter().find_map(|h| {
+            if let Heard::Trained { snr_db, .. } = h {
+                Some(*snr_db)
+            } else {
+                None
+            }
+        });
+        assert!(
+            trained.is_some_and(|snr| snr > 45.0),
+            "trained to {trained:?}: {:?}",
+            &heard[..heard.len().min(3)]
+        );
         assert!(!rx.inverted());
         let jds = read_jd(&heard);
         assert!(jds.len() >= 4, "{} Jd read", jds.len());
@@ -1551,17 +1747,30 @@ mod tests {
 
     #[test]
     fn a_turned_over_line_with_a_drifting_clock_and_noise_still_reads_jd() {
-        let jd = Jd { rates: 0x155555, lookahead: 2, sixteen_in_training: true, ..Jd::default() };
+        let jd = Jd {
+            rates: 0x155555,
+            lookahead: 2,
+            sixteen_in_training: true,
+            ..Jd::default()
+        };
         let levels = phase3_levels(Law::Mu, 16_000, &jd, 20);
         let samples = line(&levels, 120.0, 0.1, 25.0, true);
         let (heard, rx) = listen(&samples);
-        assert!(rx.is_trained(), "{:?}", heard.iter().find(|h| !matches!(h, Heard::Symbol(_))));
+        assert!(
+            rx.is_trained(),
+            "{:?}",
+            heard.iter().find(|h| !matches!(h, Heard::Symbol(_)))
+        );
         assert!(rx.inverted());
         let jds = read_jd(&heard);
         assert!(jds.len() >= 15, "{} Jd read", jds.len());
         assert!(jds.iter().all(|j| *j == jd));
         // The clock was followed rather than absorbed.
-        assert!((rx.drift_ppm() - 120.0).abs() < 30.0, "drift read as {:.1} ppm", rx.drift_ppm());
+        assert!(
+            (rx.drift_ppm() - 120.0).abs() < 30.0,
+            "drift read as {:.1} ppm",
+            rx.drift_ppm()
+        );
     }
 
     #[test]
@@ -1573,11 +1782,21 @@ mod tests {
         let a = ucode::level(Law::Mu, UINFO);
         let values: Vec<f64> = heard
             .iter()
-            .filter_map(|h| if let Heard::Symbol(s) = h { Some(s.value.abs()) } else { None })
+            .filter_map(|h| {
+                if let Heard::Symbol(s) = h {
+                    Some(s.value.abs())
+                } else {
+                    None
+                }
+            })
             .take(500)
             .collect();
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        assert!((mean / a - 1.0).abs() < 0.02, "UINFO came out at {:.4} of itself", mean / a);
+        assert!(
+            (mean / a - 1.0).abs() < 0.02,
+            "UINFO came out at {:.4} of itself",
+            mean / a
+        );
     }
 
     /// What the error carries of the symbols is read lag by lag, and what it
@@ -1585,7 +1804,13 @@ mod tests {
     /// symbols before and after, and as much noise again.
     #[test]
     fn the_residue_reads_the_response_and_the_noise_apart() {
-        let ring = [(-3i64, -0.004), (-1, 0.006), (0, 0.001), (1, -0.006), (3, 0.004)];
+        let ring = [
+            (-3i64, -0.004),
+            (-1, 0.006),
+            (0, 0.001),
+            (1, -0.006),
+            (3, 0.004),
+        ];
         let mut residue = Residue::default();
         residue.feed(1.0, 0.5);
         assert_eq!(residue.count(), 0, "read while shut");
@@ -1597,10 +1822,15 @@ mod tests {
             x ^= x << 17;
             x
         };
-        let sent: Vec<f64> = (0..40_000).map(|_| if next() & 1 == 1 { 0.1 } else { -0.1 }).collect();
+        let sent: Vec<f64> = (0..40_000)
+            .map(|_| if next() & 1 == 1 { 0.1 } else { -0.1 })
+            .collect();
         let noise = 1e-3;
         for n in 10..sent.len() - 10 {
-            let carried: f64 = ring.iter().map(|&(k, c)| c * sent[(n as i64 - k) as usize]).sum();
+            let carried: f64 = ring
+                .iter()
+                .map(|&(k, c)| c * sent[(n as i64 - k) as usize])
+                .sum();
             let gaussian = ((next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 12f64.sqrt();
             residue.feed(sent[n], carried + noise * gaussian);
         }
@@ -1612,7 +1842,10 @@ mod tests {
             assert!((got - want).abs() < 3e-4, "lag {k}: {got} against {want}");
         }
         let ratio = leftover.noise / (noise * noise);
-        assert!((0.8..1.25).contains(&ratio), "noise read as {ratio} of itself");
+        assert!(
+            (0.8..1.25).contains(&ratio),
+            "noise read as {ratio} of itself"
+        );
         assert!((leftover.power / 0.01 - 1.0).abs() < 1e-9);
     }
 
@@ -1647,7 +1880,10 @@ mod tests {
                 }
             }
         }
-        assert!(!clocks.is_empty(), "nothing trained, so there was no clock to read");
+        assert!(
+            !clocks.is_empty(),
+            "nothing trained, so there was no clock to read"
+        );
         (clocks, steps)
     }
 
@@ -1666,20 +1902,42 @@ mod tests {
     fn the_symbol_clock_follows_a_network_120_ppm_fast() {
         let (clocks, _) = slaved(PPM, 10.0, 0.0);
         let truth = true_period(PPM);
-        assert!(clocks.last().is_some_and(|c| c.trained), "the clock never said it had trained");
-        assert!(clocks.len() > 9 * FS as usize, "only {} readings, so ten seconds were not covered", clocks.len());
+        assert!(
+            clocks.last().is_some_and(|c| c.trained),
+            "the clock never said it had trained"
+        );
+        assert!(
+            clocks.len() > 9 * FS as usize,
+            "only {} readings, so ten seconds were not covered",
+            clocks.len()
+        );
         // Every second of the ten, not only the last: the rate is settled
         // long before the end, and a regression that spoiled the middle of a
         // call would not show at the end of one.
         for (second, chunk) in clocks.chunks(FS as usize).enumerate() {
-            let mut errors: Vec<f64> = chunk.iter().map(|c| (c.period / truth - 1.0) * 1e6).collect();
+            let mut errors: Vec<f64> = chunk
+                .iter()
+                .map(|c| (c.period / truth - 1.0) * 1e6)
+                .collect();
             errors.sort_by(f64::total_cmp);
             let median = errors[errors.len() / 2];
             let worst = errors.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
-            let bound = if second == 0 { SETTLING_WITHIN } else { READING_WITHIN };
-            println!("second {second}: the clock came out {median:+.3} ppm from the truth, with no reading more than {worst:.3} ppm off");
-            assert!(median.abs() < 1.0, "the rate in second {second} was {median:+.3} ppm off");
-            assert!(worst < bound, "one reading in second {second} was {worst:.3} ppm off");
+            let bound = if second == 0 {
+                SETTLING_WITHIN
+            } else {
+                READING_WITHIN
+            };
+            println!(
+                "second {second}: the clock came out {median:+.3} ppm from the truth, with no reading more than {worst:.3} ppm off"
+            );
+            assert!(
+                median.abs() < 1.0,
+                "the rate in second {second} was {median:+.3} ppm off"
+            );
+            assert!(
+                worst < bound,
+                "one reading in second {second} was {worst:.3} ppm off"
+            );
         }
     }
 
@@ -1692,7 +1950,10 @@ mod tests {
     fn the_symbol_clock_does_not_jump_when_the_timing_loop_steps() {
         let (clocks, steps) = slaved(PPM, 2.0, 0.002);
         let truth = true_period(PPM);
-        let jump = clocks.windows(2).map(|w| (w[1].period - w[0].period).abs()).fold(0.0f64, f64::max);
+        let jump = clocks
+            .windows(2)
+            .map(|w| (w[1].period - w[0].period).abs())
+            .fold(0.0f64, f64::max);
         let stepped = steps.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
         // What a period taken from the instants would have said, symbol by
         // symbol, against the same truth.
@@ -1701,10 +1962,21 @@ mod tests {
             .filter(|w| w[1].index > w[0].index)
             .map(|w| ((w[1].at - w[0].at) / (w[1].index - w[0].index) as f64 - truth).abs())
             .fold(0.0f64, f64::max);
-        println!("the period moved by at most {jump:.3e} line samples a sample; the instants were off by {instants:.3e}, and the loop stepped the sampling by {stepped:.3e}");
-        assert!(jump < CLOCK_JUMP, "the period jumped by {jump:.3e} line samples");
-        assert!(stepped > LOOP_STEP, "the timing loop only stepped by {stepped:.3e}, so nothing was shown");
-        assert!(instants > 50.0 * CLOCK_JUMP, "the instants only wandered by {instants:.3e}");
+        println!(
+            "the period moved by at most {jump:.3e} line samples a sample; the instants were off by {instants:.3e}, and the loop stepped the sampling by {stepped:.3e}"
+        );
+        assert!(
+            jump < CLOCK_JUMP,
+            "the period jumped by {jump:.3e} line samples"
+        );
+        assert!(
+            stepped > LOOP_STEP,
+            "the timing loop only stepped by {stepped:.3e}, so nothing was shown"
+        );
+        assert!(
+            instants > 50.0 * CLOCK_JUMP,
+            "the instants only wandered by {instants:.3e}"
+        );
     }
 
     /// Until the receiver has trained there is nothing of the network's clock
@@ -1722,7 +1994,13 @@ mod tests {
         // Sd and its reversal, and two hundred symbols of TRN1d: the reversal
         // is heard, but that is nothing like the stretch training needs.
         rx.hunt(UINFO);
-        for x in line(&phase3_levels(Law::Mu, 200, &Jd::default(), 0), 0.0, 0.3, 50.0, false) {
+        for x in line(
+            &phase3_levels(Law::Mu, 200, &Jd::default(), 0),
+            0.0,
+            0.3,
+            50.0,
+            false,
+        ) {
             rx.feed(x);
             while rx.heard().is_some() {}
         }
@@ -1749,16 +2027,30 @@ mod tests {
                 while rx.heard().is_some() {}
             }
         }
-        assert!(rx.is_trained(), "nothing trained, so there was no rate to carry over");
-        assert!(rx.drift_ppm() > 100.0, "the timing loop never picked the network's rate up");
+        assert!(
+            rx.is_trained(),
+            "nothing trained, so there was no rate to carry over"
+        );
+        assert!(
+            rx.drift_ppm() > 100.0,
+            "the timing loop never picked the network's rate up"
+        );
         // The retrain: `v90::analogue` hunts the same receiver again.
         rx.hunt(UINFO);
         let clock = rx.symbol_clock();
         assert!(!clock.trained, "a hunting receiver said it had trained");
-        assert_eq!(clock.period, clock.nominal, "an upstream would have free-run {:.1} ppm off", clock.drift_ppm());
+        assert_eq!(
+            clock.period,
+            clock.nominal,
+            "an upstream would have free-run {:.1} ppm off",
+            clock.drift_ppm()
+        );
         // Withheld, not forgotten: the receiver still trains from where it
         // had got to.
-        assert!(rx.drift_ppm() > 100.0, "the receiver threw away the rate it had learnt");
+        assert!(
+            rx.drift_ppm() > 100.0,
+            "the receiver threw away the rate it had learnt"
+        );
     }
 
     /// What the clock is for: the digital modem's A/D samples on the
@@ -1775,16 +2067,27 @@ mod tests {
         // A reading from the first of the ten seconds, and every one after.
         let later = &clocks[clocks.len() / 16..];
         let taken = later[0];
-        let once = later.iter().map(|c| (taken.centre(c.index) - c.at).abs() / c.period).fold(0.0f64, f64::max);
+        let once = later
+            .iter()
+            .map(|c| (taken.centre(c.index) - c.at).abs() / c.period)
+            .fold(0.0f64, f64::max);
         let (mut phase, mut index, mut followed) = (taken.at, taken.index, 0.0f64);
         for clock in later {
             phase += (clock.index - index) as f64 * clock.period;
             index = clock.index;
             followed = followed.max((phase - clock.at).abs() / clock.period);
         }
-        println!("the phase walked {followed:.4} T on the rate followed, and {once:.4} T on the rate taken once");
-        assert!(followed < PHASE_WITHIN, "the phase walked {followed:.4} T on the rate followed");
-        assert!(once < RATE_ONCE_WITHIN, "the phase walked {once:.4} T on the rate taken once");
+        println!(
+            "the phase walked {followed:.4} T on the rate followed, and {once:.4} T on the rate taken once"
+        );
+        assert!(
+            followed < PHASE_WITHIN,
+            "the phase walked {followed:.4} T on the rate followed"
+        );
+        assert!(
+            once < RATE_ONCE_WITHIN,
+            "the phase walked {once:.4} T on the rate taken once"
+        );
     }
 
     #[test]
@@ -1795,12 +2098,16 @@ mod tests {
         let mut x = 1u64;
         let noise: Vec<f64> = (0..48_000)
             .map(|_| {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((x >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.1
             })
             .collect();
         let (heard, _) = listen(&noise);
-        assert!(!heard.iter().any(|h| matches!(h, Heard::Trained { .. })), "{heard:?}");
+        assert!(
+            !heard.iter().any(|h| matches!(h, Heard::Trained { .. })),
+            "{heard:?}"
+        );
     }
 }
-

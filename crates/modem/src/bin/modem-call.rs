@@ -116,5 +116,9 @@ fn place(carrier: &str, text: &str, seconds: f64) -> (Vec<f32>, String, Option<u
             }
         }
     }
-    (line, String::from_utf8_lossy(&seen).into_owned(), caller.rate())
+    (
+        line,
+        String::from_utf8_lossy(&seen).into_owned(),
+        caller.rate(),
+    )
 }

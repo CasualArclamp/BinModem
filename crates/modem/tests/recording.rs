@@ -114,7 +114,10 @@ fn a_recording_of_our_own_call_decodes_the_way_a_real_one_does() {
         }
     }
 
-    assert!(good >= 4, "only {good} frames survived their check sequence");
+    assert!(
+        good >= 4,
+        "only {good} frames survived their check sequence"
+    );
     assert_eq!(failed, 0, "{failed} frames were corrupted on a clean line");
     assert!(
         text.contains(greeting),

@@ -13,7 +13,10 @@ use dsp::{Nco, rrc_at};
 
 use super::super::v32::trellis::Encoder;
 use super::super::v32::{CONSTELLATION_RMS, ROLLOFF, Scrambler};
-use super::{BAUD, BRIDGE_PATTERN, CARRIER, Conditioning, Rate, State, Training, bridge_turn, from_state, scrambler, train};
+use super::{
+    BAUD, BRIDGE_PATTERN, CARRIER, Conditioning, Rate, State, Training, bridge_turn, from_state,
+    scrambler, train,
+};
 
 /// Symbols each side of centre in the shaping filter, as V.32's.
 const SPAN: usize = 6;
@@ -128,7 +131,10 @@ impl Transmitter {
     /// A second call is not a second turn-off. Whoever is above cannot see
     /// symbol boundaries and asks on every sample until the carrier goes.
     pub fn stop(&mut self) {
-        if !matches!(self.stage, Stage::Silent | Stage::TurnOff(_) | Stage::Quiet(_)) {
+        if !matches!(
+            self.stage,
+            Stage::Silent | Stage::TurnOff(_) | Stage::Quiet(_)
+        ) {
             self.stage = Stage::TurnOff(train::TURN_OFF_ONES);
         }
     }
@@ -157,7 +163,10 @@ impl Transmitter {
     /// Whether the training is over and data is going out: 5.1.4's circuit
     /// 106, which turns on at the end of segment 4.
     pub fn trained(&self) -> bool {
-        matches!(self.stage, Stage::Data | Stage::TurnOff(_) | Stage::Quiet(_))
+        matches!(
+            self.stage,
+            Stage::Data | Stage::TurnOff(_) | Stage::Quiet(_)
+        )
     }
 
     pub fn push_bits(&mut self, bits: &[bool]) {
@@ -183,7 +192,10 @@ impl Transmitter {
         if !self.is_transmitting() || self.sent == (0.0, 0.0) {
             return None;
         }
-        Some((self.sent.0 / CONSTELLATION_RMS, self.sent.1 / CONSTELLATION_RMS))
+        Some((
+            self.sent.0 / CONSTELLATION_RMS,
+            self.sent.1 / CONSTELLATION_RMS,
+        ))
     }
 
     /// One symbol at the channel rate, 2.3: a group of scrambled bits, the
@@ -194,7 +206,11 @@ impl Transmitter {
         let coded = self.rate.coded();
         let mut group = [false; 6];
         for slot in group.iter_mut().take(coded.bits) {
-            let bit = if ones { true } else { self.pending.pop_front().unwrap_or(true) };
+            let bit = if ones {
+                true
+            } else {
+                self.pending.pop_front().unwrap_or(true)
+            };
             *slot = self.scrambler.scramble(bit);
         }
         if !self.started {
@@ -215,13 +231,21 @@ impl Transmitter {
         let state = match self.stage {
             Stage::Silent => return None,
             Stage::EchoCarrier(left) => {
-                self.stage = if left > 1 { Stage::EchoCarrier(left - 1) } else { Stage::EchoQuiet(train::ECHO_QUIET) };
+                self.stage = if left > 1 {
+                    Stage::EchoCarrier(left - 1)
+                } else {
+                    Stage::EchoQuiet(train::ECHO_QUIET)
+                };
                 // Unmodulated: the one state over and over is the carrier
                 // alone.
                 State::A
             }
             Stage::EchoQuiet(left) => {
-                self.stage = if left > 1 { Stage::EchoQuiet(left - 1) } else { Stage::Alternations(train::ALTERNATIONS) };
+                self.stage = if left > 1 {
+                    Stage::EchoQuiet(left - 1)
+                } else {
+                    Stage::Alternations(train::ALTERNATIONS)
+                };
                 return None;
             }
             Stage::Alternations(left) => {
@@ -231,7 +255,11 @@ impl Transmitter {
                     Stage::Conditioning(self.training.equalizer())
                 };
                 // Counting down from 256, so the first is even: A first.
-                if (train::ALTERNATIONS - left).is_multiple_of(2) { State::A } else { State::B }
+                if (train::ALTERNATIONS - left).is_multiple_of(2) {
+                    State::A
+                } else {
+                    State::B
+                }
             }
             Stage::Conditioning(left) => {
                 let state = self.conditioning.next_state();
@@ -268,11 +296,19 @@ impl Transmitter {
                     // is, since segment 4 carries nothing but ones.
                     self.from = state;
                 }
-                self.stage = if left > 1 { Stage::Bridge(left - 1) } else { Stage::Ones(train::SCRAMBLED_ONES) };
+                self.stage = if left > 1 {
+                    Stage::Bridge(left - 1)
+                } else {
+                    Stage::Ones(train::SCRAMBLED_ONES)
+                };
                 state
             }
             Stage::Ones(left) => {
-                self.stage = if left > 1 { Stage::Ones(left - 1) } else { Stage::Data };
+                self.stage = if left > 1 {
+                    Stage::Ones(left - 1)
+                } else {
+                    Stage::Data
+                };
                 return Some(self.coded(true));
             }
             Stage::Data => return Some(self.coded(false)),
@@ -280,11 +316,19 @@ impl Transmitter {
                 if !self.pending.is_empty() {
                     return Some(self.coded(false));
                 }
-                self.stage = if left > 1 { Stage::TurnOff(left - 1) } else { Stage::Quiet(train::TURN_OFF_QUIET) };
+                self.stage = if left > 1 {
+                    Stage::TurnOff(left - 1)
+                } else {
+                    Stage::Quiet(train::TURN_OFF_QUIET)
+                };
                 return Some(self.coded(true));
             }
             Stage::Quiet(left) => {
-                self.stage = if left > 1 { Stage::Quiet(left - 1) } else { Stage::Silent };
+                self.stage = if left > 1 {
+                    Stage::Quiet(left - 1)
+                } else {
+                    Stage::Silent
+                };
                 return None;
             }
         };
@@ -327,7 +371,9 @@ mod tests {
     /// The states a transmitter sends for its first `n` symbols, read off
     /// the symbol it makes rather than the line.
     fn symbols(tx: &mut Transmitter, n: usize) -> Vec<(f64, f64)> {
-        (0..n).map(|_| tx.next_symbol().unwrap_or((0.0, 0.0))).collect()
+        (0..n)
+            .map(|_| tx.next_symbol().unwrap_or((0.0, 0.0)))
+            .collect()
     }
 
     fn state_of(p: (f64, f64)) -> Option<State> {
@@ -361,7 +407,9 @@ mod tests {
         // Where each segment ends is where what goes out changes kind: A and
         // B alternating, any of A to D, and then points of the channel's own
         // constellation, which at 14 400 are never A to D.
-        for (training, conditioning, bridge) in [(Training::Long, 2976, 64), (Training::Resync, 38, 0)] {
+        for (training, conditioning, bridge) in
+            [(Training::Long, 2976, 64), (Training::Resync, 38, 0)]
+        {
             let mut tx = Transmitter::new(FS);
             tx.start(Rate::R14400, training);
             let total = 256 + conditioning + bridge + 48;
@@ -385,7 +433,10 @@ mod tests {
         let mut tx = Transmitter::new(FS);
         tx.start(Rate::R7200, Training::Long);
         let sent = symbols(&mut tx, 256 + 2976 + 64);
-        let states: Vec<State> = sent[256 + 2975..].iter().map(|p| state_of(*p).expect("a state")).collect();
+        let states: Vec<State> = sent[256 + 2975..]
+            .iter()
+            .map(|p| state_of(*p).expect("a state"))
+            .collect();
         let mut descrambler = crate::v32::Scrambler::new(crate::v32::Mode::Call);
         // The descrambler needs 23 bits of history: segment 2's own.
         let mut conditioning = Conditioning::new();
@@ -397,7 +448,9 @@ mod tests {
         let mut bits = Vec::new();
         for pair in states.windows(2) {
             let turn = (pair[1] as u8 + 4 - pair[0] as u8) % 4;
-            let dibit = (0..4u8).find(|d| bridge_turn(*d) == turn).expect("Table 6 has every turn");
+            let dibit = (0..4u8)
+                .find(|d| bridge_turn(*d) == turn)
+                .expect("Table 6 has every turn");
             bits.push(descrambler.descramble(dibit & 2 != 0));
             bits.push(descrambler.descramble(dibit & 1 != 0));
         }
@@ -410,7 +463,9 @@ mod tests {
         let mut tx = Transmitter::new(FS);
         tx.start(Rate::R14400, Training::Long);
         let samples: Vec<f64> = (0..(FS * 1.2) as usize).map(|_| tx.next_sample()).collect();
-        let rms = (samples[4000..].iter().map(|x| x * x).sum::<f64>() / (samples.len() - 4000) as f64).sqrt();
+        let rms = (samples[4000..].iter().map(|x| x * x).sum::<f64>()
+            / (samples.len() - 4000) as f64)
+            .sqrt();
         assert!((rms - 0.707).abs() < 0.03, "segment 2 at {rms:.4} rms");
     }
 

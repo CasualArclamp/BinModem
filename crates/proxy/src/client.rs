@@ -103,14 +103,27 @@ pub struct Client {
 impl Client {
     /// Listen on `at` -- "127.0.0.1:8080" for a browser on this machine --
     /// and find out which way to send what arrives.
-    pub fn new(at: &str, address: [u8; 4], server_address: [u8; 4], seed: u32) -> Result<Self, String> {
+    pub fn new(
+        at: &str,
+        address: [u8; 4],
+        server_address: [u8; 4],
+        seed: u32,
+    ) -> Result<Self, String> {
         Self::routed(at, address, server_address, seed, Route::Auto)
     }
 
     /// The same, with the route decided in advance.
-    pub fn routed(at: &str, address: [u8; 4], server_address: [u8; 4], seed: u32, route: Route) -> Result<Self, String> {
+    pub fn routed(
+        at: &str,
+        address: [u8; 4],
+        server_address: [u8; 4],
+        seed: u32,
+        route: Route,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind(at).map_err(|e| format!("{at}: {e}"))?;
-        listener.set_nonblocking(true).map_err(|e| format!("{at}: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("{at}: {e}"))?;
         let bound = listener.local_addr().map_err(|e| e.to_string())?;
         let decided = match route {
             Route::Auto => Decided::Asking(None, 0),
@@ -167,7 +180,8 @@ impl Client {
 
     /// Connections the far end has answered and is carrying.
     pub fn open(&self) -> usize {
-        self.relays.values().filter(|r| r.established).count() + self.gateways.iter().filter(|g| !g.waiting()).count()
+        self.relays.values().filter(|r| r.established).count()
+            + self.gateways.iter().filter(|g| !g.waiting()).count()
     }
 
     /// Connections a browser is waiting on.
@@ -210,11 +224,25 @@ impl Client {
     pub fn view(&self) -> View {
         let mut named: HashMap<Handle, (String, u64, u64)> = HashMap::new();
         for (handle, relay) in &self.relays {
-            named.insert(*handle, (format!("far proxy, for {}", relay.from), relay.sent, relay.received));
+            named.insert(
+                *handle,
+                (
+                    format!("far proxy, for {}", relay.from),
+                    relay.sent,
+                    relay.received,
+                ),
+            );
         }
         for gateway in &self.gateways {
             if let Some(handle) = gateway.upstream() {
-                named.insert(handle, (gateway.going_to().to_owned(), gateway.sent, gateway.received));
+                named.insert(
+                    handle,
+                    (
+                        gateway.going_to().to_owned(),
+                        gateway.sent,
+                        gateway.received,
+                    ),
+                );
             }
         }
         let mut carried: Vec<(Handle, Carried)> = self
@@ -224,7 +252,15 @@ impl Client {
                 let status = c.status();
                 let (name, sent, received) = named.get(&handle).cloned().unwrap_or_else(|| {
                     let probe = matches!(self.decided, Decided::Asking(Some(h), _) if h == handle);
-                    (if probe { "asking the far end".to_owned() } else { "closing".to_owned() }, 0, 0)
+                    (
+                        if probe {
+                            "asking the far end".to_owned()
+                        } else {
+                            "closing".to_owned()
+                        },
+                        0,
+                        0,
+                    )
                 });
                 let [a, b, cc, d] = c.remote.address;
                 (
@@ -275,7 +311,11 @@ impl Client {
                 self.probe_answered(probe, event.report);
                 continue;
             }
-            if let Some(gateway) = self.gateways.iter_mut().find(|g| g.upstream() == Some(event.handle)) {
+            if let Some(gateway) = self
+                .gateways
+                .iter_mut()
+                .find(|g| g.upstream() == Some(event.handle))
+            {
                 if event.report == Report::Established {
                     self.answered = true;
                 }
@@ -310,7 +350,9 @@ impl Client {
                 let probe = self.stack.connect(self.server);
                 self.decided = Decided::Asking(probe, 0);
                 let [a, b, c, d] = self.server.address;
-                self.log.push(format!("proxy: asking {a}.{b}.{c}.{d} whether it has a proxy"));
+                self.log.push(format!(
+                    "proxy: asking {a}.{b}.{c}.{d} whether it has a proxy"
+                ));
             }
             Some(handle) => {
                 let waited = waited.saturating_add(ms);
@@ -334,7 +376,10 @@ impl Client {
                 if let Some(c) = self.stack.get_mut(probe) {
                     c.close();
                 }
-                self.settle(Decided::FarEnd, "the far end is a BinModem carrying web traffic");
+                self.settle(
+                    Decided::FarEnd,
+                    "the far end is a BinModem carrying web traffic",
+                );
             }
             Report::Refused | Report::Reset | Report::Closed => {
                 self.settle(Decided::Direct, "the far end has no proxy");
@@ -345,7 +390,8 @@ impl Client {
 
     fn settle(&mut self, decided: Decided, why: &str) {
         self.decided = decided;
-        self.log.push(format!("proxy: {why}, so pages go {}", decided.name()));
+        self.log
+            .push(format!("proxy: {why}, so pages go {}", decided.name()));
         self.dispatch();
     }
 
@@ -386,7 +432,8 @@ impl Client {
         let Some(handle) = self.stack.connect(self.server) else {
             // Nothing left to open one with. Dropping the socket closes it,
             // which tells the browser at once rather than leaving it waiting.
-            self.log.push("proxy: too many connections, one was dropped".to_owned());
+            self.log
+                .push("proxy: too many connections, one was dropped".to_owned());
             return;
         };
         self.log.push(format!("proxy: {from} wants the far end"));
@@ -420,7 +467,12 @@ impl Client {
                 };
                 // A close with data still to hand over is not the end of the
                 // relay: `carry` finishes the job.
-                if report == Report::Closed && self.relays.get(&handle).is_some_and(|r| !r.to_socket.is_empty()) {
+                if report == Report::Closed
+                    && self
+                        .relays
+                        .get(&handle)
+                        .is_some_and(|r| !r.to_socket.is_empty())
+                {
                     return;
                 }
                 if let Some(relay) = self.relays.remove(&handle) {
@@ -451,7 +503,11 @@ impl Client {
         let (from_link, far_finished, forgotten) = match self.stack.get_mut(handle) {
             Some(connection) => {
                 let data = connection.take_received();
-                (data, connection.finished() && connection.available() == 0, false)
+                (
+                    data,
+                    connection.finished() && connection.available() == 0,
+                    false,
+                )
             }
             None => (Vec::new(), true, true),
         };
@@ -495,7 +551,11 @@ impl Client {
                     if !relay.said {
                         relay.said = true;
                         if !http::speaks_http(buffer[0]) {
-                            let what = if buffer[0] == 5 { "is set up for SOCKS" } else { "is not speaking HTTP" };
+                            let what = if buffer[0] == 5 {
+                                "is set up for SOCKS"
+                            } else {
+                                "is not speaking HTTP"
+                            };
                             self.log.push(format!(
                                 "proxy: {} {what}; set it to use an HTTP proxy, for https as well",
                                 relay.from
@@ -558,7 +618,8 @@ mod tests {
     /// while the far end is being asked waits, and is counted as waiting.
     #[test]
     fn a_browser_waits_while_the_route_is_found_out() {
-        let mut client = Client::new("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7).expect("could not listen");
+        let mut client =
+            Client::new("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7).expect("could not listen");
         let mut browser = TcpStream::connect(client.bound()).expect("connect");
         let _ = browser.write_all(b"GET http://example.invalid/ HTTP/1.1\r\n\r\n");
         ticks(&mut client, 20);
@@ -566,7 +627,11 @@ mod tests {
         assert_eq!(view.route, "finding out whether the far end has a proxy");
         assert_eq!(view.waiting, 1, "{view:?}");
         assert!(!client.direct());
-        assert_eq!(view.carried.len(), 1, "no question was put to the far end: {view:?}");
+        assert_eq!(
+            view.carried.len(),
+            1,
+            "no question was put to the far end: {view:?}"
+        );
         assert_eq!(view.carried[0].address, "10.0.0.1:1080");
     }
 
@@ -574,7 +639,8 @@ mod tests {
     /// is sent straight out.
     #[test]
     fn a_far_end_that_says_nothing_is_taken_to_have_no_proxy() {
-        let mut client = Client::new("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7).expect("could not listen");
+        let mut client =
+            Client::new("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7).expect("could not listen");
         let mut browser = TcpStream::connect(client.bound()).expect("connect");
         let _ = browser.write_all(b"GET http://192.0.2.9/ HTTP/1.1\r\n\r\n");
         ticks(&mut client, (PROBE_MS / 10 + 20) as usize);
@@ -582,7 +648,9 @@ mod tests {
         // And the page it asked for is being opened, to the address it named.
         let view = client.view();
         assert!(
-            view.carried.iter().any(|c| c.address == "192.0.2.9:80" && c.name == "192.0.2.9:80"),
+            view.carried
+                .iter()
+                .any(|c| c.address == "192.0.2.9:80" && c.name == "192.0.2.9:80"),
             "{view:?}"
         );
     }
@@ -590,7 +658,14 @@ mod tests {
     /// Told in advance, it asks nobody anything.
     #[test]
     fn a_route_given_in_advance_is_not_asked_about() {
-        let client = Client::routed("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7, Route::Direct).expect("listen");
+        let client = Client::routed(
+            "127.0.0.1:0",
+            [10, 0, 0, 2],
+            [10, 0, 0, 1],
+            7,
+            Route::Direct,
+        )
+        .expect("listen");
         assert!(client.direct());
         assert_eq!(client.view().asked, Route::Direct);
         assert!(client.view().carried.is_empty());

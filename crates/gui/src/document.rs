@@ -74,7 +74,9 @@ pub const MOST_PAGES: usize = 50;
 pub fn is_pdf(bytes: &[u8]) -> bool {
     // 7.5.2: the header is the first line, though readers have long allowed
     // some junk before it.
-    bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-")
+    bytes[..bytes.len().min(1024)]
+        .windows(5)
+        .any(|w| w == b"%PDF-")
 }
 
 /// The pages of a PDF -- the first [`MOST_PAGES`] of them -- drawn onto the
@@ -130,7 +132,11 @@ fn draw<'a>(
     let (wide_pt, tall_pt) = page.render_dimensions();
     // A millimetre over, so that Letter's 215.9 is not too wide.
     let turned = wide_pt > tall_pt && f64::from(wide_pt) / POINTS_PER_MM > WIDTH_MM + 1.0;
-    let (across_pt, down_pt) = if turned { (tall_pt, wide_pt) } else { (wide_pt, tall_pt) };
+    let (across_pt, down_pt) = if turned {
+        (tall_pt, wide_pt)
+    } else {
+        (wide_pt, tall_pt)
+    };
     let across_mm = f64::from(across_pt) / POINTS_PER_MM;
     let down_mm = f64::from(down_pt) / POINTS_PER_MM;
     let shrink = (WIDTH_MM / across_mm).min(A4_MM / down_mm).min(1.0);
@@ -139,7 +145,9 @@ fn draw<'a>(
     let (x_scale, y_scale) = if turned { (lines, pels) } else { (pels, lines) };
     // Rounded rather than cut short, which is what the renderer would do:
     // A4 is 2286.9 fine lines, and Table 1/T.4's 2287.
-    let pixels = |points: f32, scale: f32| Some((points * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16);
+    let pixels = |points: f32, scale: f32| {
+        Some((points * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16)
+    };
     let pixmap = hayro::render(
         page,
         cache,
@@ -160,7 +168,8 @@ fn draw<'a>(
         .data()
         .iter()
         .map(|p| {
-            let luma = (2126 * u32::from(p.r) + 7152 * u32::from(p.g) + 722 * u32::from(p.b)) / 10_000;
+            let luma =
+                (2126 * u32::from(p.r) + 7152 * u32::from(p.g) + 722 * u32::from(p.b)) / 10_000;
             255 - luma as u8
         })
         .collect();
@@ -168,7 +177,13 @@ fn draw<'a>(
     // quarter turn anticlockwise puts the pixmap's right-hand column along
     // the top of the sheet.
     let (across, down) = if turned { (h, w) } else { (w, h) };
-    let at = |x: usize, y: usize| if turned { ink[x * w + (w - 1 - y)] } else { ink[y * w + x] };
+    let at = |x: usize, y: usize| {
+        if turned {
+            ink[x * w + (w - 1 - y)]
+        } else {
+            ink[y * w + x]
+        }
+    };
     let across = across.min(WIDTH);
     let down = down.min(Resolution::Fine.lines()).max(1);
     let left = (WIDTH - across) / 2;
@@ -178,7 +193,10 @@ fn draw<'a>(
             sheet[y * WIDTH + left + x] = at(x, y);
         }
     }
-    Sheet { lines: down, ink: sheet }
+    Sheet {
+        lines: down,
+        ink: sheet,
+    }
 }
 
 #[cfg(test)]
@@ -193,8 +211,13 @@ mod tests {
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
-            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {wide} {tall}] /Contents 4 0 R >>"),
-            format!("<< /Length {} >>\nstream\n{drawing}\nendstream", drawing.len()),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {wide} {tall}] /Contents 4 0 R >>"
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{drawing}\nendstream",
+                drawing.len()
+            ),
         ];
         for (n, body) in objects.iter().enumerate() {
             offsets.push(out.len());
@@ -205,14 +228,18 @@ mod tests {
         for at in offsets {
             out.extend_from_slice(format!("{at:010} 00000 n\r\n").as_bytes());
         }
-        out.extend_from_slice(format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes());
+        out.extend_from_slice(
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
+        );
         out
     }
 
     const A4: (f64, f64) = (595.28, 841.89);
 
     fn pages_of(pdf: Vec<u8>, resolution: Resolution) -> Vec<Page> {
-        read(&Arc::new(pdf), resolution, Halftone::Threshold).expect("it did not read").0
+        read(&Arc::new(pdf), resolution, Halftone::Threshold)
+            .expect("it did not read")
+            .0
     }
 
     fn mm(points: f64) -> f64 {
@@ -222,8 +249,12 @@ mod tests {
     /// Where the ink is: the first and last line with any, and the first and
     /// last pel of any line.
     fn inked(page: &Page) -> Option<(usize, usize, usize, usize)> {
-        let rows: Vec<usize> = (0..page.height()).filter(|y| page.lines[*y].contains(&true)).collect();
-        let cols: Vec<usize> = (0..WIDTH).filter(|x| page.lines.iter().any(|l| l[*x])).collect();
+        let rows: Vec<usize> = (0..page.height())
+            .filter(|y| page.lines[*y].contains(&true))
+            .collect();
+        let cols: Vec<usize> = (0..WIDTH)
+            .filter(|x| page.lines.iter().any(|l| l[*x]))
+            .collect();
         Some((*rows.first()?, *rows.last()?, *cols.first()?, *cols.last()?))
     }
 
@@ -244,10 +275,26 @@ mod tests {
             let across = |pel: usize| pel as f64 / PELS_PER_MM - 2.5;
             let down = |line: usize| line as f64 / lines_mm;
             let near = |got: f64, want: f64| (got - want).abs() < 0.3;
-            assert!(near(across(left), 20.0), "{resolution:?}: left edge at {} mm", across(left));
-            assert!(near(across(right + 1), 30.0), "{resolution:?}: right edge at {} mm", across(right + 1));
-            assert!(near(down(top), 30.0), "{resolution:?}: top edge at {} mm", down(top));
-            assert!(near(down(bottom + 1), 40.0), "{resolution:?}: bottom edge at {} mm", down(bottom + 1));
+            assert!(
+                near(across(left), 20.0),
+                "{resolution:?}: left edge at {} mm",
+                across(left)
+            );
+            assert!(
+                near(across(right + 1), 30.0),
+                "{resolution:?}: right edge at {} mm",
+                across(right + 1)
+            );
+            assert!(
+                near(down(top), 30.0),
+                "{resolution:?}: top edge at {} mm",
+                down(top)
+            );
+            assert!(
+                near(down(bottom + 1), 40.0),
+                "{resolution:?}: bottom edge at {} mm",
+                down(bottom + 1)
+            );
         }
     }
 
@@ -255,15 +302,28 @@ mod tests {
     fn a_hairline_lands_on_the_pels_it_covers() {
         // Half a point, 0.18 mm: one or two pels across at 8.04 to the
         // millimetre, and it must be there at both resolutions.
-        let pdf = pdf_with(A4.0, A4.1, "0 G 0.5 w 100 100 m 100 700 l S 100 400 m 500 400 l S");
+        let pdf = pdf_with(
+            A4.0,
+            A4.1,
+            "0 G 0.5 w 100 100 m 100 700 l S 100 400 m 500 400 l S",
+        );
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let page = &pages_of(pdf.clone(), resolution)[0];
             let lines_mm = resolution.lines_per_mm();
             let row = ((A4.1 - 400.0) / POINTS_PER_MM * lines_mm) as usize;
-            let across = page.lines[row - 1..=row + 1].iter().filter(|l| l[1000]).count();
-            assert!(across >= 1, "{resolution:?}: the rule across the page is gone");
+            let across = page.lines[row - 1..=row + 1]
+                .iter()
+                .filter(|l| l[1000])
+                .count();
+            assert!(
+                across >= 1,
+                "{resolution:?}: the rule across the page is gone"
+            );
             let col = ((100.0 / POINTS_PER_MM + 2.5) * PELS_PER_MM) as usize;
-            let down = page.lines[row + 50][col - 1..=col + 1].iter().filter(|p| **p).count();
+            let down = page.lines[row + 50][col - 1..=col + 1]
+                .iter()
+                .filter(|p| **p)
+                .count();
             assert!(down >= 1, "{resolution:?}: the rule down the page is gone");
         }
     }
@@ -273,14 +333,28 @@ mod tests {
         // A4 on its side, with a mark in its top left corner. A quarter turn
         // anticlockwise puts that corner at the bottom left of the sheet.
         let side = 20.0 * POINTS_PER_MM;
-        let pdf = pdf_with(A4.1, A4.0, &format!("0 g 0 {} {side} {side} re f", A4.0 - side));
+        let pdf = pdf_with(
+            A4.1,
+            A4.0,
+            &format!("0 g 0 {} {side} {side} re f", A4.0 - side),
+        );
         let page = &pages_of(pdf, Resolution::Fine)[0];
-        assert_eq!(page.height(), Resolution::Fine.lines(), "not the full sheet");
+        assert_eq!(
+            page.height(),
+            Resolution::Fine.lines(),
+            "not the full sheet"
+        );
         let (top, bottom, left, right) = inked(page).expect("no ink");
         let bottom_mm = (bottom + 1) as f64 / 7.7;
-        assert!((bottom_mm - mm(A4.1)).abs() < 0.5, "the mark ends {bottom_mm} mm down");
+        assert!(
+            (bottom_mm - mm(A4.1)).abs() < 0.5,
+            "the mark ends {bottom_mm} mm down"
+        );
         assert!(((bottom + 1 - top) as f64 / 7.7 - 20.0).abs() < 0.5);
-        assert!(((left as f64 / PELS_PER_MM) - 2.5).abs() < 0.3, "the mark starts {left} pels in");
+        assert!(
+            ((left as f64 / PELS_PER_MM) - 2.5).abs() < 0.3,
+            "the mark starts {left} pels in"
+        );
         assert!((((right + 1 - left) as f64 / PELS_PER_MM) - 20.0).abs() < 0.3);
     }
 
@@ -290,9 +364,17 @@ mod tests {
         // at its own size, a short page with its mark still top left.
         let (wide, tall) = (595.28, 419.53);
         let side = 20.0 * POINTS_PER_MM;
-        let pdf = pdf_with(wide, tall, &format!("0 g 0 {} {side} {side} re f", tall - side));
+        let pdf = pdf_with(
+            wide,
+            tall,
+            &format!("0 g 0 {} {side} {side} re f", tall - side),
+        );
         let page = &pages_of(pdf, Resolution::Fine)[0];
-        assert!((page.height() as f64 / 7.7 - mm(tall)).abs() < 0.5, "{} lines", page.height());
+        assert!(
+            (page.height() as f64 / 7.7 - mm(tall)).abs() < 0.5,
+            "{} lines",
+            page.height()
+        );
         let (top, bottom, left, _) = inked(page).expect("no ink");
         assert_eq!(top, 0);
         assert!(((bottom + 1) as f64 / 7.7 - 20.0).abs() < 0.5);
@@ -310,7 +392,14 @@ mod tests {
 
     #[test]
     fn what_is_not_a_pdf_says_so() {
-        assert!(read(&Arc::new(b"%PDF-1.4 and nothing else".to_vec()), Resolution::Standard, Halftone::Threshold).is_err());
+        assert!(
+            read(
+                &Arc::new(b"%PDF-1.4 and nothing else".to_vec()),
+                Resolution::Standard,
+                Halftone::Threshold
+            )
+            .is_err()
+        );
         assert!(is_pdf(&pdf_with(A4.0, A4.1, "")));
         assert!(!is_pdf(b"\x89PNG\r\n\x1a\n"));
     }
@@ -321,12 +410,19 @@ mod tests {
     #[test]
     #[ignore]
     fn timing() {
-        let Ok(path) = std::env::var("DOCUMENT") else { return };
+        let Ok(path) = std::env::var("DOCUMENT") else {
+            return;
+        };
         let bytes = Arc::new(std::fs::read(&path).expect("no such file"));
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let start = std::time::Instant::now();
-            let (pages, all) = read(&bytes, resolution, Halftone::Threshold).expect("it did not read");
-            println!("{} of {all} pages at {resolution:?} in {:?}", pages.len(), start.elapsed());
+            let (pages, all) =
+                read(&bytes, resolution, Halftone::Threshold).expect("it did not read");
+            println!(
+                "{} of {all} pages at {resolution:?} in {:?}",
+                pages.len(),
+                start.elapsed()
+            );
         }
     }
 }

@@ -200,10 +200,13 @@ mod tests {
         let mut phase = 0.0f64;
         for i in 0..(FS * seconds) as usize {
             let t = i as f64 / FS;
-            let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
+            let flips = if reversal_s > 0.0 {
+                (t / reversal_s) as u64
+            } else {
+                0
+            };
             let sign = if flips % 2 == 0 { 1.0 } else { -1.0 };
-            let envelope =
-                1.0 + am * (std::f64::consts::TAU * MODULATION_RATE * t).sin();
+            let envelope = 1.0 + am * (std::f64::consts::TAU * MODULATION_RATE * t).sin();
             phase += std::f64::consts::TAU * ANSWER_TONE / FS;
             detector.feed(level * envelope * sign * phase.sin());
         }
@@ -212,7 +215,11 @@ mod tests {
 
     /// One sample of an answering tone, `t` seconds into it.
     fn answering_tone(am: f64, reversal_s: f64, level: f64, t: f64) -> f64 {
-        let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
+        let flips = if reversal_s > 0.0 {
+            (t / reversal_s) as u64
+        } else {
+            0
+        };
         let sign = if flips % 2 == 0 { 1.0 } else { -1.0 };
         let envelope = 1.0 + am * (std::f64::consts::TAU * MODULATION_RATE * t).sin();
         level * envelope * sign * (std::f64::consts::TAU * ANSWER_TONE * t).sin()
@@ -258,7 +265,10 @@ mod tests {
         // Loud enough in the detector's band to clear the absolute floor, so
         // that only the comparison with the rest of the line stands between
         // this and a tone.
-        assert!(d.amplitude() > AUDIBLE, "the noise was too quiet to test anything");
+        assert!(
+            d.amplitude() > AUDIBLE,
+            "the noise was too quiet to test anything"
+        );
         for i in 0..(FS * 1.0) as usize {
             d.feed(0.0);
             assert!(
@@ -284,7 +294,10 @@ mod tests {
                     let t = i as f64 / FS;
                     d.feed(ending(t, stop, fade) * answering_tone(0.0, reversal, 0.3, t));
                     if t > stop + fade + 0.020 {
-                        assert!(!d.present(), "a tone {fade} s in fading was still there at {t:.3} s");
+                        assert!(
+                            !d.present(),
+                            "a tone {fade} s in fading was still there at {t:.3} s"
+                        );
                     }
                 }
             }
@@ -339,7 +352,10 @@ mod tests {
                             "ANSam at {db} dB lost at {t:.3} s, depth {:.3}",
                             ansam.depth()
                         );
-                        assert!(plain.is_plain(), "the plain tone at {db} dB lost at {t:.3} s");
+                        assert!(
+                            plain.is_plain(),
+                            "the plain tone at {db} dB lost at {t:.3} s"
+                        );
                     }
                 }
             }
@@ -372,7 +388,10 @@ mod tests {
                         "ANSam at the floor lost at {t:.3} s, depth {:.3}",
                         ansam.depth()
                     );
-                    assert!(plain.is_plain(), "the plain tone at the floor lost at {t:.3} s");
+                    assert!(
+                        plain.is_plain(),
+                        "the plain tone at the floor lost at {t:.3} s"
+                    );
                 }
             }
         }
@@ -384,14 +403,22 @@ mod tests {
         // not speak V.8, and 7.2 forbids sending it a CM.
         let d = listen(0.0, 0.0, 0.3, 3.0);
         assert!(d.present(), "did not hear the tone at all");
-        assert!(d.is_plain(), "a plain tone read as ANSam at depth {:.3}", d.depth());
+        assert!(
+            d.is_plain(),
+            "a plain tone read as ANSam at depth {:.3}",
+            d.depth()
+        );
         assert!(!d.is_ansam());
     }
 
     #[test]
     fn a_modulated_answering_tone_is_ansam() {
         let d = listen(NOMINAL_DEPTH, 0.0, 0.3, 3.0);
-        assert!(d.is_ansam(), "ANSam read as plain at depth {:.3}", d.depth());
+        assert!(
+            d.is_ansam(),
+            "ANSam read as plain at depth {:.3}",
+            d.depth()
+        );
     }
 
     #[test]
@@ -414,7 +441,10 @@ mod tests {
         // tone can be ANSam without them and can carry them without being
         // ANSam. Both mistakes are tested here.
         let modulated_no_reversals = listen(NOMINAL_DEPTH, 0.0, 0.3, 3.0);
-        assert!(modulated_no_reversals.is_ansam(), "ANSam needs no reversals");
+        assert!(
+            modulated_no_reversals.is_ansam(),
+            "ANSam needs no reversals"
+        );
 
         let reversals_no_modulation = listen(0.0, 0.450, 0.3, 3.0);
         assert!(

@@ -4,7 +4,7 @@
 //! nothing back, which is not a two-wire line but does isolate the start-up
 //! from the echo. The later ones put the hybrid back.
 
-use datapump::v32::startup::{Rates, Heard, Role, Startup, Status, endpoints, rate_signal};
+use datapump::v32::startup::{Heard, Rates, Role, Startup, Status, endpoints, rate_signal};
 use datapump::v32::{BAUD, Mode, Receiver, Signal, Transmitter};
 
 const FS: f64 = 16_000.0;
@@ -35,7 +35,10 @@ impl Modem {
 /// `hear` is given (what the far end sent, what this end sent) and returns
 /// what arrives at this end's receiver, which is how the hybrid is modelled.
 fn call(seconds: f64, hear: impl Fn(f64, f64) -> f64) -> (Modem, Modem, f64) {
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut connected_at = f64::NAN;
@@ -96,7 +99,10 @@ fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
     // Talking over the answering tone would be heard by the network as well as
     // by the far end, and the tone is what disables the echo control devices
     // along the way.
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut first_sound = None;
@@ -111,7 +117,8 @@ fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
         }
         if i as f64 / FS < 0.5 {
             assert_eq!(
-                calling.out, 0.0,
+                calling.out,
+                0.0,
                 "the calling modem transmitted at {:.3} s, before it could \
                  have heard a second of tone",
                 i as f64 / FS
@@ -153,7 +160,10 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
     let delay_symbols = 40usize;
     let delay = (delay_symbols as f64 * FS / BAUD) as usize;
 
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut to_calling = vec![0.0; delay];
@@ -165,7 +175,9 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
         to_calling[i % delay] = answering.out;
         to_answering[i % delay] = calling.out;
 
-        calling.up.step(heard_by_calling, &mut calling.tx, &mut calling.rx);
+        calling
+            .up
+            .step(heard_by_calling, &mut calling.tx, &mut calling.rx);
         calling.out = calling.tx.next_sample();
         answering
             .up
@@ -207,7 +219,10 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
 /// at the beginning, and the only thing that will move it is a state A.
 #[test]
 fn a_far_end_that_starts_over_is_followed() {
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut restarted_at = f64::NAN;
@@ -215,9 +230,13 @@ fn a_far_end_that_starts_over_is_followed() {
 
     for i in 0..(40.0 * FS) as usize {
         let (from_calling, from_answering) = (calling.out, answering.out);
-        calling.up.step(from_answering, &mut calling.tx, &mut calling.rx);
+        calling
+            .up
+            .step(from_answering, &mut calling.tx, &mut calling.rx);
         calling.out = calling.tx.next_sample();
-        answering.up.step(from_calling, &mut answering.tx, &mut answering.rx);
+        answering
+            .up
+            .step(from_calling, &mut answering.tx, &mut answering.rx);
         answering.out = answering.tx.next_sample();
 
         // The moment this end falls silent to wait for R1, the far end throws
@@ -246,7 +265,10 @@ fn a_far_end_that_starts_over_is_followed() {
 
 #[test]
 fn a_modem_that_hears_nothing_gives_up() {
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut status = Status::Negotiating;
     for _ in 0..(65.0 * FS) as usize {
@@ -261,7 +283,10 @@ fn a_modem_that_hears_nothing_gives_up() {
 #[test]
 #[ignore]
 fn trace() {
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let (mut cp, mut ap) = ("", "");
@@ -276,11 +301,17 @@ fn trace() {
             ap = answering.up.phase();
             println!(
                 "{:>7.3}s  call {cp:>12} (hears {:?})   answer {ap:>12} (hears {:?})",
-                i as f64 / FS, calling.up.heard(), answering.up.heard()
+                i as f64 / FS,
+                calling.up.heard(),
+                answering.up.heard()
             );
         }
     }
-    println!("round trip: call {} answer {}", calling.up.round_trip(), answering.up.round_trip());
+    println!(
+        "round trip: call {} answer {}",
+        calling.up.round_trip(),
+        answering.up.round_trip()
+    );
 }
 
 /// A far end that trains for as long as 5.2.3 allows is still there when it
@@ -308,7 +339,10 @@ fn trace() {
 fn a_far_end_that_trains_for_as_long_as_it_may_is_waited_for() {
     use std::collections::VecDeque;
 
-    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let offer = rate_signal(Rates {
+        at_4800: true,
+        ..Rates::default()
+    });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
 
@@ -340,9 +374,13 @@ fn a_far_end_that_trains_for_as_long_as_it_may_is_waited_for() {
         let heard_calling = to_calling.pop_front().unwrap_or(0.0);
         let heard_answering = to_answering.pop_front().unwrap_or(0.0);
 
-        calling.up.step(heard_calling, &mut calling.tx, &mut calling.rx);
+        calling
+            .up
+            .step(heard_calling, &mut calling.tx, &mut calling.rx);
         calling.out = calling.tx.next_sample();
-        answering.up.step(heard_answering, &mut answering.tx, &mut answering.rx);
+        answering
+            .up
+            .step(heard_answering, &mut answering.tx, &mut answering.rx);
 
         // The script takes over the moment this end starts R2, which is the
         // moment the deadline under test starts running.

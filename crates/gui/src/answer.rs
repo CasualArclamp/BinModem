@@ -20,8 +20,8 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use login::server::{self, Server};
 use login::Account;
+use login::server::{self, Server};
 use modem::{Modem, State};
 use ppp::link::{Authentication, Link};
 
@@ -275,7 +275,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         ));
                         link.open();
                         link.feed(&early);
-                        above = Above::Ppp { link, announced: false };
+                        above = Above::Ppp {
+                            link,
+                            announced: false,
+                        };
                     }
                     Some(server::Outcome::HangUp(why)) => {
                         println!("\n[{:>6.2}s hanging up: {why}]", stamp());
@@ -292,13 +295,21 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 }
                 for echo in link.take_arrived() {
                     if !echo.echo.reply {
-                        println!("[{:>6.2}s ping from {}, seq {}]", stamp(), dotted(echo.from), echo.echo.sequence);
+                        println!(
+                            "[{:>6.2}s ping from {}, seq {}]",
+                            stamp(),
+                            dotted(echo.from),
+                            echo.echo.sequence
+                        );
                     }
                 }
                 let _ = link.take_carried();
                 if link.up() && !*announced {
                     *announced = true;
-                    let who = link.who().map(|w| format!(", {w} over PAP or CHAP")).unwrap_or_default();
+                    let who = link
+                        .who()
+                        .map(|w| format!(", {w} over PAP or CHAP"))
+                        .unwrap_or_default();
                     println!(
                         "[{:>6.2}s PPP up: {} is {}{who}]",
                         stamp(),

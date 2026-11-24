@@ -483,10 +483,7 @@ mod tests {
         assert_eq!(request.method, Method::Invite);
         assert_eq!(request.uri.user.as_deref(), Some("0398765432"));
         assert_eq!(request.headers.call_id(), Some("a84b4c76e66710"));
-        assert_eq!(
-            request.headers.cseq(),
-            Some((314159, Method::Invite))
-        );
+        assert_eq!(request.headers.cseq(), Some((314159, Method::Invite)));
         assert_eq!(request.headers.branch(), Some("z9hG4bK776asdhds"));
         assert_eq!(request.body, b"v=0\n");
 

@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::frame::{Packer, Unpacker};
-use crate::link::{Report, Arrived, Receiver, Sender, Table};
+use crate::link::{Arrived, Receiver, Report, Sender, Table};
 use crate::squeeze::Squeeze;
 
 /// "Send with this table": a mark, then the table.
@@ -145,7 +145,14 @@ impl Arq {
 
     /// Octets written and not yet acknowledged by the far end.
     pub fn pending(&self) -> usize {
-        self.squeeze.held() + self.outbox.len() + self.unacked.iter().filter(|s| !s.acked).map(|s| s.body.len() - 4).sum::<usize>()
+        self.squeeze.held()
+            + self.outbox.len()
+            + self
+                .unacked
+                .iter()
+                .filter(|s| !s.acked)
+                .map(|s| s.body.len() - 4)
+                .sum::<usize>()
     }
 
     /// The round trip as last measured, in seconds.
@@ -395,7 +402,9 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
     /// cable one way and a single microphone back is two channels there and
     /// one here.
     pub fn hears_loaded(&self) -> bool {
-        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark))
+        self.offered
+            .as_ref()
+            .is_some_and(|(mark, _)| self.rx.id() == Some(*mark))
     }
 
     /// This end is sending on this channel with a table the far end asked
@@ -418,7 +427,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         if now.saturating_sub(self.proposed_at) < (2.0 * fs) as u64 {
             return None;
         }
-        let (mark, table) = self.offered.as_ref().filter(|(mark, _)| self.rx.id() != Some(*mark))?;
+        let (mark, table) = self
+            .offered
+            .as_ref()
+            .filter(|(mark, _)| self.rx.id() != Some(*mark))?;
         let mut body = vec![number, *mark];
         body.extend_from_slice(&table.encode());
         Some(body)
@@ -426,7 +438,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
 
     /// The table the far end has been asked for and is not yet using.
     pub fn waiting_for(&self) -> Option<u8> {
-        self.offered.as_ref().map(|(mark, _)| *mark).filter(|&mark| self.rx.id() != Some(mark))
+        self.offered
+            .as_ref()
+            .map(|(mark, _)| *mark)
+            .filter(|&mark| self.rx.id() != Some(mark))
     }
 
     /// One sample in, and everything that follows from it.
@@ -444,14 +459,19 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         self.heard.2 += u32::from(size >= FULL_SCALE);
         self.heard.3 += 1;
         if self.heard.3 >= fs as u32 {
-            let (squares, peak, clipped, count) = std::mem::replace(&mut self.heard, (0.0, 0.0, 0, 0));
+            let (squares, peak, clipped, count) =
+                std::mem::replace(&mut self.heard, (0.0, 0.0, 0, 0));
             let db = |x: f64| (20.0 * x.max(1e-7).log10()).clamp(-127.5, 0.0);
             let health = self.rx.health();
             self.here = Some(Report {
                 level_db: db((squares / f64::from(count)).sqrt()),
                 peak_db: db(peak),
                 clipped,
-                snr_db: if health.steady { health.snr_db.max(0.0) } else { 0.0 },
+                snr_db: if health.steady {
+                    health.snr_db.max(0.0)
+                } else {
+                    0.0
+                },
                 trim_db: self.trim_db,
             });
             self.report_owed = true;
@@ -467,14 +487,22 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         }
         while let Some(arrived) = self.rx.take() {
             match arrived {
-                Arrived::Octets { line, layout, erased } => {
+                Arrived::Octets {
+                    line,
+                    layout,
+                    erased,
+                } => {
                     let report = self.unpacker.take(&line, &layout, erased.as_deref());
                     self.tally.blocks += 1;
                     self.tally.words += report.words as u64;
                     self.tally.failed += report.failed as u64;
                     self.tally.corrected += report.corrected as u64;
                     self.lost_run = 0;
-                    self.trouble = if report.failed > 0 { self.trouble + 4 } else { self.trouble.saturating_sub(1) };
+                    self.trouble = if report.failed > 0 {
+                        self.trouble + 4
+                    } else {
+                        self.trouble.saturating_sub(1)
+                    };
                     if report.failed * 4 >= report.words * 3 {
                         self.starved_since.get_or_insert(now);
                     } else {
@@ -491,8 +519,15 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         // Three bad blocks close together on a table of this end's own
         // choosing means it chose too high. Two seconds between changes of
         // mind, so that the last change has been heard before the next.
-        let own = self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark));
-        if own && self.starved_since.is_some_and(|since| now - since > fs as u64) {
+        let own = self
+            .offered
+            .as_ref()
+            .is_some_and(|(mark, _)| self.rx.id() == Some(*mark));
+        if own
+            && self
+                .starved_since
+                .is_some_and(|since| now - since > fs as u64)
+        {
             // A second of nothing readable. The table was far too high, not
             // a little, and the far end may be as deaf as this one: start
             // again from the starting table, both ways.
@@ -639,7 +674,14 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                     && let Some(report) = self.here
                 {
                     self.report_owed = false;
-                    self.packer.push_urgent(REPORT, &Report { trim_db: self.trim_db, ..report }.encode());
+                    self.packer.push_urgent(
+                        REPORT,
+                        &Report {
+                            trim_db: self.trim_db,
+                            ..report
+                        }
+                        .encode(),
+                    );
                 }
             }
             let room = layout.payload();
@@ -687,7 +729,11 @@ impl<T: Sender, R: Receiver> Station<T, R> {
     /// An end with a channel for each transmitter and receiver given.
     pub fn new(fs: f64, pairs: Vec<(T, R)>) -> Self {
         Self {
-            channels: pairs.into_iter().zip(0..).map(|((tx, rx), c)| Channel::numbered(tx, rx, c)).collect(),
+            channels: pairs
+                .into_iter()
+                .zip(0..)
+                .map(|((tx, rx), c)| Channel::numbered(tx, rx, c))
+                .collect(),
             arq: Arq::new(fs),
             fs,
             now: 0,
@@ -741,14 +787,15 @@ impl<T: Sender, R: Receiver> Station<T, R> {
     pub fn speak(&mut self, output: &mut [f64]) {
         for (i, y) in output.iter_mut().enumerate().take(self.channels.len()) {
             // Only when a block is about to be filled, which is seldom.
-            let others: Vec<Vec<u8>> = if self.channels.len() > 1 && self.channels[i].tx.wants().is_some() {
-                (0..self.channels.len())
-                    .filter(|&j| j != i)
-                    .filter_map(|j| self.channels[j].offer_for(j as u8, self.now, self.fs))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let others: Vec<Vec<u8>> =
+                if self.channels.len() > 1 && self.channels[i].tx.wants().is_some() {
+                    (0..self.channels.len())
+                        .filter(|&j| j != i)
+                        .filter_map(|j| self.channels[j].offer_for(j as u8, self.now, self.fs))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             *y = self.channels[i].speak(&mut self.arq, self.now, &others);
         }
     }
@@ -780,7 +827,10 @@ mod tests {
     struct Noise(u64);
     impl Noise {
         fn uniform(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gaussian(&mut self) -> f64 {
@@ -822,9 +872,14 @@ mod tests {
         /// clock being what it is.
         fn carry(&mut self, x: f64) -> f64 {
             let x = if self.cut { 0.0 } else { x };
-            let (pending, noise, sigma, gain) = (&mut self.pending, &mut self.noise, self.sigma, self.gain);
-            self.clock.feed(x, |y| pending.push_back((y * gain + sigma * noise.gaussian()).clamp(-1.0, 1.0)));
-            self.pending.pop_front().expect("the wire ran dry: the test is too long for its slack")
+            let (pending, noise, sigma, gain) =
+                (&mut self.pending, &mut self.noise, self.sigma, self.gain);
+            self.clock.feed(x, |y| {
+                pending.push_back((y * gain + sigma * noise.gaussian()).clamp(-1.0, 1.0))
+            });
+            self.pending
+                .pop_front()
+                .expect("the wire ran dry: the test is too long for its slack")
         }
     }
 
@@ -832,11 +887,18 @@ mod tests {
 
     fn end(channels: usize) -> End {
         let plan = Plan::for_rate(48_000.0);
-        Station::new(48_000.0, (0..channels).map(|_| (dmt::Tx::new(plan.clone()), dmt::Rx::new(plan.clone()))).collect())
+        Station::new(
+            48_000.0,
+            (0..channels)
+                .map(|_| (dmt::Tx::new(plan.clone()), dmt::Rx::new(plan.clone())))
+                .collect(),
+        )
     }
 
     pub(super) fn stream(seed: usize, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
+        (0..len)
+            .map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8)
+            .collect()
     }
 
     pub(super) struct Pair {
@@ -856,8 +918,12 @@ mod tests {
             Self {
                 a: end(channels),
                 b: end(channels),
-                there: (0..channels).map(|c| Wire::new(11 + c as u64, snr_db[c], ppm)).collect(),
-                back: (0..channels).map(|c| Wire::new(23 + c as u64, snr_db[c], -ppm)).collect(),
+                there: (0..channels)
+                    .map(|c| Wire::new(11 + c as u64, snr_db[c], ppm))
+                    .collect(),
+                back: (0..channels)
+                    .map(|c| Wire::new(23 + c as u64, snr_db[c], -ppm))
+                    .collect(),
                 from_a: vec![0.0; channels],
                 from_b: vec![0.0; channels],
                 at_a: Vec::new(),
@@ -899,7 +965,11 @@ mod tests {
             assert_eq!(channel.waiting_for(), None);
             assert_eq!(channel.tally.failed, 0);
         }
-        assert!(pair.a.arq.round_trip() < 0.3, "{} s", pair.a.arq.round_trip());
+        assert!(
+            pair.a.arq.round_trip() < 0.3,
+            "{} s",
+            pair.a.arq.round_trip()
+        );
     }
 
     #[test]
@@ -913,7 +983,12 @@ mod tests {
         pair.run(0.2);
         pair.there[0].cut = false;
         pair.run(20.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         assert!(pair.a.arq.resent > 0);
     }
 
@@ -923,7 +998,12 @@ mod tests {
         let to_b = stream(4, 600_000);
         pair.a.write(&to_b);
         pair.run(20.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         let plan = Plan::for_rate(48_000.0);
         let rate = |c: usize| plan.net(pair.a.channels[c].tx.table());
         assert!(rate(0) > 1.5 * rate(1), "{} and {}", rate(0), rate(1));
@@ -941,7 +1021,12 @@ mod tests {
         let to_b = stream(5, 100_000);
         pair.a.write(&to_b);
         pair.run(15.0);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         assert!(pair.b.channels[0].tally.lost > 0);
     }
 
@@ -959,7 +1044,12 @@ mod tests {
         let after = plan.net(pair.a.channels[0].tx.table());
         assert!(after < before, "{before} then {after}");
         assert!(pair.b.channels[0].tally.proposals > 1);
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
     }
 }
 
@@ -975,7 +1065,10 @@ mod reports {
         let said = pair.a.channels[0].there.expect("a report from the far end");
         let heard = pair.b.channels[0].here.expect("a second measured");
         // To the half decibel a report is sent in, and a second apart.
-        assert!((said.level_db - heard.level_db).abs() < 1.0, "{said:?} against {heard:?}");
+        assert!(
+            (said.level_db - heard.level_db).abs() < 1.0,
+            "{said:?} against {heard:?}"
+        );
         assert!((said.snr_db - 45.0).abs() < 2.0, "{said:?}");
         // The level it was sent at, near enough: -16 dBFS.
         assert!((said.level_db + 16.0).abs() < 1.0, "{said:?}");
@@ -1005,7 +1098,12 @@ mod reports {
         assert_eq!(pair.a.channels[0].there.map(|r| r.clipped), Some(0));
         assert_eq!(pair.b.channels[0].there.map(|r| r.trim_db), Some(trim));
         assert_eq!(pair.a.channels[0].there.map(|r| r.trim_db), Some(0.0));
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
         // The way back was never touched.
         assert_eq!(pair.b.channels[0].trim_db, 0.0);
     }
@@ -1028,13 +1126,28 @@ mod reports {
         assert!(!pair.a.channels[1].hears_loaded() && !pair.b.channels[1].sends_loaded());
         assert!(!pair.a.channels[1].loaded());
         // The stream went down both.
-        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
-        assert!(pair.b.channels[1].tally.blocks > 100, "{:?}", pair.b.channels[1].tally);
+        assert!(
+            pair.at_b == to_b,
+            "{} of {} octets",
+            pair.at_b.len(),
+            to_b.len()
+        );
+        assert!(
+            pair.b.channels[1].tally.blocks > 100,
+            "{:?}",
+            pair.b.channels[1].tally
+        );
     }
 
     #[test]
     fn a_report_survives_its_eight_octets() {
-        let report = Report { level_db: -23.5, peak_db: -11.0, clipped: 312, snr_db: 54.3, trim_db: 6.5 };
+        let report = Report {
+            level_db: -23.5,
+            peak_db: -11.0,
+            clipped: 312,
+            snr_db: 54.3,
+            trim_db: 6.5,
+        };
         assert_eq!(Report::decode(&report.encode()), Some(report));
         assert_eq!(report.encode().len(), 8);
         assert_eq!(Report::decode(&[2, 0, 0, 0, 0, 0, 0, 0]), None);
@@ -1049,7 +1162,9 @@ mod crosstalk {
     type End = Station<dmt::Tx, dmt::Rx>;
 
     fn stream(seed: usize, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
+        (0..len)
+            .map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8)
+            .collect()
     }
 
     /// Two ends on one stereo lead, one sending on each channel, with a
@@ -1060,10 +1175,17 @@ mod crosstalk {
         let end = |tx: u8, rx: u8| {
             Station::new(
                 48_000.0,
-                vec![(dmt::Tx::new(plan.clone().coloured(tx)), dmt::Rx::new(plan.clone().coloured(rx)))],
+                vec![(
+                    dmt::Tx::new(plan.clone().coloured(tx)),
+                    dmt::Rx::new(plan.clone().coloured(rx)),
+                )],
             )
         };
-        let (mut a, mut b) = if coloured { (end(0, 1), end(1, 0)) } else { (end(0, 0), end(0, 0)) };
+        let (mut a, mut b) = if coloured {
+            (end(0, 1), end(1, 0))
+        } else {
+            (end(0, 0), end(0, 0))
+        };
         let sent = stream(9, 150_000);
         a.write(&sent);
         let leak = 10f64.powf(-45.0 / 20.0);
@@ -1085,7 +1207,10 @@ mod crosstalk {
         assert_eq!(b.channels[0].tally.proposals, 1);
         assert_eq!(b.channels[0].tally.failed, 0);
         let snr = b.channels[0].rx.health().snr_db;
-        assert!((snr - 45.0).abs() < 2.0, "measured {snr:.1} dB against a leak 45 dB down");
+        assert!(
+            (snr - 45.0).abs() < 2.0,
+            "measured {snr:.1} dB against a leak 45 dB down"
+        );
         assert_eq!(a.channels[0].tx.id(), 1);
     }
 
@@ -1102,7 +1227,10 @@ mod crosstalk {
         assert_eq!(b.channels[0].tally.proposals, 1);
         assert_eq!(b.channels[0].tally.failed, 0);
         let snr = b.channels[0].rx.health().snr_db;
-        assert!((snr - 45.0).abs() < 2.0, "measured {snr:.1} dB against a leak 45 dB down");
+        assert!(
+            (snr - 45.0).abs() < 2.0,
+            "measured {snr:.1} dB against a leak 45 dB down"
+        );
         assert_ne!(a.channels[0].tx.id(), 0);
     }
 }

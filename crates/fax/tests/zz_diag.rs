@@ -27,7 +27,11 @@ fn diag() {
                 let db = 20.0 * (rms + 1e-9).log10();
                 let now_on = db > -45.0;
                 if now_on != on {
-                    println!("  {:7.2}s level {} ({db:.1} dB)", i as f64 / fs, if now_on { "up" } else { "down" });
+                    println!(
+                        "  {:7.2}s level {} ({db:.1} dB)",
+                        i as f64 / fs,
+                        if now_on { "up" } else { "down" }
+                    );
                     on = now_on;
                 }
             }
@@ -36,7 +40,14 @@ fn diag() {
                 ones = if bit { ones + 1 } else { 0 };
                 if let Some(r) = dec.feed(bit) {
                     match r {
-                        Ok(o) => println!("  {:7.2}s ok  {}", i as f64 / fs, o.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")),
+                        Ok(o) => println!(
+                            "  {:7.2}s ok  {}",
+                            i as f64 / fs,
+                            o.iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ),
                         Err(e) => println!("  {:7.2}s ERR {e:?}", i as f64 / fs),
                     }
                 }

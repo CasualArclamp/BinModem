@@ -49,7 +49,10 @@ pub fn capacity(moduli: Moduli) -> u32 {
         return 0;
     }
     // The number of whole bits below the product.
-    (0..=127).rev().find(|&k| product >= 1u128 << k).unwrap_or(0)
+    (0..=127)
+        .rev()
+        .find(|&k| product >= 1u128 << k)
+        .unwrap_or(0)
 }
 
 /// 5.4.3: K bits in, six labels out.
@@ -60,7 +63,10 @@ pub fn capacity(moduli: Moduli) -> u32 {
 /// written down, and getting it backwards produces a frame that decodes to
 /// something plausible and wrong.
 pub fn encode(bits: &[bool], moduli: Moduli) -> [u16; INTERVALS] {
-    debug_assert!(bits.len() < 128, "a data frame does not hold that many bits");
+    debug_assert!(
+        bits.len() < 128,
+        "a data frame does not hold that many bits"
+    );
     let mut r: u128 = 0;
     for (i, &bit) in bits.iter().enumerate() {
         if bit {
@@ -126,7 +132,10 @@ impl Constellation {
 
     /// The label of a point, which is what a receiver needs.
     pub fn label(&self, ucode: u8) -> Option<u16> {
-        self.points.iter().position(|&u| u == ucode).map(|i| i as u16)
+        self.points
+            .iter()
+            .position(|&u| u == ucode)
+            .map(|i| i as u16)
     }
 
     /// The points, loudest first.
@@ -254,7 +263,9 @@ mod tests {
                 .collect();
             // The receiver's side: Ucodes back to labels, labels back to bits.
             let heard: [u16; INTERVALS] = std::array::from_fn(|i| {
-                sets[i].label(sent[i]).expect("a code that is not in the set")
+                sets[i]
+                    .label(sent[i])
+                    .expect("a code that is not in the set")
             });
             assert_eq!(heard, labels);
             assert_eq!(decode(heard, moduli, k), bits, "value {value}");

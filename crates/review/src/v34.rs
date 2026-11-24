@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use datapump::v32::Mode;
 use datapump::v34::constellation::Point;
-use datapump::v34::data::{Acquired, Acquirer, Decoder, Params};
+use datapump::v34::data::{Acquired, Acquirer, Channel, Decoder, Params};
 use datapump::v34::frame::Framing;
 use datapump::v34::info::SymbolRate;
 use datapump::v34::mp::{Finder, Found, Mp, Trellis};
@@ -30,6 +30,11 @@ use crate::phase2::Settled;
 
 /// Symbols held for one event before the older ones are let go.
 const HELD: usize = 200_000;
+
+/// What the trellis pays a 4D symbol, in grid units squared, when the
+/// symbols are nowhere in particular: a little under what points spread
+/// evenly over the squares of the grid would cost, which is 4/3.
+const ADRIFT: f64 = 1.15;
 
 /// What each end has said that the other's signal depends on. Index 0 is
 /// the call modem, 1 the answer modem.
@@ -125,6 +130,13 @@ struct Direction {
     /// found again.
     searches: usize,
     relocked: usize,
+    /// Symbols running that the trellis has paid as though for nothing.
+    adrift: usize,
+    /// What the receiver is told of data mode's grid: scale, extent, bend.
+    aim: (f64, i32, f64),
+    precoding: [(i16, i16); 3],
+    /// The channel a precoding far end expects, where it precodes.
+    channel: Option<Channel>,
     b1_left: usize,
     s_watch: SWatch,
     /// Symbols the trellis has been paying dearly for, running.
@@ -174,6 +186,10 @@ impl Direction {
             slips: 0,
             searches: 0,
             relocked: 0,
+            adrift: 0,
+            aim: (1.0, 1, 0.0),
+            precoding: [(0, 0); 3],
+            channel: None,
             b1_left: 0,
             s_watch: SWatch::default(),
             bad: 0,
@@ -562,7 +578,29 @@ impl Direction {
         match params {
             Some(params) => {
                 let decoder = Decoder::new(params);
-                self.rx.set_grid(decoder.grid_scale(), decoder.extent());
+                // The receiver keeps its loops on decisions of its own, and
+                // has to be told where the points are: on the grid moved
+                // out by 9.7's stretch, where the far end was asked for it.
+                self.aim = (decoder.grid_scale(), decoder.extent(), decoder.bend());
+                self.precoding = params.precoding;
+                self.rx
+                    .set_precoded_grid(self.aim.0, self.aim.1, self.aim.2, self.precoding);
+                // The receiver in front of this makes the channel flat. A
+                // far end that was asked to precode sent for a channel that
+                // is not, and its symbols are points only once that channel
+                // is put in; the decoder after it is then given the stretch
+                // already taken out.
+                let precoded = params.precoding.iter().any(|h| *h != (0, 0));
+                self.channel = precoded.then(|| Channel::new(params));
+                let sent = params;
+                let (decoder, params) = match &self.channel {
+                    Some(channel) => (
+                        Decoder::new(channel.decoder_params()),
+                        channel.decoder_params(),
+                    ),
+                    None => (decoder, params),
+                };
+                self.params = Some(params);
                 self.b1_left = params.framing.n;
                 self.slips = self.rx.slips();
                 self.stream.bps = Some(params.framing.primary);
@@ -574,8 +612,9 @@ impl Direction {
                     .field("trellis", format!("{} states", params.code.states()))
                     .field(
                         "non-linear encoding",
-                        if params.nonlinear { "yes" } else { "no" },
+                        if sent.nonlinear { "yes" } else { "no" },
                     )
+                    .field("precoding", if precoded { "yes" } else { "no" })
                     .field(
                         "shaping",
                         if params.framing.expanded {
@@ -597,7 +636,14 @@ impl Direction {
     }
 
     fn data_symbol(&mut self, now: f64, point: Complex, shared: &mut Shared) {
-        if self.s_watch.feed(point) == Watched::S {
+        let flat = point;
+        // Everything after the S watch is given the symbol with the far
+        // end's channel in, where it precodes.
+        let point = match self.channel.as_mut() {
+            Some(channel) => channel.feed(point),
+            None => point,
+        };
+        if self.s_watch.feed(flat) == Watched::S {
             // The far end has turned to S in the middle of data.
             self.renegotiations += 1;
             self.end_data(now, "S: a rate renegotiation");
@@ -616,7 +662,6 @@ impl Direction {
             self.slips = self.rx.slips();
             if let Some(params) = self.params {
                 let acquirer = Acquirer::new(params);
-                self.rx.set_grid(acquirer.grid_scale(), acquirer.extent());
                 self.acquirer = Some(acquirer);
                 self.decoder = None;
             }
@@ -637,7 +682,6 @@ impl Direction {
                     match self.params {
                         Some(params) if self.searches < 40 => {
                             let again = Acquirer::new(params);
-                            self.rx.set_grid(again.grid_scale(), again.extent());
                             self.acquirer = Some(again);
                         }
                         _ => self.end_data(now, "the framing was lost and not found again"),
@@ -671,6 +715,26 @@ impl Direction {
         } else {
             0
         };
+        // Short of that, a trellis that is paying what symbols anywhere at
+        // all on the grid would cost is reading frames that begin somewhere
+        // else: E was taken a symbol early or late, or a symbol was lost.
+        // The place is looked for, as it is after a slip.
+        self.adrift = if decoder.path_cost() > ADRIFT {
+            self.adrift + 1
+        } else {
+            0
+        };
+        if self.adrift > 600
+            && self.searches < 40
+            && let Some(params) = self.params
+        {
+            self.adrift = 0;
+            self.searches += 1;
+            let acquirer = Acquirer::new(params);
+            self.acquirer = Some(acquirer);
+            self.decoder = None;
+            return;
+        }
         if let Some(index) = self.data_event {
             self.events[index].end = now;
         }

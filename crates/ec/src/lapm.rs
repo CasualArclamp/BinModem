@@ -457,7 +457,13 @@ impl Lapm {
                 // nothing following it, the peer never sees anything out of
                 // sequence and so never sends a reject.
                 self.timer_recovery = true;
-                self.send(Frame::Rr { nr: self.vr, pf: true }, Kind::Command);
+                self.send(
+                    Frame::Rr {
+                        nr: self.vr,
+                        pf: true,
+                    },
+                    Kind::Command,
+                );
                 self.ack_pending = false;
                 self.start_timer();
             }
@@ -577,9 +583,7 @@ impl Lapm {
         match self.state {
             // V.42 8.9.3: a DM with F clear colliding with a set-mode command
             // is ignored.
-            State::AwaitingEstablishment if final_bit => {
-                self.enter_disconnected(Cause::Refused)
-            }
+            State::AwaitingEstablishment if final_bit => self.enter_disconnected(Cause::Refused),
             State::AwaitingRelease if final_bit => self.enter_disconnected(Cause::Local),
             State::Connected => self.enter_disconnected(Cause::Refused),
             _ => {}
@@ -611,11 +615,23 @@ impl Lapm {
             // Out of sequence: ask for everything from V(R) again
             // (V.42 8.4.4). Only one outstanding reject at a time.
             self.reject_sent = true;
-            self.send(Frame::Rej { nr: self.vr, pf: false }, Kind::Command);
+            self.send(
+                Frame::Rej {
+                    nr: self.vr,
+                    pf: false,
+                },
+                Kind::Command,
+            );
         }
         if poll {
             // V.42 8.4.2.1: a command with P set demands an immediate response.
-            self.send(Frame::Rr { nr: self.vr, pf: true }, Kind::Response);
+            self.send(
+                Frame::Rr {
+                    nr: self.vr,
+                    pf: true,
+                },
+                Kind::Response,
+            );
             self.ack_pending = false;
         }
     }
@@ -650,7 +666,12 @@ impl Lapm {
             return;
         };
         self.out.push_back((
-            Frame::I { ns, nr: self.vr, poll: false, info },
+            Frame::I {
+                ns,
+                nr: self.vr,
+                poll: false,
+                info,
+            },
             Kind::Command,
         ));
         self.ack_pending = false;
@@ -697,7 +718,13 @@ impl Lapm {
     /// A command with P set requires a response with F set (V.42 8.4.2.1).
     fn answer_poll(&mut self, pf: bool, kind: Kind) {
         if pf && kind == Kind::Command {
-            self.send(Frame::Rr { nr: self.vr, pf: true }, Kind::Response);
+            self.send(
+                Frame::Rr {
+                    nr: self.vr,
+                    pf: true,
+                },
+                Kind::Response,
+            );
             self.ack_pending = false;
         }
     }
@@ -739,7 +766,12 @@ impl Lapm {
             .collect();
         for (ns, info) in frames {
             self.out.push_back((
-                Frame::I { ns, nr: self.vr, poll: false, info },
+                Frame::I {
+                    ns,
+                    nr: self.vr,
+                    poll: false,
+                    info,
+                },
                 Kind::Command,
             ));
         }
@@ -762,7 +794,12 @@ impl Lapm {
             self.vs = (self.vs + 1) % MODULUS;
             self.out.push_back((
                 // N(R) rides along, which acknowledges received frames for free.
-                Frame::I { ns, nr: self.vr, poll: false, info },
+                Frame::I {
+                    ns,
+                    nr: self.vr,
+                    poll: false,
+                    info,
+                },
                 Kind::Command,
             ));
             self.ack_pending = false;
@@ -770,7 +807,13 @@ impl Lapm {
         }
         if self.ack_pending {
             self.ack_pending = false;
-            self.send(Frame::Rr { nr: self.vr, pf: false }, Kind::Response);
+            self.send(
+                Frame::Rr {
+                    nr: self.vr,
+                    pf: false,
+                },
+                Kind::Response,
+            );
         }
     }
 
@@ -1070,8 +1113,24 @@ mod tests {
 
     #[test]
     fn the_window_limits_frames_in_flight() {
-        let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params { k: 3, n401: 1, ..Default::default() });
-        let mut b = Lapm::new(Role::Answerer, DLCI_DATA, Params { k: 3, n401: 1, ..Default::default() });
+        let mut a = Lapm::new(
+            Role::Originator,
+            DLCI_DATA,
+            Params {
+                k: 3,
+                n401: 1,
+                ..Default::default()
+            },
+        );
+        let mut b = Lapm::new(
+            Role::Answerer,
+            DLCI_DATA,
+            Params {
+                k: 3,
+                n401: 1,
+                ..Default::default()
+            },
+        );
         a.connect();
         settle(&mut a, &mut b);
 
@@ -1088,8 +1147,22 @@ mod tests {
 
     #[test]
     fn a_lost_frame_is_recovered_by_reject() {
-        let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params { n401: 1, ..Default::default() });
-        let mut b = Lapm::new(Role::Answerer, DLCI_DATA, Params { n401: 1, ..Default::default() });
+        let mut a = Lapm::new(
+            Role::Originator,
+            DLCI_DATA,
+            Params {
+                n401: 1,
+                ..Default::default()
+            },
+        );
+        let mut b = Lapm::new(
+            Role::Answerer,
+            DLCI_DATA,
+            Params {
+                n401: 1,
+                ..Default::default()
+            },
+        );
         a.connect();
         settle(&mut a, &mut b);
         events(&mut b);
@@ -1165,7 +1238,11 @@ mod tests {
 
     #[test]
     fn establishment_retries_then_gives_up_after_n400() {
-        let params = Params { n400: 3, t401_ms: 1000, ..Default::default() };
+        let params = Params {
+            n400: 3,
+            t401_ms: 1000,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         a.connect();
         // The first SABME plus two retries, then failure on the third expiry.
@@ -1198,7 +1275,10 @@ mod tests {
     /// second resets the sequence variables under a link that was working.
     #[test]
     fn a_timer_too_short_for_the_line_grows_until_it_is_not() {
-        let params = Params { t401_ms: 966, ..Default::default() };
+        let params = Params {
+            t401_ms: 966,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         a.connect();
         let _ = a.poll_transmit();
@@ -1219,7 +1299,10 @@ mod tests {
     /// A measurement that arrives cleanly is used as it stands.
     #[test]
     fn a_slow_answer_on_the_first_attempt_lengthens_the_timer() {
-        let params = Params { t401_ms: 4000, ..Default::default() };
+        let params = Params {
+            t401_ms: 4000,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         a.connect();
         let _ = a.poll_transmit();
@@ -1231,7 +1314,10 @@ mod tests {
 
     #[test]
     fn the_timer_does_not_fire_early() {
-        let params = Params { t401_ms: 1000, ..Default::default() };
+        let params = Params {
+            t401_ms: 1000,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         a.connect();
         let _ = a.poll_transmit();
@@ -1267,7 +1353,10 @@ mod tests {
     /// before its UA, and was dropped as if nothing were being established.
     #[test]
     fn a_poll_that_arrives_before_the_ua_establishes_and_is_answered() {
-        let params = Params { t401_ms: 1000, ..Default::default() };
+        let params = Params {
+            t401_ms: 1000,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         a.send_data(b"queued before the link");
         a.connect();
@@ -1275,14 +1364,26 @@ mod tests {
 
         a.receive(Frame::Rr { nr: 0, pf: true }, Kind::Command);
         assert_eq!(a.state(), State::Connected);
-        assert_eq!(events(&mut a), vec![Event::Connected], "no L-ESTABLISH confirm");
+        assert_eq!(
+            events(&mut a),
+            vec![Event::Connected],
+            "no L-ESTABLISH confirm"
+        );
         let sent: Vec<_> = std::iter::from_fn(|| a.poll_transmit()).collect();
         assert!(
             sent.contains(&(Frame::Rr { nr: 0, pf: true }, Kind::Response)),
             "the poll was not answered: {sent:?}"
         );
         assert!(
-            sent.contains(&(Frame::I { ns: 0, nr: 0, poll: false, info: b"queued before the link".to_vec() }, Kind::Command)),
+            sent.contains(&(
+                Frame::I {
+                    ns: 0,
+                    nr: 0,
+                    poll: false,
+                    info: b"queued before the link".to_vec()
+                },
+                Kind::Command
+            )),
             "V(S) did not start from 0: {sent:?}"
         );
 
@@ -1305,7 +1406,15 @@ mod tests {
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
         a.connect();
         let _ = std::iter::from_fn(|| a.poll_transmit()).count();
-        a.receive(Frame::I { ns: 0, nr: 0, poll: false, info: b"login: ".to_vec() }, Kind::Command);
+        a.receive(
+            Frame::I {
+                ns: 0,
+                nr: 0,
+                poll: false,
+                info: b"login: ".to_vec(),
+            },
+            Kind::Command,
+        );
         assert!(a.is_connected());
         assert_eq!(data_from(&mut a), b"login: ");
     }
@@ -1313,16 +1422,29 @@ mod tests {
     #[test]
     fn only_i_and_supervisory_frames_stand_in_for_a_lost_ua() {
         for frame in [
-            Frame::Ui { pf: false, info: b"x".to_vec() },
-            Frame::Xid { pf: false, info: vec![0x82] },
-            Frame::Test { pf: false, info: vec![] },
+            Frame::Ui {
+                pf: false,
+                info: b"x".to_vec(),
+            },
+            Frame::Xid {
+                pf: false,
+                info: vec![0x82],
+            },
+            Frame::Test {
+                pf: false,
+                info: vec![],
+            },
             Frame::Ua { final_bit: false },
             Frame::Dm { final_bit: false },
         ] {
             let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
             a.connect();
             a.receive(frame.clone(), Kind::Response);
-            assert_eq!(a.state(), State::AwaitingEstablishment, "{frame:?} established");
+            assert_eq!(
+                a.state(),
+                State::AwaitingEstablishment,
+                "{frame:?} established"
+            );
         }
         // And nothing stands in for anything when nothing was asked for.
         let mut idle = Lapm::new(Role::Answerer, DLCI_DATA, Params::default());
@@ -1377,7 +1499,10 @@ mod tests {
         // Nothing follows the last frame, so the peer never sees anything out
         // of sequence and never sends a reject. Only T401 recovery gets it back
         // (V.42 8.5.3). This is the case a reject-only implementation loses.
-        let params = Params { t401_ms: 1000, ..Default::default() };
+        let params = Params {
+            t401_ms: 1000,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         let mut b = Lapm::new(Role::Answerer, DLCI_DATA, params);
         a.connect();
@@ -1401,7 +1526,11 @@ mod tests {
 
     #[test]
     fn timer_recovery_does_not_resend_what_was_already_acknowledged() {
-        let params = Params { t401_ms: 1000, n401: 4, ..Default::default() };
+        let params = Params {
+            t401_ms: 1000,
+            n401: 4,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         let mut b = Lapm::new(Role::Answerer, DLCI_DATA, params);
         a.connect();
@@ -1424,7 +1553,10 @@ mod tests {
 
     #[test]
     fn sequence_numbers_wrap_past_the_modulus() {
-        let params = Params { n401: 1, ..Default::default() };
+        let params = Params {
+            n401: 1,
+            ..Default::default()
+        };
         let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
         let mut b = Lapm::new(Role::Answerer, DLCI_DATA, params);
         a.connect();
@@ -1435,6 +1567,10 @@ mod tests {
         let payload: Vec<u8> = (0..300).map(|i| (i % 251) as u8).collect();
         a.send_data(&payload);
         settle(&mut a, &mut b);
-        assert_eq!(data_from(&mut b), payload, "wrapping lost or reordered data");
+        assert_eq!(
+            data_from(&mut b),
+            payload,
+            "wrapping lost or reordered data"
+        );
     }
 }
