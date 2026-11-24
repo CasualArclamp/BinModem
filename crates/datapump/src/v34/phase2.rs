@@ -508,6 +508,10 @@ pub struct Modem {
     /// Whether an analogue modem that could ask for PCM upstream asks for
     /// V.90 data mode instead, having found the line will not carry it.
     pcm_up_declined: bool,
+    /// Symbol rates a start-up of this call trained at and never got to data
+    /// mode with, one bit each by [`SymbolRate::index`]: not chosen again
+    /// while another will do (see [`Self::avoid_symbol_rate`]).
+    avoided: u8,
     /// The far end's two V.92 bits, read as its own INFO0 table lays them out.
     ///
     /// Only ever written in a PCM role. V.34's Table 14 has the transmit clock
@@ -586,6 +590,7 @@ impl Modem {
             tone_b_level: None,
             info1a_pcm_up: None,
             pcm_up_declined: false,
+            avoided: 0,
             far_flags: PcmFlags::default(),
             full_phase2_only: false,
             sent_pcm_upstream: false,
@@ -697,6 +702,7 @@ impl Modem {
             modem.presence.floor = level * TONE_B_FLOOR;
         }
         modem.pcm_up_declined = self.pcm_up_declined;
+        modem.avoided = self.avoided;
         modem.far_flags = self.far_flags;
         modem.full_phase2_only = true;
         modem
@@ -722,6 +728,32 @@ impl Modem {
     /// [`Self::expect_far_end_within`]).
     pub fn far_end_silent(&self) -> bool {
         self.far_silent
+    }
+
+    /// Keep off `rate` in this phase 2 and every retrain's after it, while
+    /// another symbol rate will do: a start-up got as far as phase 4 at it and
+    /// the call came back to phase 2 without reaching data mode.
+    ///
+    /// The answer modem leaves it out of INFO1a's choice; the call modem says
+    /// in INFO1c that it cannot be used towards it (max rate 0, "the symbol
+    /// rate cannot be used"), which is the one say it has over the answer
+    /// modem's transmitter. The two directions are not told apart: which of
+    /// them failed is not known, and V.34 asks for one symbol rate both ways
+    /// unless both ends allow asymmetry.
+    ///
+    /// An emulated U.S. Robotics Courier (courier-emu, DSP 3.1.2) projected
+    /// 21600 bit/s at 3429 and 19200 at 3200 in its INFO1c, so 3429 was
+    /// chosen towards it; its MP then asked for 7200 at 3429 and it never
+    /// acknowledged this end's MP, and retrained. Every retrain chose 3429
+    /// again from the same INFO1c, and the call ended in phase 3. At 3200 it
+    /// connects at 31200 both ways.
+    pub fn avoid_symbol_rate(&mut self, rate: SymbolRate) {
+        self.avoided |= 1 << rate.index();
+    }
+
+    /// Whether `rate` is one [`Self::avoid_symbol_rate`] keeps off.
+    pub fn avoids(&self, rate: SymbolRate) -> bool {
+        self.avoided & (1 << rate.index()) != 0
     }
 
     /// Ask for V.34 in INFO1a from now on, even of a V.90 digital modem
@@ -1192,6 +1224,9 @@ impl Modem {
                         // Kept as it went, which is to the field's own
                         // resolution.
                         self.info1a = Info1a::from_bits(&bits);
+                        if std::env::var_os("PHASE2_TRACE").is_some() {
+                            eprintln!("P2TRACE sending info1a={:?}", self.info1a);
+                        }
                         bits
                     }
                 };
@@ -1458,6 +1493,14 @@ impl Modem {
                     if let Some(reading) = reading.as_ref() {
                         for (slot, rate) in probed.iter_mut().zip(SymbolRate::ALL) {
                             *slot = reading.probed(rate, &far, wide);
+                        }
+                    }
+                    // A symbol rate a start-up of this call failed at is
+                    // "cannot be used", while another can.
+                    let usable = |r: &SymbolRate| probed[r.index() as usize].max_rate > 0;
+                    if SymbolRate::ALL.iter().any(|r| usable(r) && !self.avoids(*r)) {
+                        for rate in SymbolRate::ALL.iter().filter(|r| self.avoids(**r)) {
+                            probed[rate.index() as usize].max_rate = 0;
                         }
                     }
                     let frequency_offset = reading.as_ref().and_then(|r| r.frequency_offset);
@@ -1782,7 +1825,10 @@ impl Modem {
         };
         let towards_call: Vec<(SymbolRate, u8)> =
             SymbolRate::ALL.iter().map(|&r| (r, info1c.probed[r.index() as usize].max_rate)).collect();
-        let answer_to_call = best(&towards_call).map_or(SymbolRate::S2400, |b| b.0);
+        // A symbol rate a start-up of this call failed at is passed over
+        // while the call modem projects another (see `avoid_symbol_rate`).
+        let untried: Vec<(SymbolRate, u8)> = towards_call.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let answer_to_call = best(&untried).or_else(|| best(&towards_call)).map_or(SymbolRate::S2400, |b| b.0);
         // Towards this end: what this end read of the call modem's L2, within
         // the asymmetry both ends allow.
         let steps = u32::from(far.asymmetry.min(self.ours.asymmetry));
@@ -1794,7 +1840,10 @@ impl Modem {
                 (r, probed.max_rate, probed)
             })
             .collect();
-        let (call_to_answer, probed) = best(&towards_answer.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>())
+        let towards_answer_rates: Vec<(SymbolRate, u8)> = towards_answer.iter().map(|x| (x.0, x.1)).collect();
+        let untried: Vec<(SymbolRate, u8)> = towards_answer_rates.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let (call_to_answer, probed) = best(&untried)
+            .or_else(|| best(&towards_answer_rates))
             .and_then(|(r, _)| towards_answer.iter().find(|x| x.0 == r).map(|x| (x.0, x.2)))
             .unwrap_or((answer_to_call, Probed::default()));
         Info1a {
@@ -1989,6 +2038,33 @@ pub(crate) mod tests {
         assert_eq!(info1a.probed.max_rate, 14, "{info1a:?}");
         let info1c = caller.info1c().unwrap();
         assert_eq!(info1c.probed[5].max_rate, 14, "{info1c:?}");
+    }
+
+    /// A symbol rate a failed start-up trained at is passed over the next
+    /// time, by the answer modem in INFO1a and by the call modem in INFO1c,
+    /// on a line where it would otherwise be the first choice.
+    #[test]
+    fn a_symbol_rate_that_failed_is_not_chosen_again() {
+        let mut answerer = Modem::new(Role::Answer, FS);
+        answerer.avoid_symbol_rate(SymbolRate::S3429);
+        // A retrain's phase 2 keeps the list.
+        assert!(answerer.again().avoids(SymbolRate::S3429));
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), answerer);
+        assert_eq!(answerer.status(), Status::Done);
+        let info1a = caller.info1a().expect("no INFO1a");
+        assert_eq!(info1a.answer_to_call, SymbolRate::S3200, "{info1a:?}");
+        assert_eq!(info1a.call_to_answer, SymbolRate::S3200, "{info1a:?}");
+
+        let mut caller = Modem::new(Role::Call, FS);
+        caller.avoid_symbol_rate(SymbolRate::S3429);
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, caller, Modem::new(Role::Answer, FS));
+        assert_eq!(answerer.status(), Status::Done);
+        let info1c = caller.info1c().unwrap();
+        assert_eq!(info1c.probed[5].max_rate, 0, "{info1c:?}");
+        assert!(info1c.probed[4].max_rate > 0, "{info1c:?}");
+        assert_eq!(caller.info1a().expect("no INFO1a").answer_to_call, SymbolRate::S3200);
     }
 
     #[test]

@@ -52,9 +52,12 @@ arrives with a bad frame every few hundred octets (courier-emu's own
 finding). The second `--at` types ATI11 once the call is over, for the
 Courier's diagnostics. Then this end:
 
-    cargo run --release -p modem --example courier_peer -- 127.0.0.1:47123 [--pad 0|3|6] [--no-x2]
+    cargo run --release -p modem --example courier_peer -- 127.0.0.1:47123 [--pad 0|3|6] [--no-x2] [--ms V90|V34] [--drive D]
 
-It prints what this modem says and does; the Courier's terminal is the
+Waveforms go to the line at modem-sip's drive, 0.1 unless `--drive` says
+otherwise, and a digital modem's exact levels as they are, as modem-sip and
+the window send them. It prints what this modem says and does, and the
+Courier's hook and call state as they change; the Courier's terminal is the
 `serial_text` of `courier.json`. The emulator runs at about 1.2 times
 real time here: 400 M instructions is some 118 s of line.
 
@@ -86,3 +89,32 @@ Two things this run found, both fixed:
 - V.42 here answered the Courier's XID with its own offer (N7 250 against
   its 32, 32-bit FCS and multiple SREJ it had not offered); the Courier
   repeated its XID and never sent SABME.
+
+## Plain V.34 against it (2026-11-24)
+
+With `--no-x2` (or `--ms V34`) the Courier and this modem run V.34. It
+failed in phase 3 at first, for two reasons:
+
+- This harness sent the modem's output undriven. Every transmitter here
+  leaves at 0.707 rms and modem-sip and the window drive the line at a
+  tenth of that; without it V.34's phase 2 and 3 reached the Courier at
+  about +3 dBm0, 18 to 37 % of the samples flat against the top of
+  mu-law, and the Courier never trained on our PP and TRN: it sent no S,
+  and this end gave up "listening for S". V.8 had been at -5.8 dBm0 and
+  went through.
+- Driven properly, this end chose 3429 baud towards the Courier (its
+  INFO1c projects 9, 8, 7, 6, 5, 4 for 3429 down to 2400 in every run here,
+  clipped or not). Its MP then asked for 7200 at 3429, it never took
+  our MP, and it retrained; every retrain chose 3429 again. The Courier's
+  codec runs each symbol rate at its own sample rate, 8000 Hz for 3429,
+  with the least margin of the six (courier-emu
+  `docs/codec-sample-rates.md`); whether the real board would do better is
+  not known. BinModem now keeps off, for the rest of the call, a symbol
+  rate a start-up reached phase 4 at and then retrained from before data
+  mode. libv90modem never offers
+  3429, which is why it got 3200 straight away.
+
+The run: the first start-up at 3429 retrains, the second at 3200 gives
+`CONNECT 31200/ARQ/V34/LAPM/V42BIS` on the Courier's terminal and 31200
+both ways here. Text crossed both ways, and every numbered line that
+left before the line closed (79 of 80) arrived intact.
