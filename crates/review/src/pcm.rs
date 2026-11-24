@@ -14,25 +14,41 @@
 //! time, and what one has read is there for the other when its turn comes.
 
 use datapump::v32::{Mode, Scrambler};
-use datapump::v34::dpsk::Side;
+use datapump::v34::data::{Decoder as UpDecoder, Params};
+use datapump::v34::frame::Framing;
+use datapump::v34::info::SymbolRate;
+use datapump::v34::mp::Mp;
+use datapump::v34::trellis::Code;
 use datapump::v34::qam::Band;
 use datapump::v34::receiver::{Heard as UpHeard, Receiver as V34Rx, Reference};
 use datapump::v34::signals::{self, Reader, Size};
 use datapump::v90::dil::Analysis;
-use datapump::v90::pcm::{Heard as DownHeard, Receiver as PcmRx, Slicer};
+use datapump::v90::digital::upstream_rate;
+use datapump::v90::pcm::{Heard as DownHeard, Receiver as PcmRx};
 use datapump::v90::sequences::{self, Cp, CpFinder, Descriptor, DescriptorFinder, JD_BITS, JD_PRIME_BITS, Jd};
 use datapump::v90::ucode::{self, Law};
 use dsp::Resampler;
 
 use crate::model::{End, Event, Layer};
+use crate::pcm4::Fourth;
 use crate::phase2::Settled;
+use crate::v34::Stream;
 
 /// The rate the PCM receiver has been run at and proved at.
 const PCM_FS: f64 = 16_000.0;
 
 /// What each direction has read that the other is waiting for.
 #[derive(Debug, Default)]
-struct Shared {
+pub(crate) struct Shared {
+    /// The analogue modem's last CPt and CP: the constellations the digital
+    /// modem's phase 4 and data mode are sent with.
+    pub(crate) cpt: Option<Cp>,
+    pub(crate) cp: Option<Cp>,
+    /// The digital modem's last MP: what the analogue modem's data is laid
+    /// out by.
+    pub(crate) mp: Option<Mp>,
+    /// When the digital modem's data mode began.
+    pub(crate) down_data: Option<f64>,
     descriptor: Option<Descriptor>,
     jd: Option<Jd>,
     /// When the analogue modem's second S-bar ended the DIL, in seconds.
@@ -53,6 +69,8 @@ pub struct Outcome {
     pub downstream_bps: Option<u32>,
     pub upstream_rates: Option<u16>,
     pub reached_data: bool,
+    /// The analogue modem's data, and the digital modem's.
+    pub streams: Vec<Stream>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +117,10 @@ struct Upstream {
     /// The CP now being repeated: its event's place in the list.
     cp_run: Option<(Cp, usize)>,
     last_cp: Option<Cp>,
+    rate: SymbolRate,
+    decoder: Option<UpDecoder>,
+    b1_left: usize,
+    stream: Stream,
     /// The points of whatever is being received now, for its event.
     seen: Vec<(f32, f32)>,
     events: Vec<Event>,
@@ -109,7 +131,7 @@ struct Upstream {
 const HELD: usize = 200_000;
 
 impl Upstream {
-    fn new(band: Band, who: End, fs: f64) -> Self {
+    fn new(band: Band, rate: SymbolRate, who: End, fs: f64) -> Self {
         let mut rx = V34Rx::new(band, fs);
         rx.hunt();
         Self {
@@ -138,6 +160,10 @@ impl Upstream {
             size: Size::Four,
             cp_run: None,
             last_cp: None,
+            rate,
+            decoder: None,
+            b1_left: 0,
+            stream: Stream { from: Some(who), ..Stream::default() },
             seen: Vec::new(),
             events: Vec::new(),
             outcome: Outcome::default(),
@@ -196,7 +222,7 @@ impl Upstream {
                     if self.seen.len() < HELD {
                         self.seen.push((symbol.point.re as f32, symbol.point.im as f32));
                     }
-                    self.symbol(now, symbol.decided, shared);
+                    self.symbol(now, symbol.decided, symbol.point, shared);
                 }
             }
         }
@@ -265,7 +291,13 @@ impl Upstream {
         }
     }
 
-    fn symbol(&mut self, now: f64, decided: datapump::v34::constellation::Point, shared: &mut Shared) {
+    fn symbol(
+        &mut self,
+        now: f64,
+        decided: datapump::v34::constellation::Point,
+        point: dsp::Complex,
+        shared: &mut Shared,
+    ) {
         match self.stage {
             UpStage::ReadJa => {
                 if self.in_trn {
@@ -318,18 +350,34 @@ impl Upstream {
                         self.seen.clear();
                         shared.e = Some(now);
                         shared.downstream_bps = self.outcome.downstream_bps;
-                        self.events.push(
-                            self.event(now, now, Layer::Data, "data")
-                                .summary("data mode, V.34 modulation from the analogue modem".to_owned()),
-                        );
+                        let data = self.begin_data(now, shared);
+                        self.events.push(data);
                         return;
                     }
                     if let Some(cp) = self.cps.feed(bit) {
+                        if cp.data_mode {
+                            shared.cp = Some(cp.clone());
+                        } else {
+                            shared.cpt = Some(cp.clone());
+                        }
                         self.heard_cp(now, cp);
                     }
                 }
             }
             UpStage::Data => {
+                if let Some(decoder) = self.decoder.as_mut() {
+                    decoder.feed(point);
+                    for bit in decoder.take_bits() {
+                        if self.b1_left > 0 {
+                            self.b1_left -= 1;
+                            continue;
+                        }
+                        if self.stream.bits.len().is_multiple_of(256) {
+                            self.stream.marks.push((self.stream.bits.len(), now));
+                        }
+                        self.stream.bits.push(bit);
+                    }
+                }
                 // The event runs for as long as symbols keep coming.
                 if let Some(data) = self.events.iter_mut().rev().find(|e| e.tag == "data") {
                     data.end = now;
@@ -337,6 +385,32 @@ impl Upstream {
             }
             _ => {}
         }
+    }
+
+    /// Data mode's event, and a decoder for it if the digital modem's MP
+    /// was read: the analogue modem sends as that MP asked (9.4.1.6).
+    fn begin_data(&mut self, now: f64, shared: &Shared) -> Event {
+        let event = self.event(now, now, Layer::Data, "data");
+        let (Some(mp), Some(cp)) = (shared.mp, self.last_cp.as_ref()) else {
+            return event.summary("data mode, V.34 modulation: the digital modem's MP was not read, so symbols only".to_owned());
+        };
+        let rate = u32::from(upstream_rate(cp, &mp)) * 2400;
+        let Some(framing) = Framing::new(self.rate, rate, false, mp.expanded_shaping) else {
+            return event.summary(format!("data mode, V.34 modulation: no framing for {rate} bit/s at this symbol rate"));
+        };
+        let params = Params { framing, code: Code::States16, nonlinear: mp.non_linear, precoding: [(0, 0); 3], mode: Mode::Answer };
+        let decoder = UpDecoder::new(params);
+        self.rx.set_grid(decoder.grid_scale(), decoder.extent());
+        self.b1_left = framing.n;
+        self.decoder = Some(decoder);
+        self.stream.bps = Some(rate);
+        event
+            .summary(format!("data mode, V.34 modulation at {rate} bit/s"))
+            .field("rate", format!("{rate} bit/s"))
+            .field("symbol rate", format!("{:.0} symbols/s", self.band.baud()))
+            .field("points in the constellation", framing.l.to_string())
+            .field("non-linear encoding", if mp.non_linear { "yes" } else { "no" })
+            .field("shaping", if mp.expanded_shaping { "expanded" } else { "minimum" })
     }
 
     fn end_ja(&mut self, now: f64, shared: &mut Shared) {
@@ -500,10 +574,9 @@ struct Downstream {
     dil: Option<Dil>,
     analysis: Analysis,
     dil_read: usize,
-    /// When the DIL ended, once it has; and whether phase 4 has been cut
-    /// from data mode since.
-    after_dil: Option<f64>,
-    in_data: Option<f64>,
+    /// Everything after the DIL.
+    fourth: Option<Fourth>,
+    uinfo: u8,
     /// The levels of whatever is being received now, for its event.
     seen: Vec<f32>,
     events: Vec<Event>,
@@ -535,8 +608,8 @@ impl Downstream {
             dil: None,
             analysis: Analysis::new(),
             dil_read: 0,
-            after_dil: None,
-            in_data: None,
+            fourth: None,
+            uinfo,
             seen: Vec::new(),
             events: Vec::new(),
         }
@@ -547,17 +620,6 @@ impl Downstream {
     }
 
     fn feed(&mut self, now: f64, x: f64, shared: &mut Shared) {
-        // Phase 4 gives way to data mode when the analogue modem's E has
-        // gone by: Ed and B1d are within a few frames of it.
-        if let (Some(from), Some(e), None) = (self.after_dil, shared.e, self.in_data) {
-            let levels = std::mem::take(&mut self.seen);
-            self.events.push(
-                Event::new(from, e, self.who, Layer::Phase4, "phase 4")
-                    .summary("Ri, TRN2d, MP and Ed from the digital modem: symbols only, not read".to_owned())
-                    .pcm(&levels),
-            );
-            self.in_data = Some(e);
-        }
         self.power += self.alpha * (x * x - self.power);
         if self.power.sqrt() > 0.004 {
             if self.since.is_none() {
@@ -604,19 +666,21 @@ impl Downstream {
             }
             DownHeard::Trained { snr_db, inverted } => self.trained = Some((snr_db, inverted)),
             DownHeard::Symbol(s) => {
+                if let Some(fourth) = self.fourth.as_mut() {
+                    fourth.symbol(now, &s, &mut self.rx, shared);
+                    return;
+                }
                 if self.seen.len() < HELD {
                     self.seen.push(s.value as f32);
-                }
-                if self.after_dil.is_some() {
-                    return;
                 }
                 if let Some((first, _, levels)) = &self.dil {
                     // What was sent at this place in the DIL, which goes
                     // round again if the analogue modem lets it run on.
-                    let place = (s.index.saturating_sub(*first)) as usize;
+                    let place = (s.raw.saturating_sub(*first)) as usize;
                     if !levels.is_empty() {
                         let (ucode, positive) = levels[place % levels.len()];
-                        self.analysis.feed(ucode, positive, s.interval(), s.value);
+                        // The DIL's first symbol is in interval 0.
+                        self.analysis.feed(ucode, positive, place % 6, s.value);
                         self.dil_read += 1;
                     }
                     return;
@@ -680,13 +744,21 @@ impl Downstream {
                     );
                     self.events.push(self.event(at, now, "J'd").summary("J'd: twelve zeros, and the DIL follows".to_owned()));
                     let levels: Vec<(u8, bool)> = shared.descriptor.as_ref().map(|d| d.symbols().collect()).unwrap_or_default();
-                    if !levels.is_empty() {
-                        let law = self.law;
-                        self.rx.expect(
-                            levels.iter().map(move |&(u, positive)| ucode::level(law, u) * if positive { 1.0 } else { -1.0 }),
-                        );
+                    // J'd ends on a frame boundary, so the DIL's first symbol
+                    // is in interval 0, whatever a slip did on the way.
+                    let first = s.raw + 1;
+                    self.rx.set_frame_offset((6 - first % 6) % 6);
+                    if let Some(descriptor) = shared.descriptor.as_ref().filter(|d| !d.is_empty()) {
+                        // Three times round: the digital modem goes on with
+                        // it until the analogue one says stop, and a
+                        // receiver with nothing known to steer by wanders.
+                        // And only the symbols the modem itself would learn
+                        // from: not the loud ones, which a codec bends.
+                        let once = datapump::v90::analogue::dil_expectations(descriptor, self.law);
+                        let passes: Vec<f64> = (0..3).flat_map(|_| once.iter().copied()).collect();
+                        self.rx.expect(passes);
                     }
-                    self.dil = Some((s.index + 1, now, levels));
+                    self.dil = Some((first, now, levels));
                 }
             }
             _ => {}
@@ -694,33 +766,23 @@ impl Downstream {
     }
 
     /// What is left when the recording ends.
-    fn finish(&mut self, now: f64, shared: &Shared) {
-        let levels = std::mem::take(&mut self.seen);
-        match (self.in_data, self.after_dil) {
-            (Some(from), _) => {
-                let rate = shared.downstream_bps.map_or_else(String::new, |r| format!(" at {r} bit/s"));
-                self.events.push(
-                    Event::new(from, now, self.who, Layer::Data, "data")
-                        .summary(format!("data mode, PCM{rate}: symbols only, not read"))
-                        .pcm(&levels),
-                );
+    fn finish(&mut self, now: f64) -> Stream {
+        match self.fourth.as_mut() {
+            Some(fourth) => {
+                fourth.finish(now);
+                self.events.append(&mut fourth.events);
+                std::mem::take(&mut fourth.stream)
             }
-            (None, Some(from)) => self.events.push(
-                Event::new(from, now, self.who, Layer::Phase4, "phase 4")
-                    .summary("Ri, TRN2d, MP and Ed from the digital modem: symbols only, not read".to_owned())
-                    .pcm(&levels),
-            ),
-            _ => {}
+            None => Stream::default(),
         }
     }
 
     fn end_dil(&mut self, from: f64, now: f64) {
-        self.after_dil = Some(now);
         self.dil = None;
-        // Nothing is known of what comes next, so nothing is decided: the
-        // equaliser is left as the DIL had it.
-        self.rx.set_slicer(Slicer::Free);
+        // The receiver goes on expecting the DIL, as the modem's own does,
+        // until R is heard under it.
         let route = self.analysis.route();
+        self.fourth = Some(Fourth::new(self.who, ucode::level(self.law, self.uinfo), route.clone(), now));
         let noise = route.noise();
         // The reference level is what the DIL's loudest codewords come to,
         // which is near enough the power data mode is sent at.
@@ -794,7 +856,7 @@ pub fn follow(
     };
     let law = if settled.info0d.is_some_and(|d| d.a_law) { Law::A } else { Law::Mu };
     let mut shared = Shared::default();
-    let mut up = Upstream::new(Band::new(asked.upstream, high), analogue.1, fs);
+    let mut up = Upstream::new(Band::new(asked.upstream, high), asked.upstream, analogue.1, fs);
     let mut down = Downstream::new(law, asked.uinfo, digital.1, fs);
     let first = ((from + 0.01) * fs) as usize;
     let last = analogue.0.len().min(digital.0.len()).min((until * fs) as usize);
@@ -802,14 +864,16 @@ pub fn follow(
         up.feed(n, analogue.0[n] as f64, &mut shared);
         down.feed(n as f64 / fs, digital.0[n] as f64, &mut shared);
     }
-    let _ = Side::Call;
     let end = last as f64 / fs;
-    down.finish(end, &shared);
+    let down_stream = down.finish(end);
     if let Some(data) = up.events.iter_mut().rev().find(|e| e.tag == "data") {
         let seen = std::mem::take(&mut up.seen);
         *data = data.clone().qam(&seen, 1024);
     }
+    up.stream.marks.push((up.stream.bits.len(), end));
     let mut events = up.events;
     events.extend(down.events);
-    Some((events, up.outcome))
+    let mut outcome = up.outcome;
+    outcome.streams = vec![up.stream, down_stream];
+    Some((events, outcome))
 }

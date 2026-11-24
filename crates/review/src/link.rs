@@ -25,6 +25,9 @@ pub struct Summary {
     pub octets: usize,
     pub xid: Option<Xid>,
     pub compressed: bool,
+    /// Bits came, and were neither frames nor characters that make sense:
+    /// read wrong, most likely.
+    pub unread: bool,
 }
 
 fn hex(octets: &[u8]) -> String {
@@ -263,9 +266,10 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
                 if fresh {
                     expected = Some((ns + 1) % 128);
                     summary.octets += info.len();
-                    if !summary.compressed {
-                        carried.feed(info, start, end);
-                    }
+                    // Compression starts out passing octets through as they
+                    // are, so what is in a frame is shown either way; once a
+                    // compressor has switched itself in it is codewords.
+                    carried.feed(info, start, end);
                 }
                 event("I")
                     .summary(format!(
@@ -337,9 +341,18 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
             }
         }
         plain.flush(stream.time_of(stream.bits.len()));
-        if any > 0 {
+        // Bits that were read wrong make characters too, of every kind.
+        // What a person or a protocol sent is mostly printable, or is PPP.
+        let text: Vec<&Event> = plain.events.iter().filter(|e| e.tag == "text").collect();
+        let (shown, all) = text.iter().fold((0usize, 0usize), |(shown, all), e| {
+            (shown + e.octets.iter().filter(|o| matches!(o, 0x20..=0x7e | 0x09 | 0x0a | 0x0d)).count(), all + e.octets.len())
+        });
+        let sense = plain.ppp || (all > 0 && shown * 10 >= all * 8);
+        if any > 0 && sense {
             summary.octets = any;
             events.extend(plain.events);
+        } else if any > 0 {
+            summary.unread = true;
         }
     } else {
         events.extend(carried.events);

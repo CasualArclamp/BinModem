@@ -19,6 +19,7 @@
 pub mod link;
 pub mod model;
 pub mod pcm;
+mod pcm4;
 pub mod phase2;
 pub mod picture;
 pub mod setup;
@@ -131,8 +132,13 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
     let retrains = rounds.len().saturating_sub(1);
     // What the data was: frames, and what was in them.
     let mut links: Vec<(End, link::Summary)> = Vec::new();
-    if let Some(outcome) = &v34_outcome {
-        for stream in &outcome.streams {
+    let carried: Vec<&v34::Stream> = v34_outcome
+        .iter()
+        .flat_map(|o| o.streams.iter())
+        .chain(pcm.iter().flat_map(|o: &pcm::Outcome| o.streams.iter()))
+        .collect();
+    if !carried.is_empty() {
+        for stream in carried {
             let (found, summary) = link::read(stream);
             events.extend(found);
             if let Some(from) = stream.from {
@@ -143,7 +149,8 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         // the octets in the frames are not the octets that were sent.
         if links.len() == 2 && links.iter().all(|(_, s)| s.compressed) {
             caveats.push(
-                "the two ends agreed to compress: the frames are read, and what is in them is not expanded yet".to_owned(),
+                "the two ends agreed to compress: what is in the frames is shown as it is, which is the data itself only until a compressor switches in"
+                    .to_owned(),
             );
         }
     }
@@ -214,6 +221,8 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
             )
         } else if summary.octets > 0 {
             format!("no error control: {} characters", summary.octets)
+        } else if summary.unread {
+            "bits came off the line, but neither frames nor characters could be made of them".to_owned()
         } else {
             "nothing read".to_owned()
         };

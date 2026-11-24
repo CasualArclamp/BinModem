@@ -13,6 +13,9 @@
 
 use modem::{Modem, State};
 
+#[path = "shared/pcm_pair.rs"]
+mod pcm_pair;
+
 const FS: f64 = 16_000.0;
 /// What a sample of the line is multiplied by on its way into the file.
 const LEVEL: f32 = 0.25;
@@ -47,6 +50,15 @@ fn main() {
     let (retrain_at, slower_at) = (at(3), at(4));
     let mut slowed = false;
 
+    if carrier.eq_ignore_ascii_case("V90") {
+        let call = pcm_pair::record(seconds, true);
+        eprintln!("the server received {:?}", String::from_utf8_lossy(&call.server_received));
+        eprintln!("the caller's terminal saw {:?}", String::from_utf8_lossy(&call.caller_saw));
+        eprintln!("the analogue modem reported {:?} bit/s down and up", call.rates);
+        line::wav::write_channels(path, &call.samples, 2, 8000).expect("could not write the recording");
+        eprintln!("{path}: {seconds} s at 8000 Hz, the analogue modem on channel 1, the digital one on channel 2");
+        return;
+    }
     let mut caller = Modem::new(FS);
     let mut host = Modem::new(FS);
     for m in [&mut caller, &mut host] {

@@ -448,11 +448,6 @@ impl Direction {
         }
         let tag = if mp.acknowledge { "MP'" } else { "MP" };
         let bps = |n: u8| u32::from(n) * 2400;
-        let rates: Vec<String> = (1..=14).filter(|r| mp.rates >> (r - 1) & 1 == 1).map(|r| (r * 2400).to_string()).collect();
-        let precoding = mp.precoding.map_or_else(
-            || "none sent".to_owned(),
-            |h| h.iter().map(|(re, im)| format!("{:+.3}{:+.3}j", f64::from(*re) / 16384.0, f64::from(*im) / 16384.0)).collect::<Vec<_>>().join("  "),
-        );
         let size = if self.size == Size::Sixteen { 16 } else { 4 };
         let points = std::mem::take(&mut self.seen);
         let event = self
@@ -462,20 +457,7 @@ impl Direction {
                 bps(mp.call_to_answer),
                 bps(mp.answer_to_call)
             ))
-            .field("most from the caller", format!("{} bit/s", bps(mp.call_to_answer)))
-            .field("most from the answerer", format!("{} bit/s", bps(mp.answer_to_call)))
-            .field("acknowledges the other's MP", if mp.acknowledge { "yes" } else { "no" })
-            .field("trellis it wants to receive", match mp.trellis {
-                Trellis::States16 => "16 states",
-                Trellis::States32 => "32 states",
-                Trellis::States64 => "64 states",
-            })
-            .field("non-linear encoding", if mp.non_linear { "yes" } else { "no" })
-            .field("shaping", if mp.expanded_shaping { "expanded" } else { "minimum" })
-            .field("precoding h(1) h(2) h(3)", precoding)
-            .field("rates enabled", rates.join(", "))
-            .field("different rates each way", if mp.asymmetric { "allowed" } else { "not allowed" })
-            .field("auxiliary channel", if mp.auxiliary { "yes" } else { "no" })
+            .fields(mp_fields(&mp))
             .field("sent", "1 times")
             .qam(&points, size);
         self.events.push(event);
@@ -623,6 +605,42 @@ impl Direction {
             self.stage = Stage::Over;
         }
     }
+}
+
+/// What an MP says, as fields.
+pub fn mp_fields(mp: &Mp) -> Vec<(String, String)> {
+    let bps = |n: u8| u32::from(n) * 2400;
+    let rates: Vec<String> = (1..=14).filter(|r| mp.rates >> (r - 1) & 1 == 1).map(|r| (r * 2400).to_string()).collect();
+    let precoding = mp.precoding.map_or_else(
+        || "none sent".to_owned(),
+        |h| {
+            h.iter()
+                .map(|(re, im)| format!("{:+.3}{:+.3}j", f64::from(*re) / 16384.0, f64::from(*im) / 16384.0))
+                .collect::<Vec<_>>()
+                .join("  ")
+        },
+    );
+    let flag = |on: bool, yes: &str, no: &str| if on { yes } else { no }.to_owned();
+    vec![
+        ("most from the caller".to_owned(), format!("{} bit/s", bps(mp.call_to_answer))),
+        ("most from the answerer".to_owned(), format!("{} bit/s", bps(mp.answer_to_call))),
+        ("acknowledges the other's MP".to_owned(), flag(mp.acknowledge, "yes", "no")),
+        (
+            "trellis it wants to receive".to_owned(),
+            match mp.trellis {
+                Trellis::States16 => "16 states",
+                Trellis::States32 => "32 states",
+                Trellis::States64 => "64 states",
+            }
+            .to_owned(),
+        ),
+        ("non-linear encoding".to_owned(), flag(mp.non_linear, "yes", "no")),
+        ("shaping".to_owned(), flag(mp.expanded_shaping, "expanded", "minimum")),
+        ("precoding h(1) h(2) h(3)".to_owned(), precoding),
+        ("rates enabled".to_owned(), rates.join(", ")),
+        ("different rates each way".to_owned(), flag(mp.asymmetric, "allowed", "not allowed")),
+        ("auxiliary channel".to_owned(), flag(mp.auxiliary, "yes", "no")),
+    ]
 }
 
 /// What following a call came to.
