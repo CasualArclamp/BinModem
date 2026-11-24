@@ -23,7 +23,7 @@ carried inside the program:
 .\binmodem.exe --capture
 ```
 
-Click the terminal at the bottom, type `ATD` and press Enter. The recording
+Open the **terminal** tab, click in it, type `ATD` and press Enter. The recording
 plays through the modem: the lamps, the waterfall and the scopes follow it, and
 the session it carried comes out as text.
 
@@ -54,7 +54,7 @@ The window that will call:
 `PCMU` carries the call in G.711 mu-law, as a telephone network does, which is
 what the ordinary modes are for.
 
-![The faceplate: lamps, the keys that dial and answer, the mode box, and Setup at the top right](images/releases/v5.0.0/easysip.png)
+![The calling window at the end of these steps: ATD1 typed at the terminal, CONNECT 33600 on V.34](images/quickstart-v34.png)
 
 Then:
 
@@ -63,8 +63,8 @@ Then:
 2. In the calling window, type `ATD1` and press Enter. Any number will do; it
    rings the other window.
 3. The answering window rings and asks what to do: press **Answer as modem**.
-4. Listen to the handshake if you like (**Listen**), and watch the **Scopes**
-   tab. `CONNECT 33600` or thereabouts appears in both terminals.
+4. Listen to the handshake if you like (**Listen**), and watch the **scopes**
+   tab. About fifteen seconds later `CONNECT 33600` appears in both terminals.
 5. Type in one terminal and it appears in the other.
 6. **Escape** (`+++`) and then **Hang up** (`ATH`) end the call.
 
