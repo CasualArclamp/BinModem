@@ -2470,6 +2470,9 @@ impl Modem {
     }
 
     fn heard_frame(&mut self, j: J) {
+        if std::env::var_os("V92_J_TRACE").is_some() {
+            eprintln!("V92JTRACE: {:?} at {} in {:?}", j, self.now, self.stage);
+        }
         match (self.stage, j) {
             (Stage::Jd, J::Jd(jd)) if self.far_jd.is_none() => {
                 self.far_jd = Some(jd);

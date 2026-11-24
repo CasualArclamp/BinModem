@@ -292,6 +292,9 @@ impl Jitter {
 
     /// A packet off the network. `payload` is the raw G.711 codewords.
     pub fn push(&mut self, sequence: u16, payload_type: u8, payload: Vec<u8>) {
+        if self.counters.received == 0 {
+            crate::media::rtp_trace("first packet in");
+        }
         self.counters.received += 1;
 
         match self.payload_type {
@@ -553,6 +556,7 @@ impl Jitter {
                         self.counters.lost += 1;
                     } else {
                         self.counters.starved += 1;
+                        crate::media::rtp_trace("starved: the far end's packet had not come");
                     }
                     let len = self.packet_len.max(frame).div_ceil(frame) * frame;
                     self.counters.concealed += len as u64;
