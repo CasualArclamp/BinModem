@@ -59,6 +59,29 @@ route that would carry less as PCM. Where the top of the band is cut, as a
 codec or a VoIP path cuts it, the analogue modem asks for spectral shaping the
 way a real one does, so the server sends next to nothing where the cut is.
 
+### U.S. Robotics x2
+
+x2 is the 56k scheme U.S. Robotics shipped in 1997, before V.90. A server
+here offers it as well when `ATS70=1` (or the window's **x2** tick) is set
+with `AT+MS=V90` or `V92`: a caller whose V.8 offers V.34 and no PCM, as a
+USR modem that never had its V.90 upgrade does, then gets x2 -- PCM down at
+32000 to 56000, V.34 up -- and anything else gets what it got before. Nothing
+of x2 is standardised; the facts come from libv90modem's notes (gathered from
+D-Modem and courier-emu, and its own reading of the server firmware), and the
+level banks for each rate are carried as data from D-Modem's published
+numbers. See [crates/datapump/src/x2](crates/datapump/src/x2).
+
+U.S. Robotics' own Courier firmware, running in courier-emu, connects to it:
+`CONNECT 49333/ARQ/x2/LAPM/V42BIS` on the Courier's terminal, numbered lines
+arriving intact, its rate change to 54666 followed and the data still
+arriving after it. Getting there found two things worth knowing: a Courier
+reads the server's V.8 JM for a carrier inversion between one JM and the
+next, on the bit boundary where the next begins and not one bit earlier;
+and V.42 here answered an XID with its own offer rather than the settled
+values, which a Courier takes for no answer at all (fixed for every call,
+not only x2). [tools/x2/courier-peer.md](tools/x2/courier-peer.md) says how
+to run the emulated Courier. It has not met a real x2 modem yet.
+
 Every constellation was read off the figures by position rather than out of
 extracted text, which loses the sign of each coordinate and shuffles the axis
 labels through the rows. [tools/read_constellation.py](tools/read_constellation.py)
@@ -69,11 +92,11 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), Bell 212A (1200, falling back to 103), Bell 202 (1200 half duplex), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
+| **Modulations** | Bell 103 (300), Bell 212A (1200, falling back to 103), Bell 202 (1200 half duplex), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone), U.S. Robotics x2 as a server (32000 to 56000 PCM down, V.34 up, the client's rate changes followed) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.44 (LZJH) and V.42bis (BTLZ), both offered in one XID and the far end picks; V.42bis also followed in band |
-| **Commands** | V.250 AT: `+MS`, `+ES`, `+DS`, `+DS44`, `+ER`, `+DR`, S-registers, `+++` |
+| **Commands** | V.250 AT: `+MS`, `+ES`, `+DS`, `+DS44`, `+ER`, `+DR`, S-registers (S70: x2 on offer, our own), `+++` |
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |

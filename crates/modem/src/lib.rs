@@ -57,6 +57,9 @@ use ec::{Params, Role as EcRole, Stack};
 /// clears bit 70, the caller sends V.90's Table 10 whatever the server said,
 /// and the call is V.90 in every particular. `BINMODEM_V92_PCM_UP=1` turns it
 /// on, at either end; both have to have it for PCM to go up.
+/// The S-parameter that offers U.S. Robotics x2 (`at::registers`).
+const X2_REGISTER: u8 = 70;
+
 fn v92_pcm_upstream_wanted() -> bool {
     match std::env::var("BINMODEM_V92_PCM_UP") {
         Ok(v) => matches!(v.trim(), "1" | "yes" | "on" | "true"),
@@ -597,6 +600,8 @@ impl Pump {
             Self::V90(m) if m.is_v92() => "V.92",
             Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
             Self::V90(_) => "V.34",
+            Self::V90Server(m) if m.modem().is_x2() => "x2",
+            Self::V90Server(m) if m.modem().offers_x2() => "V.34",
             Self::V90Server(m) if m.modem().is_v92() => "V.92",
             Self::V90Server(m) if m.modem().is_v90() || m.modem().v34().training().is_none() => "V.90",
             Self::V90Server(_) => "V.34",
@@ -1608,10 +1613,12 @@ impl Modem {
             // power reaches about one and a half: drawn at one, its outer
             // rings were all piled up along the edge of the box.
             Some(Pump::V34(m)) => m.constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // PCM's pairs are drawn to one already; V.34, when that is what
-            // the call became, is V.34's.
-            Some(Pump::V90(m)) if !m.is_v90() => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // The server plots what comes up, which is V.34's.
+            // PCM's pairs are drawn against their own held peak, whatever it
+            // is; V.34, when that is what the call became, is V.34's.
+            Some(Pump::V90(m)) if m.is_v90() => m.pair_peak() as f32,
+            Some(Pump::V90(m)) => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
+            Some(Pump::V90Server(m)) if m.modem().is_v92() => m.modem().constellation_peak().map_or(1.0, |peak| peak as f32),
+            // Otherwise the server plots what comes up, which is V.34's.
             Some(Pump::V90Server(m)) => m.modem().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
             _ => 1.0,
         }
@@ -2106,6 +2113,26 @@ impl Modem {
     /// of samples stepped; a sound card never calls it and loses nothing.
     /// What the digital modem says of itself in INFO0d, in the law the
     /// line is in.
+    /// Whether this end offers U.S. Robotics x2: S70 set, answering as a
+    /// V.90 or V.92 server, on a mu-law line (x2 has no A-law).
+    fn serves_x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+            && self.role == Role::Answering
+            && self.pcm_end == Role::Answering
+            && matches!(self.at.modulation.carrier.as_str(), "V90" | "V92")
+            && !self.network_a_law
+    }
+
+    /// Offer x2 from the next call on, or not: S70 (see [`Self::serves_x2`]).
+    pub fn set_x2(&mut self, on: bool) {
+        let _ = self.at.regs.set(X2_REGISTER, u32::from(on));
+    }
+
+    /// Whether S70 offers x2.
+    pub fn x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+    }
+
     fn server_info0d(&self) -> datapump::v34::info::Info0d {
         datapump::v34::info::Info0d { a_law: self.network_a_law, ..v90::server::ours() }
     }
@@ -3527,6 +3554,9 @@ impl Modem {
             if self.at.modulation.carrier == "V92" && self.pcm_end == Role::Answering {
                 negotiation = negotiation.handing_over_early();
             }
+            if self.serves_x2() {
+                negotiation = negotiation.offering_x2();
+            }
             if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
                 negotiation = match self.pcm_end {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),
@@ -3950,6 +3980,9 @@ impl Modem {
                     _ => "V90S".to_owned(),
                 }
             }
+            // A caller that offered V.34 and no PCM to a server offering x2:
+            // V.34's answer modem, which an x2 client's marker turns into x2.
+            Some(Modulation::V34Duplex) if self.serves_x2() => "X2S".to_owned(),
             Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
@@ -3977,6 +4010,7 @@ impl Modem {
                 Pump::V90(Box::new(analogue))
             }
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, self.server_info0d(), lead_in))),
+            "X2S" => Pump::V90Server(Box::new(v90::server::Line::x2(self.fs, lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
                 // The short phase 2 is asked for along with the short phase
