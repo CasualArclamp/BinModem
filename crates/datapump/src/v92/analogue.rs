@@ -1397,6 +1397,12 @@ impl Modem {
         self.scope.pair()
     }
 
+    /// The scale [`Self::pair`]'s points are drawn at.
+    #[must_use]
+    pub fn pair_peak(&self) -> f64 {
+        self.scope.peak()
+    }
+
     /// The downstream's levels and their power, once there is a constellation
     /// on the line: the CPt's through Phase 4, the CPu's in data mode.
     #[must_use]

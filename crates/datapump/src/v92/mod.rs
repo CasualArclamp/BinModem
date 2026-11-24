@@ -285,9 +285,14 @@ pub fn down_levels(law: crate::v90::ucode::Law, uinfo: u8, cp: &crate::v90::sequ
 /// against the next lays the levels out on a grid of its own (as
 /// `v90::analogue::Modem::pair` does for V.90's downstream).
 ///
-/// The scale is the loudest symbol of the last second or so, held and let
+/// The pairs come as the receiver read them; [`Self::peak`] is the scale to
+/// draw them at, the loudest symbol of the last second or so, held and let
 /// fall slowly, so that two points, four and a data constellation each fill
-/// the box without anyone having to say which is on the line.
+/// the box without anyone having to say which is on the line. The scale is
+/// for the whole picture at once: a scope that keeps sixteen thousand pairs
+/// and had each divided by the peak of its own moment drew every level of
+/// the training and the first second of data as a streak out from the
+/// centre, the same symbol at a scale that was still falling.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScopePair {
     last: [f64; 2],
@@ -306,12 +311,18 @@ impl ScopePair {
         self.any = true;
     }
 
-    /// The last symbol but one against the last, scaled so the loudest is
-    /// one. `None` before any symbol has been read.
+    /// The last symbol but one against the last, as the receiver read them.
+    /// `None` before any symbol has been read.
     #[must_use]
     pub fn pair(&self) -> Option<(f64, f64)> {
-        let scale = self.peak.max(1e-9);
-        self.any.then(|| (self.last[0] / scale, self.last[1] / scale))
+        self.any.then_some((self.last[0], self.last[1]))
+    }
+
+    /// What to draw the pairs against: the held peak, or one before any
+    /// symbol.
+    #[must_use]
+    pub fn peak(&self) -> f64 {
+        if self.any { self.peak.max(1e-9) } else { 1.0 }
     }
 }
 
