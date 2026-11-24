@@ -9,6 +9,40 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.5.0
+
+### U.S. Robotics x2, as a server
+
+A V.92 or V.90 server here also offers x2 when `ATS70=1` is set, or the new **x2** tick in the window is on. A caller offering V.34 and no PCM, as a USR modem without its V.90 upgrade does, then gets x2: 32000 to 56000 down and V.34 up, with the client's rate changes followed. Everyone else gets what they got before. It is off by default and mu-law only. USR's own Courier firmware, running in courier-emu, connects at `CONNECT 49333/ARQ/x2/LAPM/V42BIS`, moves to 54666 when it asks, and its data arrives intact. It has not met a real x2 modem yet. The level banks for the rates above 32000 are D-Modem's published numbers, carried as data.
+
+### A Review tab, and DialSnoop
+
+Open a WAV of someone else's call and read it: a waterfall with a box on each signal, and everything decoded from the one you click. That covers V.8 and V.8 bis, phase 2, V.34 and V.90 training both ways, data mode, V.42 frames, and PPP or text above them. It uses the modem's own receivers. `binmodem --review file.wav` opens on the tab.
+
+### HST
+
+USRobotics' HST, contributed by wanax2 ([#32](https://github.com/CasualArclamp/BinModem/pull/32)): the Courier HST's 14400 one way and 450 the other, and the original 1986 HST 9600. `AT+MS=HST` or `HST96`, or the mode box. Only another HST modem answers it.
+
+### Faster dial-up
+
+- **V.42 now uses the frame size and window it agrees.** It offers 256-octet frames and a window of 63, and uses what is settled. It always ran 128 and 15 before, which held a SIP call to about 2.4 kB/s. A loaded page took 1.9 s where it took 5 to 6.5 s, and a download went from 2.1 to 5.5 kB/s.
+- **PPP shares the line fairly between connections**, and is fed at most about a quarter of a second ahead of the modem, so one big transfer no longer holds everything else up.
+
+### Fixed
+
+- **V.42 answered an XID with its own offer, not the agreed values.** A far end that offered less, like a Courier with N7 32, took that as no answer and never sent SABME.
+- **V.42 lost a frame whose opening flag was cut short.** A frame that starts straight after seven or more ones is now taken.
+- **V.44 let its history run past N8** ([#64](https://github.com/CasualArclamp/BinModem/issues/64)). Netstalgia dropped the link after about 4 kB upstream.
+- **V.34 against a Courier.** A start-up that reaches phase 4 and retrains before data mode keeps off the symbol rate that failed for the rest of the call. A Courier that would not train at 3429 now connects at 31200 on 3200.
+- **A V.8 bis CL with no modulation in it is answered.** Netstalgia's server sends one, and the call used to sit in silence until it timed out.
+- **Modems with no V.8 are found, calling or answering.** An automode V.92 end now finds a V.22bis, V.21, Bell 212A or Bell 103 far end, which used to hang.
+- **The V.92 pairs scope** draws the whole picture to one scale, not each pair to its own.
+
+### Also
+
+- **A contacts list beside the dialler**, with how the last call to each went: modulation, rates and when. Kept in `%APPDATA%\BinModem\contacts.txt`.
+- **PipeWire on Linux**, contributed by SarahRoseLives ([#1](https://github.com/CasualArclamp/BinModem/pull/1)): cpal's native PipeWire host lists PipeWire's own nodes, virtual loopbacks among them. Building on Linux now needs `libpipewire-0.3-dev` and `libclang-dev`.
+
 ## What's new in 5.4.3
 
 Two faults in V.92 calls to a server that is not BinModem's own, reported with recordings by the people who run one ([#54](https://github.com/CasualArclamp/BinModem/issues/54)). Calls to such a server fell back to V.90.
