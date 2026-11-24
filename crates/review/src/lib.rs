@@ -24,7 +24,7 @@ pub mod setup;
 
 use line::wav::Wav;
 
-pub use model::{Channel, End, Event, Layer, Report, Tap, Track, Waterfall};
+pub use model::{Channel, End, Event, Layer, Plot, Report, Tap, Track, Waterfall};
 
 /// Read a recording.
 pub fn analyse(wav: &Wav, name: &str) -> Report {
@@ -107,6 +107,7 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
             },
             waterfall: picture::waterfall(samples, fs, 4000.0),
             level: picture::level(samples, fs),
+            samples: samples.clone(),
         })
         .collect();
 
@@ -197,6 +198,22 @@ fn second_phase(streams: &[Vec<f32>], fs: f64, tap: Tap, events: &mut Vec<Event>
             found = again;
             settled = s;
         }
+    }
+    // On one channel both listeners hear the same probing. The modem on
+    // the answering modem's carrier probes first, and the other after it.
+    if tap == Tap::Summed {
+        let mut starts: Vec<f64> = found.iter().filter(|e| e.tag == "L1").map(|e| e.start).collect();
+        starts.sort_by(f64::total_cmp);
+        starts.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+        let first_prober = if caller_side == Side::Answer { End::Caller } else { End::Answerer };
+        found.retain(|e| {
+            if !matches!(e.tag.as_str(), "L1" | "L2") {
+                return true;
+            }
+            let turn = starts.iter().position(|s| e.start >= *s - 0.05 && e.start < *s + 0.25).unwrap_or(0);
+            let whose = if turn % 2 == 0 { first_prober } else { first_prober.other() };
+            e.from == whose
+        });
     }
     // The probing fills the band, so each end's is on the other's channel
     // as echo and reads as probing there too. The fainter of two at once is

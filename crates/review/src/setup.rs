@@ -76,11 +76,27 @@ struct Plain {
     least: f64,
     detector: ToneDetector,
     span: Span,
+    /// Where the tone's phasor has stood, every few milliseconds.
+    phasors: Vec<(f32, f32)>,
+}
+
+/// Samples between two readings of a phasor: 2.5 ms.
+fn phasor_step(fs: f64) -> usize {
+    ((fs / 400.0) as usize).max(1)
 }
 
 impl Plain {
     fn new(hz: f64, tag: &'static str, what: &'static str, from: End, least: f64, fs: f64) -> Self {
-        Self { hz, tag, what, from, least, detector: ToneDetector::new(hz, 40.0, fs), span: Span::new(0.03, fs) }
+        Self {
+            hz,
+            tag,
+            what,
+            from,
+            least,
+            detector: ToneDetector::new(hz, 40.0, fs),
+            span: Span::new(0.03, fs),
+            phasors: Vec::new(),
+        }
     }
 
     fn feed(&mut self, n: usize, x: f64, rms: f64, fs: f64, out: &mut Vec<Found>) {
@@ -88,6 +104,13 @@ impl Plain {
         let amplitude = self.detector.amplitude();
         // A sine alone reads 1.41 of the line's root mean square.
         let on = rms > 1e-3 && amplitude > 1.2 * rms;
+        if on && self.span.start.is_none() {
+            self.phasors.clear();
+        }
+        if on && n.is_multiple_of(phasor_step(fs)) {
+            let (re, im) = self.detector.phasor();
+            self.phasors.push((re as f32, im as f32));
+        }
         if let Some(span) = self.span.feed(n, on, amplitude) {
             self.emit(span, fs, out);
         }
@@ -108,6 +131,7 @@ impl Plain {
             .summary(format!("{}, {:.0} Hz for {:.2} s", self.what, self.hz, end - start))
             .field("frequency", format!("{:.0} Hz", self.hz))
             .field("level", db(peak))
+            .phasor(&self.phasors)
             .band(self.hz - 60.0, self.hz + 60.0);
         out.push(Found { event, level: peak });
     }
@@ -126,6 +150,8 @@ struct Answer {
     kind: Option<AnswerSignal>,
     turned: Vec<usize>,
     deepest: f64,
+    probe: ToneDetector,
+    phasors: Vec<(f32, f32)>,
 }
 
 impl Answer {
@@ -137,14 +163,24 @@ impl Answer {
             kind: None,
             turned: Vec::new(),
             deepest: 0.0,
+            probe: ToneDetector::new(2100.0, 80.0, fs),
+            phasors: Vec::new(),
         }
     }
 
     fn feed(&mut self, n: usize, x: f64, fs: f64, out: &mut Vec<Found>) {
         self.watch.feed(x);
+        self.probe.feed(x);
         let turned = self.reversals.feed(x);
         let tone = self.watch.tone();
         let on = tone.present();
+        if on && self.span.start.is_none() {
+            self.phasors.clear();
+        }
+        if on && n.is_multiple_of(phasor_step(fs)) {
+            let (re, im) = self.probe.phasor();
+            self.phasors.push((re as f32, im as f32));
+        }
         if on {
             if let Some(kind) = self.watch.signal() {
                 self.kind = Some(kind);
@@ -194,6 +230,7 @@ impl Answer {
             .field("level", db(peak))
             .field("15 Hz modulation", format!("{:.0} % deep", 100.0 * deepest))
             .field("phase reversals", turned.len().to_string())
+            .phasor(&self.phasors)
             .band(2040.0, 2160.0);
         if let Some(every) = every {
             event = event.field("reversal interval", format!("{:.0} ms", 1000.0 * every));
@@ -281,6 +318,23 @@ struct V8Ear {
     rx: Bell103Rx,
     decoder: V8Decoder,
     run: Option<Run>,
+    /// The discriminator at the middle of each bit, and when.
+    margins: Vec<(f64, f32)>,
+}
+
+/// Keep the last few thousand bits of an FSK channel.
+fn keep(margins: &mut Vec<(f64, f32)>, now: f64, reading: Option<f64>) {
+    if let Some(m) = reading {
+        margins.push((now, m as f32));
+        if margins.len() > 8000 {
+            margins.drain(..4000);
+        }
+    }
+}
+
+/// The readings between two times.
+fn between(margins: &[(f64, f32)], start: f64, end: f64) -> Vec<f32> {
+    margins.iter().filter(|(t, _)| *t >= start && *t <= end).map(|m| m.1).collect()
 }
 
 struct Run {
@@ -295,12 +349,21 @@ struct Run {
 impl V8Ear {
     fn new(answerer: bool, fs: f64) -> Self {
         let (space, mark) = if answerer { HIGH } else { LOW };
-        Self { answerer, rx: Bell103Rx::with_tones(space, mark, fs), decoder: V8Decoder::new(), run: None }
+        Self {
+            answerer,
+            rx: Bell103Rx::with_tones(space, mark, fs),
+            decoder: V8Decoder::new(),
+            run: None,
+            margins: Vec::new(),
+        }
     }
 
     fn feed(&mut self, n: usize, x: f64, fs: f64, out: &mut Vec<Found>) {
         let now = n as f64 / fs;
-        if let Some(octet) = self.rx.feed(x)
+        let octet = self.rx.feed(x);
+        let reading = self.rx.take_symbol();
+        keep(&mut self.margins, now, reading);
+        if let Some(octet) = octet
             && let Some(heard) = self.decoder.feed(octet)
         {
             let heard = if self.answerer { V8Decoder::heard_as_jm(heard) } else { heard };
@@ -363,6 +426,7 @@ impl V8Ear {
             .field("octets", hex(&run.octets))
             .field("channel", format!("V.21 {low:.0}/{high:.0} Hz, 300 bit/s"))
             .octets(&run.octets)
+            .fsk(&between(&self.margins, run.first - 0.02, run.last + 0.01))
             .band(low - 60.0, high + 60.0);
         if matches!(run.heard, Heard::Cj) {
             event.fields.retain(|(name, _)| name != "sent");
@@ -377,21 +441,25 @@ struct QcEar {
     rx: v21::Receiver,
     watcher: BitWatcher,
     last: Option<(Qc, f64)>,
+    margins: Vec<(f64, f32)>,
 }
 
 impl QcEar {
     fn new(channel: QcChannel, fs: f64) -> Self {
         let tones = if channel == QcChannel::High { HIGH } else { LOW };
-        Self { channel, rx: v21::Receiver::on(tones, fs), watcher: BitWatcher::new(), last: None }
+        Self { channel, rx: v21::Receiver::on(tones, fs), watcher: BitWatcher::new(), last: None, margins: Vec::new() }
     }
 
     fn feed(&mut self, n: usize, x: f64, fs: f64, out: &mut Vec<Found>) {
-        let Some(bit) = self.rx.feed(x) else { return };
+        let now = n as f64 / fs;
+        let bit = self.rx.feed(x);
+        let reading = self.rx.take_symbol();
+        keep(&mut self.margins, now, reading);
+        let Some(bit) = bit else { return };
         let Some(qc) = self.watcher.feed(bit) else { return };
         if qc.kind.channel() != self.channel || !qc.consistent() {
             return;
         }
-        let now = n as f64 / fs;
         // The repeat of one already reported.
         if self.last.is_some_and(|(was, at)| was == qc && now - at < 1.0) {
             return;
@@ -413,6 +481,7 @@ impl QcEar {
             .field(field.0, field.1)
             .field("octet", format!("{:02X}", qc.octet()))
             .octets(&[qc.octet()])
+            .fsk(&between(&self.margins, now - bits / 300.0 - 0.01, now))
             .band(low - 60.0, high + 60.0);
         out.push(Found { event, level: self.rx.band_level() });
     }
@@ -429,6 +498,7 @@ struct BisEar {
     quiet: usize,
     hold: usize,
     peak: f64,
+    margins: Vec<(f64, f32)>,
 }
 
 impl BisEar {
@@ -444,11 +514,14 @@ impl BisEar {
             quiet: 0,
             hold: (0.012 * fs) as usize,
             peak: 0.0,
+            margins: Vec::new(),
         }
     }
 
     fn feed(&mut self, n: usize, x: f64, fs: f64, out: &mut Vec<Found>) {
         let bit = self.rx.feed(x);
+        let reading = self.rx.take_symbol();
+        keep(&mut self.margins, n as f64 / fs, reading);
         self.power += self.alpha * (x * x - self.power);
         // The same test of a carrier the modem's own V.8 bis makes.
         let band = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
@@ -471,6 +544,7 @@ impl BisEar {
         let Some(frame) = self.hdlc.feed(bit) else { return };
         let Some(octets) = v8bis::information(frame, &self.hdlc) else { return };
         let (start, end) = (since as f64 / fs, n as f64 / fs);
+        let fsk = between(&self.margins, start, end);
         // The next message on this carrier starts here.
         self.carrier = Some(n);
         let (low, high) = if self.side == Side::Initiating { (980.0, 1180.0) } else { (1650.0, 1850.0) };
@@ -487,6 +561,7 @@ impl BisEar {
                 .field("octets", hex(&octets))
                 .field("channel", channel)
                 .octets(&octets)
+                .fsk(&fsk)
                 .band(low - 60.0, high + 60.0);
             out.push(Found { event, level: self.peak });
             return;
@@ -512,6 +587,7 @@ impl BisEar {
             .field("octets", hex(&octets))
             .field("channel", channel)
             .octets(&octets)
+            .fsk(&fsk)
             .band(low - 60.0, high + 60.0);
         out.push(Found { event, level: self.peak });
     }

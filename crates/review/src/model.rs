@@ -79,6 +79,30 @@ impl Layer {
     }
 }
 
+/// What the symbols of an event are, for whoever draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Plot {
+    /// No symbols were kept.
+    #[default]
+    None,
+    /// Points of a constellation, in phase and quadrature, of this many
+    /// points; the constellation in use has unit mean power.
+    Qam(usize),
+    /// PCM: levels and no plane. Each symbol is paired with the one before
+    /// it, as (before, level), on the scale where full scale is one.
+    Pcm,
+    /// Frequency shift keying: one reading a bit, as (0, margin), where one
+    /// and minus one are the two tones and zero is the threshold.
+    Fsk,
+    /// A tone, as where its phasor stood every few milliseconds, the
+    /// loudest at a radius of one: a steady tone is a dot or a ring, a
+    /// phase reversal is a jump across the middle.
+    Phasor,
+}
+
+/// The most symbols an event keeps for drawing.
+pub const SYMBOLS_KEPT: usize = 20_000;
+
 /// One thing that was on the line.
 #[derive(Debug, Clone)]
 pub struct Event {
@@ -101,6 +125,10 @@ pub struct Event {
     /// How loud it was, as an amplitude on the scale of the samples; zero
     /// where nobody measured.
     pub level: f64,
+    /// The symbols a receiver made of it, where one followed it: at most
+    /// [`SYMBOLS_KEPT`], evenly taken from however many there were.
+    pub symbols: Vec<(f32, f32)>,
+    pub plot: Plot,
 }
 
 impl Event {
@@ -116,6 +144,8 @@ impl Event {
             octets: Vec::new(),
             band: None,
             level: 0.0,
+            symbols: Vec::new(),
+            plot: Plot::None,
         }
     }
 
@@ -144,6 +174,40 @@ impl Event {
         self
     }
 
+    /// Constellation points, of a constellation of `points` points.
+    pub fn qam(mut self, symbols: &[(f32, f32)], points: usize) -> Self {
+        self.symbols = thinned(symbols);
+        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Qam(points) };
+        self
+    }
+
+    /// PCM levels, in the order they came.
+    pub fn pcm(mut self, levels: &[f32]) -> Self {
+        let pairs: Vec<(f32, f32)> = levels.windows(2).map(|w| (w[0], w[1])).collect();
+        self.symbols = thinned(&pairs);
+        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Pcm };
+        self
+    }
+
+    /// The discriminator's reading at the middle of each bit.
+    pub fn fsk(mut self, margins: &[f32]) -> Self {
+        let pairs: Vec<(f32, f32)> = margins.iter().map(|m| (0.0, *m)).collect();
+        self.symbols = thinned(&pairs);
+        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Fsk };
+        self
+    }
+
+    /// A tone's phasor, sampled; scaled here so the loudest is at one.
+    pub fn phasor(mut self, points: &[(f32, f32)]) -> Self {
+        let peak = points.iter().map(|(re, im)| re.hypot(*im)).fold(0.0f32, f32::max);
+        if peak > 0.0 {
+            let scaled: Vec<(f32, f32)> = points.iter().map(|(re, im)| (re / peak, im / peak)).collect();
+            self.symbols = thinned(&scaled);
+            self.plot = Plot::Phasor;
+        }
+        self
+    }
+
     pub fn level(mut self, amplitude: f64) -> Self {
         self.level = amplitude;
         self
@@ -152,6 +216,14 @@ impl Event {
     pub fn duration(&self) -> f64 {
         self.end - self.start
     }
+}
+
+/// At most [`SYMBOLS_KEPT`] of them, taken evenly.
+fn thinned(symbols: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    if symbols.len() <= SYMBOLS_KEPT {
+        return symbols.to_vec();
+    }
+    (0..SYMBOLS_KEPT).map(|i| symbols[i * symbols.len() / SYMBOLS_KEPT]).collect()
 }
 
 /// How a recording's channels relate to the call.
@@ -206,6 +278,8 @@ pub struct Channel {
     pub from: End,
     pub waterfall: Waterfall,
     pub level: Track,
+    /// The channel itself, for playing.
+    pub samples: Vec<f32>,
 }
 
 /// Everything found in one recording.

@@ -19,7 +19,7 @@ use datapump::v34::qam::Band;
 use datapump::v34::receiver::{Heard as UpHeard, Receiver as V34Rx, Reference};
 use datapump::v34::signals::{self, Reader, Size};
 use datapump::v90::dil::Analysis;
-use datapump::v90::pcm::{Heard as DownHeard, Receiver as PcmRx};
+use datapump::v90::pcm::{Heard as DownHeard, Receiver as PcmRx, Slicer};
 use datapump::v90::sequences::{self, Cp, CpFinder, Descriptor, DescriptorFinder, JD_BITS, JD_PRIME_BITS, Jd};
 use datapump::v90::ucode::{self, Law};
 use dsp::Resampler;
@@ -40,6 +40,11 @@ struct Shared {
     /// When the digital modem's S-bar-d went by: the analogue modem stops
     /// sending Ja on hearing it.
     s_bar_d: Option<f64>,
+    /// When the analogue modem's E went by: both directions are in data
+    /// mode within a few frames of it.
+    e: Option<f64>,
+    /// The downstream rate CP asked for.
+    downstream_bps: Option<u32>,
 }
 
 /// What was learned, for the verdict.
@@ -94,9 +99,14 @@ struct Upstream {
     /// The CP now being repeated: its event's place in the list.
     cp_run: Option<(Cp, usize)>,
     last_cp: Option<Cp>,
+    /// The points of whatever is being received now, for its event.
+    seen: Vec<(f32, f32)>,
     events: Vec<Event>,
     outcome: Outcome,
 }
+
+/// Symbols held for one event before the older ones are let go.
+const HELD: usize = 200_000;
 
 impl Upstream {
     fn new(band: Band, who: End, fs: f64) -> Self {
@@ -128,6 +138,7 @@ impl Upstream {
             size: Size::Four,
             cp_run: None,
             last_cp: None,
+            seen: Vec::new(),
             events: Vec::new(),
             outcome: Outcome::default(),
         }
@@ -181,7 +192,12 @@ impl Upstream {
                         self.rx.hunt();
                     }
                 }
-                UpHeard::Symbol(symbol) => self.symbol(now, symbol.decided, shared),
+                UpHeard::Symbol(symbol) => {
+                    if self.seen.len() < HELD {
+                        self.seen.push((symbol.point.re as f32, symbol.point.im as f32));
+                    }
+                    self.symbol(now, symbol.decided, shared);
+                }
             }
         }
         // Ja goes on until the analogue modem hears S-bar-d and stops.
@@ -219,6 +235,7 @@ impl Upstream {
             return;
         }
         let layer = if matches!(self.stage, UpStage::AfterJa(1)) { Layer::Phase4 } else { Layer::Phase3 };
+        self.seen.clear();
         self.events.push(self.event(from, when, layer, "S").summary(format!("S for {:.0} ms", 1000.0 * (when - from))));
         self.events.push(self.event(when, when + bar, layer, "S-bar").summary("S-bar: S turned over, 16 symbols".to_owned()));
         match self.stage {
@@ -263,8 +280,10 @@ impl Upstream {
                     self.in_trn = false;
                     self.ja_from = now;
                     let from = self.trn_from;
+                    let points = std::mem::take(&mut self.seen);
                     self.events.push(
                         self.event(from, now, Layer::Phase3, "TRN")
+                            .qam(&points, 4)
                             .summary(format!(
                                 "TRN, 4-point, {:.0} ms: trained a receiver to {:.0} dB",
                                 1000.0 * (now - from),
@@ -296,6 +315,9 @@ impl Upstream {
                         self.cp_run = None;
                         self.stage = UpStage::Data;
                         self.outcome.reached_data = true;
+                        self.seen.clear();
+                        shared.e = Some(now);
+                        shared.downstream_bps = self.outcome.downstream_bps;
                         self.events.push(
                             self.event(now, now, Layer::Data, "data")
                                 .summary("data mode, V.34 modulation from the analogue modem".to_owned()),
@@ -318,7 +340,8 @@ impl Upstream {
     }
 
     fn end_ja(&mut self, now: f64, shared: &mut Shared) {
-        let mut event = self.event(self.ja_from, now, Layer::Phase3, "Ja");
+        let points = std::mem::take(&mut self.seen);
+        let mut event = self.event(self.ja_from, now, Layer::Phase3, "Ja").qam(&points, 4);
         event = match &shared.descriptor {
             Some(d) => event
                 .summary(format!(
@@ -344,6 +367,10 @@ impl Upstream {
         {
             let event = &mut self.events[*index];
             event.end = now;
+            let more = std::mem::take(&mut self.seen);
+            if event.symbols.len() + more.len() <= crate::model::SYMBOLS_KEPT {
+                event.symbols.extend(more);
+            }
             let times = event.fields.iter_mut().find(|(name, _)| name == "sent");
             if let Some((_, value)) = times {
                 let n: usize = value.split(' ').next().and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -372,7 +399,14 @@ impl Upstream {
             (false, Some(rate)) => format!("{tag}: training constellations, {rate} bit/s in phase 4"),
             _ => format!("{tag}: rate number {}", cp.drn),
         };
-        let event = self.event(now - bits, now, Layer::Phase4, tag).summary(summary).fields(cp_fields(&cp)).field("sent", "1 times");
+        let points = std::mem::take(&mut self.seen);
+        let size = if self.size == Size::Sixteen { 16 } else { 4 };
+        let event = self
+            .event(now - bits, now, Layer::Phase4, tag)
+            .summary(summary)
+            .fields(cp_fields(&cp))
+            .field("sent", "1 times")
+            .qam(&points, size);
         self.events.push(event);
         self.cp_run = Some((cp, self.events.len() - 1));
     }
@@ -466,7 +500,12 @@ struct Downstream {
     dil: Option<Dil>,
     analysis: Analysis,
     dil_read: usize,
-    done: bool,
+    /// When the DIL ended, once it has; and whether phase 4 has been cut
+    /// from data mode since.
+    after_dil: Option<f64>,
+    in_data: Option<f64>,
+    /// The levels of whatever is being received now, for its event.
+    seen: Vec<f32>,
     events: Vec<Event>,
 }
 
@@ -496,7 +535,9 @@ impl Downstream {
             dil: None,
             analysis: Analysis::new(),
             dil_read: 0,
-            done: false,
+            after_dil: None,
+            in_data: None,
+            seen: Vec::new(),
             events: Vec::new(),
         }
     }
@@ -506,8 +547,16 @@ impl Downstream {
     }
 
     fn feed(&mut self, now: f64, x: f64, shared: &mut Shared) {
-        if self.done {
-            return;
+        // Phase 4 gives way to data mode when the analogue modem's E has
+        // gone by: Ed and B1d are within a few frames of it.
+        if let (Some(from), Some(e), None) = (self.after_dil, shared.e, self.in_data) {
+            let levels = std::mem::take(&mut self.seen);
+            self.events.push(
+                Event::new(from, e, self.who, Layer::Phase4, "phase 4")
+                    .summary("Ri, TRN2d, MP and Ed from the digital modem: symbols only, not read".to_owned())
+                    .pcm(&levels),
+            );
+            self.in_data = Some(e);
         }
         self.power += self.alpha * (x * x - self.power);
         if self.power.sqrt() > 0.004 {
@@ -555,6 +604,12 @@ impl Downstream {
             }
             DownHeard::Trained { snr_db, inverted } => self.trained = Some((snr_db, inverted)),
             DownHeard::Symbol(s) => {
+                if self.seen.len() < HELD {
+                    self.seen.push(s.value as f32);
+                }
+                if self.after_dil.is_some() {
+                    return;
+                }
                 if let Some((first, _, levels)) = &self.dil {
                     // What was sent at this place in the DIL, which goes
                     // round again if the analogue modem lets it run on.
@@ -589,8 +644,12 @@ impl Downstream {
                         // bit early in it looked like.
                         let from = self.reversal.map_or(first, |r| r + 0.001);
                         let (snr, inverted) = self.trained.unwrap_or((0.0, false));
+                        // All but the Jd that has just been read.
+                        let keep = self.seen.len().saturating_sub(JD_BITS);
+                        let levels: Vec<f32> = self.seen.drain(..keep).collect();
                         self.events.push(
                             self.event(from, first, "TRN1d")
+                                .pcm(&levels)
                                 .summary(format!("TRN1d, {:.2} s: trained a receiver to {snr:.0} dB", first - from))
                                 .field("signal to noise after training", format!("{snr:.1} dB"))
                                 .field("signal turned over on the way", if inverted { "yes" } else { "no" })
@@ -607,8 +666,10 @@ impl Downstream {
                     && self.bits[self.bits.len() - JD_PRIME_BITS..].iter().all(|b| !*b)
                 {
                     let first = self.jd_first.unwrap_or(at);
+                    let levels = std::mem::take(&mut self.seen);
                     self.events.push(
                         self.event(first, at, "Jd")
+                            .pcm(&levels)
                             .summary(format!(
                                 "Jd: {} of 22 rates enabled, {}-point training",
                                 (1..=22u8).filter(|&drn| jd.enables(drn)).count(),
@@ -632,14 +693,41 @@ impl Downstream {
         }
     }
 
+    /// What is left when the recording ends.
+    fn finish(&mut self, now: f64, shared: &Shared) {
+        let levels = std::mem::take(&mut self.seen);
+        match (self.in_data, self.after_dil) {
+            (Some(from), _) => {
+                let rate = shared.downstream_bps.map_or_else(String::new, |r| format!(" at {r} bit/s"));
+                self.events.push(
+                    Event::new(from, now, self.who, Layer::Data, "data")
+                        .summary(format!("data mode, PCM{rate}: symbols only, not read"))
+                        .pcm(&levels),
+                );
+            }
+            (None, Some(from)) => self.events.push(
+                Event::new(from, now, self.who, Layer::Phase4, "phase 4")
+                    .summary("Ri, TRN2d, MP and Ed from the digital modem: symbols only, not read".to_owned())
+                    .pcm(&levels),
+            ),
+            _ => {}
+        }
+    }
+
     fn end_dil(&mut self, from: f64, now: f64) {
-        self.done = true;
+        self.after_dil = Some(now);
+        self.dil = None;
+        // Nothing is known of what comes next, so nothing is decided: the
+        // equaliser is left as the DIL had it.
+        self.rx.set_slicer(Slicer::Free);
         let route = self.analysis.route();
         let noise = route.noise();
         // The reference level is what the DIL's loudest codewords come to,
         // which is near enough the power data mode is sent at.
+        let levels = std::mem::take(&mut self.seen);
         let mut event = self
             .event(from, now, "DIL")
+            .pcm(&levels)
             .summary(format!("DIL for {:.2} s: {} symbols read", now - from, self.dil_read))
             .field("symbols read", self.dil_read.to_string());
         if self.dil_read > 0 && noise > 0.0 {
@@ -714,6 +802,12 @@ pub fn follow(
         down.feed(n as f64 / fs, digital.0[n] as f64, &mut shared);
     }
     let _ = Side::Call;
+    let end = last as f64 / fs;
+    down.finish(end, &shared);
+    if let Some(data) = up.events.iter_mut().rev().find(|e| e.tag == "data") {
+        let seen = std::mem::take(&mut up.seen);
+        *data = data.clone().qam(&seen, 1024);
+    }
     let mut events = up.events;
     events.extend(down.events);
     Some((events, up.outcome))

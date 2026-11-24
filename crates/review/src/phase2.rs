@@ -317,6 +317,15 @@ pub fn listen(
     let mut combs: Vec<(usize, usize, f64)> = Vec::new();
     let mut comb: Option<(usize, usize, f64)> = None;
     let mut last_info: Option<(String, f64)> = None;
+    // The carrier as the INFO receiver has it, a point a symbol; and as a
+    // phasor, every few milliseconds, for the tones.
+    let mut dpsk: Vec<(usize, (f32, f32))> = Vec::new();
+    let mut last_point = None;
+    let mut phasors: Vec<(usize, (f32, f32))> = Vec::new();
+    let every = ((fs / 400.0) as usize).max(1);
+    let points_between = |list: &[(usize, (f32, f32))], a: usize, b: usize| -> Vec<(f32, f32)> {
+        list.iter().filter(|(n, _)| *n >= a && *n <= b).map(|(_, p)| *p).collect()
+    };
 
     for (n, &sample) in samples.iter().enumerate().skip(first) {
         let x = sample as f64;
@@ -325,6 +334,13 @@ pub fn listen(
         let rms = power.sqrt();
 
         let mut heard = plain.feed(x);
+        let point = plain.scope_point();
+        if point != last_point {
+            last_point = point;
+            if let Some((re, im)) = point {
+                dpsk.push((n, (re as f32, im as f32)));
+            }
+        }
         if let Some(short) = &mut short {
             let other = short.feed(x);
             // The plain reading comes first; the short one only where the
@@ -335,6 +351,10 @@ pub fn listen(
         }
         if let Some(info) = heard {
             let event = info_event(&info, side, who, now, pcm_call, &mut settled);
+            let points = points_between(&dpsk, (event.start * fs) as usize, n);
+            let peak = points.iter().map(|(re, im)| re.hypot(*im)).fold(1e-9f32, f32::max);
+            let scaled: Vec<(f32, f32)> = points.iter().map(|(re, im)| (re / peak, im / peak)).collect();
+            let event = event.qam(&scaled, 2);
             // Each is sent until it is acknowledged: the repeats are one.
             match &last_info {
                 Some((tag, at)) if *tag == event.tag && now - at < 1.0 => {
@@ -348,6 +368,10 @@ pub fn listen(
         }
 
         tone.feed(x);
+        if n.is_multiple_of(every) {
+            let (re, im) = tone.phasor();
+            phasors.push((n, (re as f32, im as f32)));
+        }
         probing.feed(x);
         let teeth = probing.standing(rms);
         if teeth {
@@ -447,6 +471,7 @@ pub fn listen(
             ))
             .field("level", db(peak))
             .level(peak)
+            .phasor(&points_between(&phasors, a, b))
             .band(carrier - 60.0, carrier + 60.0);
         for at in &mine {
             event = event.field("phase reversal at", format!("{:.3} s", *at as f64 / fs));
@@ -457,6 +482,7 @@ pub fn listen(
             events.push(
                 Event::new(t, t + 0.01, who, Layer::Phase2, format!("{tone_tag} rev"))
                     .summary(format!("{tone_name} reverses phase: a mark for the round-trip delay"))
+                    .phasor(&points_between(&phasors, at.saturating_sub(near), at + near))
                     .level(peak)
                     .band(carrier - 200.0, carrier + 200.0),
             );
