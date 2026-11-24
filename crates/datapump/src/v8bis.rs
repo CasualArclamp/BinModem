@@ -101,7 +101,7 @@ impl Probe {
 
 /// Hears signals: a pair of tones, and then the single tone that names it.
 #[derive(Debug, Clone)]
-struct Ear {
+pub struct Ear {
     fs: f64,
     /// The four first-segment tones: the initiating pair, then the
     /// responding one.
@@ -120,7 +120,7 @@ struct Ear {
 }
 
 impl Ear {
-    fn new(fs: f64) -> Self {
+    pub fn new(fs: f64) -> Self {
         let (i1, i2) = Side::Initiating.pair();
         let (r1, r2) = Side::Responding.pair();
         Self {
@@ -137,11 +137,13 @@ impl Ear {
 
     /// Whose first segment is on the line now, once it has stood long enough
     /// to be one.
-    fn pair_standing(&self) -> Option<Side> {
+    pub fn pair_standing(&self) -> Option<Side> {
         self.pair.filter(|(_, n)| *n as f64 >= PAIR_HELD * self.fs).map(|(side, _)| side)
     }
 
-    fn feed(&mut self, x: f64) -> Option<(Signal, Side)> {
+    /// A signal, on the sample its second segment has stood long enough to
+    /// be one, and which station sent it.
+    pub fn feed(&mut self, x: f64) -> Option<(Signal, Side)> {
         for probe in self.pairs.iter_mut().chain(self.tones.iter_mut()) {
             probe.feed(x);
         }
@@ -852,7 +854,7 @@ impl Station {
 /// between the flags" is what makes a frame invalid -- and ACK and NAK are
 /// exactly that, one octet and its check. So a frame the decoder calls too
 /// short is looked at again here.
-fn information(frame: Result<Vec<u8>, FrameError>, decoder: &Decoder) -> Option<Vec<u8>> {
+pub fn information(frame: Result<Vec<u8>, FrameError>, decoder: &Decoder) -> Option<Vec<u8>> {
     match frame {
         Ok(octets) => Some(octets),
         Err(FrameError::TooShort) => {

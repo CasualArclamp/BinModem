@@ -1,0 +1,20 @@
+[package]
+name    = "review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "modem-review"
+path = "src/bin/modem-review.rs"
+
+[dependencies]
+dsp      = { path = "../dsp" }
+datapump = { path = "../datapump" }
+ec       = { path = "../ec" }
+line     = { path = "../line" }
+ppp      = { path = "../ppp" }
+v8       = { path = "../v8" }
+
+[lints]
+workspace = true
