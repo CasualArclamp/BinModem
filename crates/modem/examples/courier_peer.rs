@@ -68,7 +68,7 @@ fn main() {
     let mut down = Resampler::new(FS, 8000.0);
     let (mut wide, mut narrow) = (Vec::new(), Vec::new());
     for line in ["AT+MS=V90", if x2 { "ATS70=1" } else { "ATS70=0" }] {
-        for b in line.bytes().chain([b'\r']) {
+        for b in line.bytes().chain(*b"\r") {
             modem.feed_dte(b);
         }
     }
@@ -209,7 +209,7 @@ fn receive(stream: &mut TcpStream) -> Option<(u8, u8, u8, Vec<i16>)> {
     let count = u16::from_le_bytes([header[7], header[8]]) as usize;
     let mut body = vec![0u8; 2 * count];
     stream.read_exact(&mut body).ok()?;
-    let samples = body.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    let samples = body.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes(*c)).collect();
     Some((header[4], header[5], header[6], samples))
 }
 
