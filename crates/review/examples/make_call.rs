@@ -3,11 +3,13 @@
 //! of a call whose every particular is known.
 //!
 //! ```text
-//! cargo run --release -p review --example make_call -- out.wav [V34] [seconds] [retrain-at]
+//! cargo run --release -p review --example make_call -- out.wav [V34] [seconds] [retrain-at] [slower-at]
 //! ```
 //!
 //! The caller is on the first channel. Both terminals type a line once the
-//! call is up, and again after a retrain if one was asked for.
+//! call is up, and again after a retrain if one was asked for. `slower-at`
+//! has the caller ask for a lower rate at that second: a rate renegotiation,
+//! which is S in the middle of data and no phase 2. A time of 0 is never.
 
 use modem::{Modem, State};
 
@@ -22,6 +24,17 @@ fn type_at(modem: &mut Modem, line: &str) {
     modem.feed_dte(b'\r');
 }
 
+/// A line typed once the slower rate has had time to come up.
+fn slower_at_done(caller: &mut Modem, done: &mut bool) {
+    if !*done {
+        *done = true;
+        for b in b"And this is at the slower rate.
+" {
+            caller.feed_dte(*b);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(path) = args.first() else {
@@ -30,7 +43,9 @@ fn main() {
     };
     let carrier = args.get(1).map_or("V34", String::as_str);
     let seconds: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30.0);
-    let retrain_at: Option<f64> = args.get(3).and_then(|s| s.parse().ok());
+    let at = |n: usize| args.get(n).and_then(|s| s.parse::<f64>().ok()).filter(|t| *t > 0.0);
+    let (retrain_at, slower_at) = (at(3), at(4));
+    let mut slowed = false;
 
     let mut caller = Modem::new(FS);
     let mut host = Modem::new(FS);
@@ -46,6 +61,7 @@ fn main() {
     let mut samples = Vec::with_capacity((seconds * FS) as usize * 2);
     let (mut from_caller, mut from_host) = (0.0, 0.0);
     let (mut up_at, mut spoken, mut retrained, mut spoken_again) = (None, false, false, false);
+    let mut slowed_spoken = false;
     for n in 0..(seconds * FS) as usize {
         let now = n as f64 / FS;
         let (a, b) = (from_caller, from_host);
@@ -76,6 +92,17 @@ fn main() {
                 for b in b"And hello back from the answering one.\r\n" {
                     host.feed_dte(*b);
                 }
+            }
+            if let Some(when) = slower_at
+                && !slowed
+                && now > when
+            {
+                slowed = true;
+                eprintln!("{now:8.3} the caller asks for a slower rate");
+                caller.ask_for_retrain();
+            }
+            if slowed && now > slower_at.unwrap_or(0.0) + 4.0 && slower_at.is_some() {
+                slower_at_done(&mut caller, &mut slowed_spoken);
             }
             if let Some(when) = retrain_at {
                 if !retrained && now > when {

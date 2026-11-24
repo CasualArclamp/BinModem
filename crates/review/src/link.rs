@@ -297,11 +297,15 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
             Frame::Xid { pf, info } => match Xid::decode(info) {
                 Ok(xid) => {
                     let fields = xid_fields(&xid);
-                    let what: Vec<String> = fields
-                        .iter()
-                        .filter(|(name, value)| (name == "V.42 bis" || name == "V.44") && value != "not mentioned")
-                        .map(|(name, _)| name.clone())
-                        .collect();
+                    // Compression that is named and set to neither way is
+                    // a refusal, not an offer.
+                    let mut what = Vec::new();
+                    if xid.compression.is_some_and(|c| c != ec::Compression::Neither) {
+                        what.push("V.42 bis");
+                    }
+                    if xid.v44.as_ref().is_some_and(|offer| offer.compression != ec::Compression::Neither) {
+                        what.push("V.44");
+                    }
                     summary.compressed = summary.compressed || compresses(&xid);
                     summary.xid = Some(xid);
                     event("XID")

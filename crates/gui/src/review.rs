@@ -603,14 +603,19 @@ impl ReviewPane {
 
         // The parts of the call along the top, each from its first signal to
         // the next part's.
+        // A part begins where the first signal of a later part is; and
+        // phase 2 again after data mode is a retrain, where they start over.
         let mut parts: Vec<(usize, &'static str, f64)> = Vec::new();
-        for event in &report.events {
+        let mut order_of: Vec<&Event> = report.events.iter().collect();
+        order_of.sort_by(|a, b| a.start.total_cmp(&b.start));
+        for event in order_of {
             let (order, name) = part(event.layer);
-            if !parts.iter().any(|p| p.0 == order) {
-                parts.push((order, name, event.start));
+            let now = parts.last().map(|p| p.0);
+            let retrain = now == Some(4) && event.layer == Layer::Phase2;
+            if now.is_none_or(|n| order > n) || retrain {
+                parts.push((order, if retrain { "retrain  phase 2" } else { name }, event.start));
             }
         }
-        parts.sort_by_key(|p| p.0);
         let ribbon_clip = painter.with_clip_rect(ribbon);
         for (i, (_, name, from)) in parts.iter().enumerate() {
             let until = parts.get(i + 1).map_or(seconds, |next| next.2);

@@ -105,6 +105,8 @@ struct Direction {
     /// Reading TRN: true until its ones give way.
     trn: bool,
     grace: usize,
+    /// Symbols of TRN running that were not ones.
+    misses: usize,
     trn_from: f64,
     trained_db: f64,
     size: Size,
@@ -151,6 +153,7 @@ impl Direction {
             quiet: 0,
             trn: false,
             grace: 0,
+            misses: 0,
             trn_from: 0.0,
             trained_db: 0.0,
             size: Size::Four,
@@ -185,6 +188,7 @@ impl Direction {
         // The descrambler has not followed this scrambler: its first two
         // dozen bits are its own filling.
         self.grace = 24 / size.bits() + 1;
+        self.misses = 0;
         self.trn_from = now;
         self.tail.clear();
         self.seen.clear();
@@ -324,6 +328,8 @@ impl Direction {
                             .summary("S in data mode: a rate renegotiation begins".to_owned()),
                     );
                     self.begin_trn(Size::Four, now);
+                    // S-bar has only just begun, and is sixteen symbols.
+                    self.grace += signals::S_BAR_SYMBOLS + 4;
                     self.stage = Stage::Phase4;
                 }
             }
@@ -333,17 +339,26 @@ impl Direction {
 
     fn training_symbol(&mut self, now: f64, decided: Point, shared: &mut Shared) {
         if self.trn {
-            let before = self.reader.clone();
             let bits = self.reader.trn(decided, self.size);
             if self.grace > 0 {
                 self.grace -= 1;
                 return;
             }
+            // TRN is ones. One symbol that is not is a symbol read wrong,
+            // early in a training that is still settling; three running are
+            // whatever comes after TRN, which is sent over and over and
+            // loses nothing by its first symbols.
             if bits.iter().all(|b| *b) {
+                self.misses = 0;
                 return;
             }
-            self.reader = before;
+            self.misses += 1;
+            if self.misses < 3 {
+                return;
+            }
+            self.misses = 0;
             self.trn = false;
+            let now = now - 2.0 / self.band.baud();
             let points = std::mem::take(&mut self.seen);
             let (layer, size) = (if self.stage == Stage::Phase3 { Layer::Phase3 } else { Layer::Phase4 }, self.size);
             let count = if size == Size::Sixteen { 16 } else { 4 };

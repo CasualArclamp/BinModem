@@ -358,8 +358,9 @@ pub fn listen(
             }
         }
         if let Some(info) = heard {
-            // An INFO0 after an INFO1 is a retrain's: a new phase 2.
-            if matches!(info, Info::Info0(_) | Info::Info0d(_)) && settled.ended.is_some() {
+            // Anything a second or more after this end's INFO1 is a
+            // retrain's: a new phase 2, whether or not it has an INFO0.
+            if settled.ended.is_some_and(|ended| now - ended > 1.0) {
                 rounds.push(std::mem::take(&mut settled));
             }
             let event = info_event(&info, side, who, now, pcm_call, &mut settled);
