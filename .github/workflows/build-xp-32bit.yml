@@ -1,0 +1,27 @@
+name: Build 32-bit Windows Binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-x86:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust and 32-bit target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Build 32-bit release executable
+        run: cargo build --release --target i686-pc-windows-msvc
+
+      - name: Upload 32-bit executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: binmodem-win32-x86
+          path: target/i686-pc-windows-msvc/release/*.exe
