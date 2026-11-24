@@ -397,19 +397,23 @@ impl ReviewPane {
                 if at.y < rect.top() + 12.0 {
                     at.y = frame.top() + 1.0;
                 }
-                let mut label = Rect::from_min_size(at, size).expand2(vec2(2.0, 0.0));
-                let mut room = true;
-                for _ in 0..5 {
-                    if !placed.iter().any(|other| other.intersects(label)) {
-                        break;
-                    }
-                    label = label.translate(vec2(0.0, -(size.y + 1.0)));
-                    room = label.top() >= rect.top();
-                    if !room {
-                        break;
-                    }
-                }
-                if room && !placed.iter().any(|other| other.intersects(label)) && label.right() > rect.left() {
+                // A label that starts off the left of the view is brought
+                // in to its edge, as long as its box is still on show.
+                at.x = at.x.max(rect.left() + 2.0).min(frame.right().max(rect.left() + 2.0));
+                let first = Rect::from_min_size(at, size).expand2(vec2(2.0, 0.0));
+                // Where it would go, then up a line at a time while there is
+                // lane above, then down inside the box.
+                let step = size.y + 1.0;
+                let free = |label: &Rect, placed: &[Rect]| {
+                    label.top() >= rect.top() && label.bottom() <= rect.bottom() && !placed.iter().any(|o| o.intersects(*label))
+                };
+                let label = (0..4)
+                    .map(|k| first.translate(vec2(0.0, -step * k as f32)))
+                    .chain((1..9).map(|k| first.translate(vec2(0.0, step * k as f32))))
+                    .find(|candidate| free(candidate, &placed));
+                if let Some(label) = label
+                    && label.right() > rect.left()
+                {
                     clipped.rect_filled(label, 2.0, Color32::from_black_alpha(190));
                     clipped.galley(label.min + vec2(2.0, 0.0), text, tint);
                     placed.push(label);
