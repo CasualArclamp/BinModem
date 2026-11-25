@@ -43,32 +43,9 @@ jobs:
           "YY_THUNKS_OBJ=$($obj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using YY-Thunks object: $($obj.FullName)"
 
-      - name: Build XP Symbol Shim
-        shell: pwsh
-        run: |
-          $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "vcvars32.bat" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $vcvars) {
-            throw "vcvars32.bat not found on runner."
-          }
-          $shimC = Join-Path $PWD "xp_shim.c"
-          $shimObj = Join-Path $PWD "xp_shim.obj"
-          @'
-          long __stdcall SHGetKnownFolderPath(const void* rfid, unsigned long flags, void* token, void** path) {
-            return 0x80004001L;
-          }
-          '@ | Set-Content -Encoding ascii $shimC
-
-          cmd /c "`"$($vcvars.FullName)`" && cl /nologo /c /MT `"$shimC`" /Fo`"$shimObj`""
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shimObj)) {
-            throw "Failed to compile xp_shim.obj"
-          }
-          "XP_SHIM_OBJ=$shimObj" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Compiled XP shim object: $shimObj"
-
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.XP_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
       - name: Find SHGetKnownFolderPath Callers
