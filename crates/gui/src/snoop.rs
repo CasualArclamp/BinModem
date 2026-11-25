@@ -22,6 +22,7 @@ mod review;
 // which draws things only a modem has.
 #[allow(dead_code)]
 mod scopes;
+mod window;
 
 use std::path::PathBuf;
 
@@ -77,24 +78,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let options = eframe::NativeOptions {
+    let options = || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
             .with_min_inner_size([900.0, 560.0])
             .with_title("DialSnoop"),
         ..Default::default()
     };
-    eframe::run_native(
+    window::run(
         "DialSnoop",
         options,
-        Box::new(move |cc| {
+        move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut pane = review::ReviewPane::default();
             if let Some(path) = &recording {
                 pane.open(path);
             }
             Ok(Box::new(Snoop { pane }))
-        }),
+        },
     )?;
     Ok(())
 }

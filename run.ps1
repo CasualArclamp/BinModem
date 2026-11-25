@@ -179,7 +179,11 @@ if ($Live) {
 
     # Ask the binary rather than keeping a second list here: it is the thing
     # that has to open the device, so its names are the ones that matter.
-    $listing = & $scope --devices
+    # Through a pipe: binmodem.exe is a GUI-subsystem program, and PowerShell
+    # neither waits for one nor captures what it prints when it is assigned
+    # straight to a variable, which left the list empty (issue 51). A pipe
+    # makes it do both.
+    $listing = & $scope --devices | Write-Output
     $inputs = @()
     $outputs = @()
     $section = ""
