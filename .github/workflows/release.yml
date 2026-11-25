@@ -13,7 +13,7 @@ env:
 
 jobs:
   windows:
-    name: binmodem.exe
+    name: binmodem.exe and dialsnoop.exe
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,25 +35,29 @@ jobs:
       - name: No C runtime dependency
         shell: pwsh
         run: |
-          $exe = "target/release/binmodem.exe"
-          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
-          $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
-              ForEach-Object { $_.Value.ToLower() } |
-              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
-              Sort-Object -Unique
-          if ($runtime) {
-              Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
-              exit 1
+          foreach ($name in "binmodem", "dialsnoop") {
+              $exe = "target/release/$name.exe"
+              $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+              $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
+                  ForEach-Object { $_.Value.ToLower() } |
+                  Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+                  Sort-Object -Unique
+              if ($runtime) {
+                  Write-Host "::error::$name.exe imports a C runtime: $($runtime -join ', ')"
+                  exit 1
+              }
+              "{0}.exe: {1:N1} MB, no C runtime dependency" -f $name, ((Get-Item $exe).Length / 1MB)
           }
-          "{0:N1} MB, no C runtime dependency" -f ((Get-Item $exe).Length / 1MB)
 
       - name: Stage
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/binmodem.exe dist/binmodem.exe
-          (Get-FileHash dist/binmodem.exe -Algorithm SHA256).Hash.ToLower() +
-              "  binmodem.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          $sums = foreach ($name in "binmodem.exe", "dialsnoop.exe") {
+              Copy-Item "target/release/$name" "dist/$name"
+              (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower() + "  $name"
+          }
+          $sums | Set-Content -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
@@ -68,6 +72,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" `
-              dist/binmodem.exe dist/SHA256SUMS.txt `
+              dist/binmodem.exe dist/dialsnoop.exe dist/SHA256SUMS.txt `
               --title "${{ github.ref_name }}" `
               --notes-file .github/release-notes.md
