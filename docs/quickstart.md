@@ -11,7 +11,7 @@ It is one file with nothing to install. Put it in a folder and open a terminal
 there.
 
 On Linux, or to build it yourself, see
-[Building on Linux](../README.md#building-on-linux) in the README; the commands
+[Build on Linux](manual/linux.md); the commands
 below are the same with `./target/release/binmodem` in place of `binmodem.exe`.
 
 ## 2. See it work with nothing connected
