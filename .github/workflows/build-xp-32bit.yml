@@ -13,7 +13,7 @@ env:
 
 jobs:
   windows-x86:
-    name: binmodem-x86.exe
+    name: binmodem-x86.exe and dialsnoop-x86.exe
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,23 +43,66 @@ jobs:
           "YY_THUNKS_OBJ=$($obj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using YY-Thunks object: $($obj.FullName)"
 
+      - name: Build XP Symbol Shim
+        shell: pwsh
+        run: |
+          $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "vcvars32.bat" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $vcvars) {
+            throw "vcvars32.bat not found on runner."
+          }
+          $shimC = Join-Path $PWD "xp_shim.c"
+          $shimObj = Join-Path $PWD "xp_shim.obj"
+          @'
+          long __stdcall SHGetKnownFolderPath(const void* rfid, unsigned long flags, void* token, void** path) {
+            return 0x80004001L;
+          }
+          '@ | Set-Content -Encoding ascii $shimC
+
+          cmd /c "`"$($vcvars.FullName)`" && cl /nologo /c /MT `"$shimC`" /Fo`"$shimObj`""
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shimObj)) {
+            throw "Failed to compile xp_shim.obj"
+          }
+          "XP_SHIM_OBJ=$shimObj" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Compiled XP shim object: $shimObj"
+
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.XP_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
+
+      - name: Find SHGetKnownFolderPath Callers
+        shell: pwsh
+        run: |
+          Write-Host "=== Repo search for folder/known-folder APIs ==="
+          Select-String -Path "crates/**/*.rs", "crates/**/Cargo.toml", "Cargo.toml" `
+            -Pattern "SHGetKnownFolderPath|KnownFolder|dirs|directories|APPDATA|LOCALAPPDATA|storage|persistence" `
+            -CaseSensitive:$false | ForEach-Object {
+              "{0}:{1}: {2}" -f $_.Path, $_.LineNumber, $_.Line.Trim()
+            }
+
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            Write-Host "=== Binary string check: $name.exe ==="
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+            $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
+            if ($ascii -match "SHGetKnownFolderPath" -or $utf16 -match "SHGetKnownFolderPath") {
+              Write-Host "Found SHGetKnownFolderPath string inside $exe"
+            } else {
+              Write-Host "SHGetKnownFolderPath string not found as plain ASCII/UTF-16 in $exe"
+            }
+          }
 
       - name: Audit Windows XP Imports
         shell: pwsh
         run: |
-          $exe = "target/i686-pc-windows-msvc/release/binmodem.exe"
           $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "Hostx64\\x86" } |
             Select-Object -First 1
           if (-not $dumpbin) {
             throw "dumpbin.exe not found; cannot verify Windows XP DLL imports."
           }
-          $imports = & $dumpbin.FullName /imports $exe
-          $imports | Write-Host
 
           $blockedDlls = @(
             "combase.dll",
@@ -73,38 +116,57 @@ jobs:
             "bcryptprimitives.dll",
             "wlanapi.dll"
           )
-          $foundBlocked = $imports |
-            ForEach-Object { if ($_ -match "^\s+([A-Za-z0-9_\-\.]+\.dll)\s*$") { $matches[1].ToLower() } } |
-            Where-Object { $blockedDlls -contains $_ -or $_ -like "api-ms-win-*" } |
-            Sort-Object -Unique
 
-          if ($foundBlocked) {
-            Write-Host "::error::Found non-XP or API-set DLL imports: $($foundBlocked -join ', ')"
-            exit 1
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            Write-Host "=== Imports for $name.exe ==="
+            $imports = & $dumpbin.FullName /imports $exe
+            $imports | Write-Host
+
+            $foundBlocked = $imports |
+              ForEach-Object { if ($_ -match "^\s+([A-Za-z0-9_\-\.]+\.dll)\s*$") { $matches[1].ToLower() } } |
+              Where-Object { $blockedDlls -contains $_ -or $_ -like "api-ms-win-*" } |
+              Sort-Object -Unique
+
+            if ($foundBlocked) {
+              Write-Host "::error::$name.exe has non-XP or API-set DLL imports: $($foundBlocked -join ', ')"
+              exit 1
+            }
           }
 
+      # "Standalone" as a measurement rather than a claim. Static CRT linking
+      # keeps the only imports to Windows itself; if that ever slips, the
+      # binary starts naming vcruntime140.dll / ucrtbase.dll and fails on a
+      # clean machine without Visual C++ redistributables.
       - name: No C runtime dependency
         shell: pwsh
         run: |
-          $exe = "target/i686-pc-windows-msvc/release/binmodem.exe"
-          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
-          $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
-            ForEach-Object { $_.Value.ToLower() } |
-            Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
-            Sort-Object -Unique
-          if ($runtime) {
-            Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
-            exit 1
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+            $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
+              ForEach-Object { $_.Value.ToLower() } |
+              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+              Sort-Object -Unique
+            if ($runtime) {
+              Write-Host "::error::$name.exe imports a C runtime: $($runtime -join ', ')"
+              exit 1
+            }
+            "{0}.exe: {1:N1} MB, no C runtime dependency" -f $name, ((Get-Item $exe).Length / 1MB)
           }
-          "{0:N1} MB, no C runtime dependency" -f ((Get-Item $exe).Length / 1MB)
 
       - name: Stage
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/i686-pc-windows-msvc/release/binmodem.exe dist/binmodem-x86.exe
-          (Get-FileHash dist/binmodem-x86.exe -Algorithm SHA256).Hash.ToLower() +
-            "  binmodem-x86.exe" | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
+          $sums = foreach ($pair in @(
+            @{ src = "binmodem.exe"; dst = "binmodem-x86.exe" },
+            @{ src = "dialsnoop.exe"; dst = "dialsnoop-x86.exe" }
+          )) {
+            Copy-Item "target/i686-pc-windows-msvc/release/$($pair.src)" "dist/$($pair.dst)"
+            (Get-FileHash "dist/$($pair.dst)" -Algorithm SHA256).Hash.ToLower() + "  $($pair.dst)"
+          }
+          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
           Get-Content dist/SHA256SUMS-x86.txt
 
       - uses: actions/upload-artifact@v4
@@ -120,10 +182,10 @@ jobs:
         run: |
           if (gh release view "${{ github.ref_name }}" 2>$null) {
             gh release upload "${{ github.ref_name }}" `
-              dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt --clobber
+              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt --clobber
           } else {
             gh release create "${{ github.ref_name }}" `
-              dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt `
+              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt `
               --title "${{ github.ref_name }}" `
               --notes-file .github/release-notes.md
           }
