@@ -1,4 +1,5 @@
 #![cfg(all(target_os = "windows", target_arch = "x86"))]
+#![allow(unsafe_code)]
 
 use core::ffi::c_void;
 use std::ffi::OsString;
@@ -11,6 +12,9 @@ const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
 const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
 const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
 const OFN_EXPLORER: u32 = 0x0008_0000;
+
+const BIF_RETURNONLYFSDIRS: u32 = 0x0000_0001;
+const BIF_NEWDIALOGSTYLE: u32 = 0x0000_0040;
 
 #[repr(C)]
 struct OPENFILENAMEW {
@@ -39,10 +43,33 @@ struct OPENFILENAMEW {
     flags_ex: u32,
 }
 
+#[repr(C)]
+struct BROWSEINFOW {
+    hwnd_owner: *mut c_void,
+    pidl_root: *const c_void,
+    psz_display_name: *mut u16,
+    lpsz_title: *const u16,
+    ul_flags: u32,
+    lpfn: *const c_void,
+    l_param: isize,
+    i_image: i32,
+}
+
 #[link(name = "comdlg32")]
-extern "system" {
+unsafe extern "system" {
     fn GetOpenFileNameW(lpofn: *mut OPENFILENAMEW) -> i32;
     fn GetSaveFileNameW(lpofn: *mut OPENFILENAMEW) -> i32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHBrowseForFolderW(lpbi: *mut BROWSEINFOW) -> *mut c_void;
+    fn SHGetPathFromIDListW(pidl: *const c_void, psz_path: *mut u16) -> i32;
+}
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoTaskMemFree(pv: *mut c_void);
 }
 
 fn to_wide_null(value: &str) -> Vec<u16> {
@@ -182,5 +209,36 @@ pub fn pick_save_file(
         read_wide_path(&file_buf)
     } else {
         None
+    }
+}
+
+pub fn pick_folder(title: &str) -> Option<PathBuf> {
+    let mut display_buf = vec![0u16; 260];
+    let mut path_buf = vec![0u16; 4096];
+    let title_wide = to_wide_null(title);
+
+    let mut bi = BROWSEINFOW {
+        hwnd_owner: ptr::null_mut(),
+        pidl_root: ptr::null(),
+        psz_display_name: display_buf.as_mut_ptr(),
+        lpsz_title: title_wide.as_ptr(),
+        ul_flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpfn: ptr::null(),
+        l_param: 0,
+        i_image: 0,
+    };
+
+    unsafe {
+        let pidl = SHBrowseForFolderW(&mut bi);
+        if pidl.is_null() {
+            return None;
+        }
+        let ok = SHGetPathFromIDListW(pidl, path_buf.as_mut_ptr());
+        CoTaskMemFree(pidl);
+        if ok != 0 {
+            read_wide_path(&path_buf)
+        } else {
+            None
+        }
     }
 }
