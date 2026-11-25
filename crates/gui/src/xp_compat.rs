@@ -16,6 +16,9 @@ const OFN_EXPLORER: u32 = 0x0008_0000;
 const BIF_RETURNONLYFSDIRS: u32 = 0x0000_0001;
 const BIF_NEWDIALOGSTYLE: u32 = 0x0000_0040;
 
+pub const CSIDL_APPDATA: i32 = 0x001a;
+pub const CSIDL_LOCAL_APPDATA: i32 = 0x001c;
+
 #[repr(C)]
 struct OPENFILENAMEW {
     l_struct_size: u32,
@@ -65,6 +68,13 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn SHBrowseForFolderW(lpbi: *mut BROWSEINFOW) -> *mut c_void;
     fn SHGetPathFromIDListW(pidl: *const c_void, psz_path: *mut u16) -> i32;
+    fn SHGetFolderPathW(
+        hwnd: *mut c_void,
+        csidl: i32,
+        h_token: *mut c_void,
+        dw_flags: u32,
+        psz_path: *mut u16,
+    ) -> i32;
 }
 
 #[link(name = "ole32")]
@@ -240,5 +250,15 @@ pub fn pick_folder(title: &str) -> Option<PathBuf> {
         } else {
             None
         }
+    }
+}
+
+pub fn known_folder_xp(csidl: i32) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 260];
+    let hr = unsafe { SHGetFolderPathW(ptr::null_mut(), csidl, ptr::null_mut(), 0, buf.as_mut_ptr()) };
+    if hr == 0 {
+        read_wide_path(&buf)
+    } else {
+        None
     }
 }
