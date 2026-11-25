@@ -51,13 +51,36 @@ jobs:
       - name: Audit Windows XP Imports
         shell: pwsh
         run: |
+          $exe = "target/i686-pc-windows-msvc/release/binmodem.exe"
           $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "Hostx64\\x86" } |
             Select-Object -First 1
-          if ($dumpbin) {
-            & $dumpbin.FullName /imports "target/i686-pc-windows-msvc/release/binmodem.exe"
-          } else {
-            Write-Host "dumpbin.exe not found; skipping import table dump."
+          if (-not $dumpbin) {
+            throw "dumpbin.exe not found; cannot verify Windows XP DLL imports."
+          }
+          $imports = & $dumpbin.FullName /imports $exe
+          $imports | Write-Host
+
+          $blockedDlls = @(
+            "combase.dll",
+            "mmdevapi.dll",
+            "audioses.dll",
+            "shcore.dll",
+            "dwmapi.dll",
+            "dcomp.dll",
+            "dxgi.dll",
+            "d3d11.dll",
+            "bcryptprimitives.dll",
+            "wlanapi.dll"
+          )
+          $foundBlocked = $imports |
+            ForEach-Object { if ($_ -match "^\s+([A-Za-z0-9_\-\.]+\.dll)\s*$") { $matches[1].ToLower() } } |
+            Where-Object { $blockedDlls -contains $_ -or $_ -like "api-ms-win-*" } |
+            Sort-Object -Unique
+
+          if ($foundBlocked) {
+            Write-Host "::error::Found non-XP or API-set DLL imports: $($foundBlocked -join ', ')"
+            exit 1
           }
 
       - name: No C runtime dependency
@@ -66,12 +89,12 @@ jobs:
           $exe = "target/i686-pc-windows-msvc/release/binmodem.exe"
           $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
           $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
-              ForEach-Object { $_.Value.ToLower() } |
-              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
-              Sort-Object -Unique
+            ForEach-Object { $_.Value.ToLower() } |
+            Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+            Sort-Object -Unique
           if ($runtime) {
-              Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
-              exit 1
+            Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
+            exit 1
           }
           "{0:N1} MB, no C runtime dependency" -f ((Get-Item $exe).Length / 1MB)
 
@@ -81,7 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/i686-pc-windows-msvc/release/binmodem.exe dist/binmodem-x86.exe
           (Get-FileHash dist/binmodem-x86.exe -Algorithm SHA256).Hash.ToLower() +
-              "  binmodem-x86.exe" | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
+            "  binmodem-x86.exe" | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
           Get-Content dist/SHA256SUMS-x86.txt
 
       - uses: actions/upload-artifact@v4
@@ -97,10 +120,10 @@ jobs:
         run: |
           if (gh release view "${{ github.ref_name }}" 2>$null) {
             gh release upload "${{ github.ref_name }}" `
-                dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt --clobber
+              dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt --clobber
           } else {
             gh release create "${{ github.ref_name }}" `
-                dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt `
-                --title "${{ github.ref_name }}" `
-                --notes-file .github/release-notes.md
+              dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt `
+              --title "${{ github.ref_name }}" `
+              --notes-file .github/release-notes.md
           }
