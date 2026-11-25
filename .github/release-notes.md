@@ -11,6 +11,22 @@ dialsnoop.exe                 the same reader, as a program of its own
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.5.1
+
+### V.92 PCM upstream to Netstalgia, on every call
+
+Calls to Netstalgia came up V.92 on some days and V.90 on others. It depended on which of the line's 16 kHz samples the network's 8 kHz codewords landed on, which changes from call to call. On the odd one, two things went wrong:
+
+- **The upstream was half a sample off the network's codec.** The downstream was read on the right sample but the upstream always went out on the even one. Netstalgia never found Su and retrained to V.90. The upstream now moves to the same phase as soon as Sd shows it.
+- **S-bar-u's half symbol and Jp's fraction were taken as steps the wrong way.** This end now steps later, as D-Modem does and libv90modem expects. At a fraction of nought the old way was a symbol out and Netstalgia let it go. At the half a symbol the odd phase brings, it never read the CPt.
+
+With both, calls on the odd phase come up at 56000 down and 42666 up. A V.92 server here takes the step either way, so calls between two BinModems are unchanged.
+
+### The window on older graphics
+
+- **The window opens without OpenGL 2.0** ([#52](https://github.com/CasualArclamp/BinModem/issues/52)). Where OpenGL fails, as on an Intel GMA 4 series, it opens again through Direct3D 12, Vulkan or, failing those, Windows' own software renderer. `BINMODEM_RENDERER=glow|wgpu|warp` picks one. This makes `binmodem.exe` about 27 MB.
+- **`run-live.bat` finds the audio devices again** ([#51](https://github.com/CasualArclamp/BinModem/issues/51)). It said "no audio devices found" on every machine.
+
 ## What's new in 5.5.0
 
 ### U.S. Robotics x2, as a server
