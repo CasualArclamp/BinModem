@@ -377,6 +377,25 @@ impl PcmTransmitter {
     /// by `epsilon::step_direction`. An earlier symbol is still after the one
     /// before it -- the step is less than a period -- so the reconstruction
     /// carries it as it carries any other instant.
+    /// Put the symbol grid on the network's codec instants: a lasting step of
+    /// `symbols` (less than one either way), taken when the next symbol
+    /// asked for reaches the line, and not one of S-bar-u's two shifts.
+    ///
+    /// The digital modem reads Su on its own 8000 Hz codec clock. A line at a
+    /// multiple of that rate puts the codewords on one sample phase of
+    /// several, which Sd shows the downstream reader; the upstream is decimated
+    /// on that same clock, so its symbols belong on that phase too. Left on
+    /// phase 0 when the codewords were on phase 1 of 2, every upstream symbol
+    /// reached the far codec half a symbol out. This project's own digital
+    /// modem measured that and sent it back in Jp (epsilon 32768);
+    /// Netstalgia's never found the Su at all and retrained as V.90, on
+    /// every call whose downstream was read on sample 1 (live, 2026-11-24/25).
+    pub fn realign(&mut self, symbols: f64) {
+        if symbols != 0.0 && symbols > -1.0 && symbols < 1.0 {
+            self.jumps.push_back((self.next_at, symbols));
+        }
+    }
+
     pub fn shift(&mut self, symbols: f64) -> Result<(), &'static str> {
         if self.shifts >= SHIFTS {
             return Err("the upstream has already taken both of s-bar-u's shifts");

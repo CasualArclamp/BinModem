@@ -229,7 +229,7 @@ impl Line {
         // earlier and is a transition the digital modem's refit is not
         // looking for.
         let delays = self.modem.delays();
-        let step: f64 = delays[self.applied.min(delays.len())..].iter().map(|d| epsilon::step_direction() * d).sum();
+        let step: f64 = delays[self.applied.min(delays.len())..].iter().map(|d| epsilon::analogue_step_direction() * d).sum();
         self.applied = delays.len();
         self.up.push_back((out, step));
     }
@@ -261,6 +261,11 @@ impl Line {
             }
             let phase = self.sd_phase(per);
             self.phase = Some(phase);
+            // The upstream onto the same codec instants (see
+            // `PcmTransmitter::realign`). Sd comes while this end sends only
+            // Ja's repetitions or nothing, so the step lands where the far
+            // end is not yet reading anything it keeps.
+            self.tx.realign(phase as f64 / per as f64);
             self.notes.push(format!("V.92: Sd found; the downstream is read on sample {phase} of every {per}"));
         }
     }
@@ -484,6 +489,31 @@ mod tests {
         }
         if let Some((down, up, said)) = failed.first() {
             panic!("{} of 36 failed; the first, {down}/{up}:\n{said}", failed.len());
+        }
+    }
+
+    /// On a SIP call both directions meet one 8000 Hz codec clock, so a line
+    /// at 16 kHz is an odd number of samples from it both ways or an even
+    /// number both ways, and the downstream's phase says which. Either way
+    /// the upstream must reach the far codec on its instants: the digital
+    /// modem's Jp then asks for no step at all. Before the upstream followed
+    /// the phase, odd delays came back as epsilon 32768, half a symbol, and
+    /// Netstalgia's server, which does not correct that, never found Su.
+    #[test]
+    fn the_upstream_lands_on_the_codec_instants_at_either_phase() {
+        for (down, up) in [(80, 80), (81, 81), (82, 84), (83, 85)] {
+            let (done, line, said) = call(16_000.0, down, up);
+            assert!(done, "{down}/{up} did not connect:
+{said}");
+            let epsilon: u32 = said
+                .lines()
+                .find_map(|l| l.split("Jp read, epsilon ").nth(1))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("{down}/{up}: no Jp
+{said}"));
+            let off = epsilon.min(65_536 - epsilon);
+            assert!(off < 1000, "{down}/{up}, phase {:?}: Jp asked for epsilon {epsilon}", line.phase());
         }
     }
 }
