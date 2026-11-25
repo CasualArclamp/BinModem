@@ -1,4 +1,4 @@
-name: Release (Windows XP 32-bit)
+name: Release (Windows 10 32-bit)
 
 on:
   push:
