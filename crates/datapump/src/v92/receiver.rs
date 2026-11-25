@@ -497,6 +497,13 @@ fn turned_share(window: &[f64], template: &[f64; RU_PERIOD], step: f64) -> f64 {
     let mut best = -correlate(window, template);
     if step.abs() > 1e-6 {
         best = best.max(-correlate(window, &reread(template, step)));
+        // And the same step the other way. Which way an analogue modem takes
+        // S-bar-u's half symbol and Jp's epsilon is read differently by
+        // different makers: an Agere SV92PP moves earlier
+        // (`epsilon::EXTENDS_LATE`), D-Modem and this project's own analogue
+        // modem move later, as libv90modem expects. The reversal is the same
+        // reversal either way, and the refit after it is made from the line.
+        best = best.max(-correlate(window, &reread(template, (RU_PERIOD as f64 - step).rem_euclid(RU_PERIOD as f64))));
     }
     best
 }

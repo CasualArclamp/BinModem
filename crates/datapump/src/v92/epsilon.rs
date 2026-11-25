@@ -147,6 +147,22 @@ pub fn step_direction() -> f64 {
     if EXTENDS_LATE { 1.0 } else { -1.0 }
 }
 
+/// Which way this end's own analogue transmitter takes S-bar-u's half
+/// symbol and Jp's epsilon, as a sign: later, as D-Modem's analogue modem
+/// does (`tnext += T * (1 + delay)`) and as libv90modem, Netstalgia's
+/// digital modem, expects.
+///
+/// Not [`step_direction`], which is what this project's *digital* modem
+/// expects of a far analogue modem and was fitted to an Agere SV92PP. At an
+/// epsilon of 0 the two readings end a whole symbol apart and Netstalgia
+/// lets that go; at the 0.5 a call whose downstream is on the odd sample
+/// phase brings, they end two symbols apart, Netstalgia never read the
+/// CPt, and the call fell back to V.90 (live, 2026-11-25).
+#[must_use]
+pub fn analogue_step_direction() -> f64 {
+    1.0
+}
+
 /// The epsilon Jp carries, from a lag measured on the Su **after** the first
 /// (24.5T) S-bar-u -- 9.5.1.1.7's run, which is the one this module is used on.
 ///

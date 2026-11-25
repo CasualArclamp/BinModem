@@ -780,6 +780,15 @@ answers a double-click with a dialog naming a DLL. Everything else it uses is
 Windows itself — `mmdevapi` for the audio, `user32` and `gdi32` for the window,
 `opengl32` for the drawing.
 
+The window draws through OpenGL 2.0. A graphics chip older than that, such as
+an Intel GMA 4 series with its WDDM 1.1 driver, has OpenGL 1.x at most; there
+the window opens through Direct3D 12 instead, on the chip if it can and on
+WARP, the software renderer every Windows 10 and 11 machine has, if it
+cannot. Nothing needs installing, and Mesa's DLLs beside the exe are no longer
+needed. `BINMODEM_RENDERER=glow`, `wgpu` or `warp` picks one outright; `warp`
+shows on a modern machine what the old ones get. The same holds for
+`dialsnoop.exe`.
+
 The capture is carried inside the file too. It used to be opened from a path
 built out of the directory the program was compiled in, which worked on exactly
 one computer.

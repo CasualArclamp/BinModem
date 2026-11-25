@@ -57,6 +57,7 @@ mod review;
 mod scopes;
 mod speed;
 mod tap;
+mod window;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -350,7 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    let options = eframe::NativeOptions {
+    let options = || eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 860.0])
             .with_min_inner_size([900.0, 640.0])
@@ -359,10 +360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let ui_control = control.clone();
-    eframe::run_native(
+    window::run(
         title,
         options,
-        Box::new(move |cc| {
+        move |cc| {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
             let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
             app.script(typed, scopes);
@@ -375,7 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.open_review(recording.as_deref());
             }
             Ok(Box::new(app))
-        }),
+        },
     )?;
 
     control.quit.store(true, std::sync::atomic::Ordering::Relaxed);
