@@ -27,7 +27,8 @@
 
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
-use varc::hello::{Agreed, Caps, Faster, Half, Hello, Line, Slower, Twice, Wanted, Watch};
+use varc::fit::{Fitted, Unfitted};
+use varc::hello::{Agreed, Caps, FITS, Faster, Half, Hello, Line, NARROW, Slower, Twice, Wanted, Watch};
 use datapump::v90::ucode::{self, Law};
 use varc::exact;
 use varc::octets;
@@ -87,6 +88,23 @@ type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
 /// levels start twice as fast and have a step more, down to the same 2000.
 const SLOWEST: u8 = 3;
 
+/// How a direction of a single-carrier call is run is one number. Up to
+/// [`SLOWEST`] and one more it is how slowed the carrier is, as a power of
+/// two. From this on it is a fit of the carrier to a narrow line, by its
+/// place in [`FITS`]: faster than the carrier as it is built, and the
+/// fastest first.
+const FIT: u8 = 16;
+
+/// Which fit a speed is, if it is one.
+fn fit_of(speed: u8) -> Option<usize> {
+    speed.checked_sub(FIT).map(usize::from).filter(|fit| *fit < FITS.len())
+}
+
+/// How many times slowed a speed is.
+fn times(speed: u8) -> u32 {
+    if speed >= FIT { 1 } else { 1 << speed }
+}
+
 /// The rate the single-carrier modes are built for. They are then run at
 /// whatever rate the line has, sample for sample: see [`Call::sender`].
 const BUILT_FOR: f64 = 48_000.0;
@@ -95,7 +113,7 @@ const BUILT_FOR: f64 = 48_000.0;
 /// for the modulation slower, in seconds, by how slowed it is already. A
 /// slowed modulation takes as many times longer to be found.
 fn patience(slowed: u8) -> f64 {
-    6.0 + 3.0 * f64::from(1u32 << slowed)
+    6.0 + 3.0 * f64::from(times(slowed))
 }
 
 /// How long each end of a two-wire call has the line to itself, to learn
@@ -216,6 +234,8 @@ pub(crate) struct Call {
     inexact: bool,
     /// When the station now running was built, in samples.
     built_at: u64,
+    /// Whether the fits the handshake found have been taken up.
+    refitted: bool,
     /// What the stream may be compressed with: `varc::squeeze`'s bits.
     squeeze: u8,
     /// Something worth telling whoever is watching, once.
@@ -278,6 +298,7 @@ impl Call {
             g711: None,
             inexact: false,
             built_at: 0,
+            refitted: false,
             squeeze: 0,
             notes: Vec::new(),
         }
@@ -363,7 +384,7 @@ impl Call {
         let calling = self.calling;
         let watch = self.watch.get_or_insert_with(|| Watch::new(calling, fs, fs_out, input.len()));
         if let Some(asked) = watch.hear(input) {
-            let asked = asked.min(self.slowest());
+            let asked = if fit_of(asked).is_some() { asked } else { asked.min(self.slowest()) };
             if asked != self.sends_slowed {
                 self.sends_slowed = asked;
                 for c in 0..input.len() as u8 {
@@ -372,10 +393,13 @@ impl Call {
                         channel.send_with(tx);
                     }
                 }
-                self.notes.push(format!(
-                    "V.ARC: the far end cannot hear this end; sending {} times slower",
-                    1u32 << asked
-                ));
+                self.notes.push(match fit_of(asked) {
+                    Some(_) => format!(
+                        "V.ARC: the far end cannot hear this end; sending at {:.0} baud",
+                        self.baud(agreed.send_hz, asked)
+                    ),
+                    None => format!("V.ARC: the far end cannot hear this end; sending {} times slower", 1u32 << asked),
+                });
             }
         }
         let Some(station) = self.station.as_ref() else { return Ok(()) };
@@ -395,7 +419,13 @@ impl Call {
             self.unheard = 0.0;
             // At the slowest there is nothing slower to ask for, but the
             // far end may not have heard the asking: say it again.
-            let slowed = (self.hears_slowed + 1).min(self.slowest());
+            // From a fit, the next narrower fit, and after the last of them
+            // the carrier as it is built; from there, by halves.
+            let slowed = match fit_of(self.hears_slowed) {
+                Some(fit) if fit + 1 < FITS.len() => self.hears_slowed + 1,
+                Some(_) => 0,
+                None => (self.hears_slowed + 1).min(self.slowest()),
+            };
             if slowed != self.hears_slowed {
                 self.hears_slowed = slowed;
                 self.read_before = read;
@@ -405,10 +435,14 @@ impl Call {
                         channel.listen_with(rx);
                     }
                 }
-                self.notes.push(format!(
-                    "V.ARC: nothing heard of the far end; asking it to send {} times slower",
-                    1u32 << slowed
-                ));
+                self.notes.push(if slowed < FIT && slowed > 0 {
+                    format!("V.ARC: nothing heard of the far end; asking it to send {} times slower", 1u32 << slowed)
+                } else {
+                    format!(
+                        "V.ARC: nothing heard of the far end; asking it to send at {:.0} baud",
+                        self.baud(agreed.hear_hz, slowed)
+                    )
+                });
             }
             if let Some(watch) = self.watch.as_mut() {
                 watch.tell(slowed);
@@ -420,7 +454,7 @@ impl Call {
     /// How slowed each direction is, as a number of times: what this end
     /// hears, then what it sends.
     pub fn slowed(&self) -> (u32, u32) {
-        (1 << self.hears_slowed, 1 << self.sends_slowed)
+        (times(self.hears_slowed), times(self.sends_slowed))
     }
 
     /// One sample of a two-wire call's turns: see [`Turn`].
@@ -540,6 +574,8 @@ impl Call {
             hear_times: 1,
             send_baud: 0,
             hear_baud: 0,
+            send_fit: 0,
+            hear_fit: 0,
             notes: Vec::new(),
         }
     }
@@ -570,13 +606,21 @@ impl Call {
     /// fast again: two-thirds of the rate in baud.
     fn sender(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Sender>, String> {
         let (fs, colour) = (agreed.send_hz, self.sends + c);
-        let slow = 1usize << slowed;
+        let slow = times(slowed) as usize;
         Ok(match self.mode {
             VarcMode::Linear => Box::new(exact::Tx::new(fs)),
             VarcMode::G711 => Box::new(octets::Tx::new(fs, &self.codewords().0)),
             VarcMode::Dmt => {
                 let tx: Box<dyn Sender> = Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour)));
                 if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx }
+            }
+            // Fitted to a narrow line: run at three times the baud that
+            // was chosen, with its carrier in the middle of the line's
+            // band, and brought to the line's rate. See `varc::fit`.
+            VarcMode::Qam if fit_of(slowed).is_some() => {
+                let (baud, carrier, rolloff) = FITS[fit_of(slowed).unwrap_or(0)];
+                let shape = Shape::fitted(sc::BAUD * carrier / baud, rolloff).coloured(colour);
+                Box::new(Fitted::new(Box::new(sc::Tx::new(shape)), BUILT_FOR, 3.0 * baud * fs, fs))
             }
             VarcMode::Qam => {
                 let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
@@ -596,7 +640,7 @@ impl Call {
     /// The receiver to go with [`Self::sender`] at the far end.
     fn receiver(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Receiver>, String> {
         let (fs, colour) = (agreed.hear_hz, self.hears + c);
-        let slow = 1usize << slowed;
+        let slow = times(slowed) as usize;
         let mut rx: Box<dyn Receiver> = match self.mode {
             VarcMode::Linear => Box::new(exact::Rx::new(fs)),
             VarcMode::G711 => {
@@ -606,6 +650,11 @@ impl Call {
             VarcMode::Dmt => {
                 let rx: Box<dyn Receiver> = Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour)));
                 if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx }
+            }
+            VarcMode::Qam if fit_of(slowed).is_some() => {
+                let (baud, carrier, rolloff) = FITS[fit_of(slowed).unwrap_or(0)];
+                let shape = Shape::fitted(sc::BAUD * carrier / baud, rolloff).coloured(colour);
+                Box::new(Unfitted::new(Box::new(sc::Rx::new(shape)), BUILT_FOR, 3.0 * baud * fs, fs))
             }
             VarcMode::Qam => {
                 let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
@@ -638,21 +687,26 @@ impl Call {
     /// The baud a single-carrier direction runs at on a line of `hz`,
     /// slowed by two to the `slowed`; nought for the other modes.
     fn baud(&self, hz: f64, slowed: u8) -> f64 {
+        if let (VarcMode::Qam, Some(fit)) = (self.mode, fit_of(slowed)) {
+            return FITS[fit].0 * hz;
+        }
         let fastest = match self.mode {
             VarcMode::Qam => hz / 3.0,
             VarcMode::Pcm => 2.0 * hz / 3.0,
             _ => return 0.0,
         };
-        fastest / f64::from(1u32 << slowed)
+        fastest / f64::from(times(slowed))
     }
 
     /// How slowed a direction on a line of `hz` has to be for the baud that
-    /// was asked for: the nearest there is. `None` where none was.
-    fn slowed_for(&self, hz: f64, baud: u32) -> Option<u8> {
+    /// was asked for: the nearest there is, the fits among them where the
+    /// line may be fitted. `None` where none was.
+    fn slowed_for(&self, hz: f64, baud: u32, fitted: bool) -> Option<u8> {
         if baud == 0 || self.baud(hz, 0) == 0.0 {
             return None;
         }
-        (0..=self.slowest()).min_by(|a, b| {
+        let fits = if fitted && self.mode == VarcMode::Qam { FITS.len() as u8 } else { 0 };
+        (0..=self.slowest()).chain(FIT..FIT + fits).min_by(|a, b| {
             let miss = |s: u8| (self.baud(hz, s).ln() - f64::from(baud).ln()).abs();
             miss(*a).total_cmp(&miss(*b))
         })
@@ -675,10 +729,23 @@ impl Call {
         // A baud that was asked for, by either end for what it hears, is
         // where that direction starts; and where it stays, since somebody
         // asked for it.
-        if let Some(slowed) = self.slowed_for(agreed.send_hz, agreed.send_baud) {
+        // A single carrier on a narrow line starts at the widest fit the
+        // probe found the band would pass. It is not held there: an end
+        // that hears nothing of it asks for the next.
+        let narrow = self.mode == VarcMode::Qam
+            && agreed.send_times == 1
+            && agreed.hear_times == 1
+            && agreed.send_hz <= NARROW
+            && agreed.hear_hz <= NARROW;
+        if self.mode == VarcMode::Qam && self.station.is_none() && !self.refitted {
+            self.sends_slowed = if agreed.send_fit > 0 { FIT + agreed.send_fit - 1 } else { 0 };
+            self.hears_slowed = if agreed.hear_fit > 0 { FIT + agreed.hear_fit - 1 } else { 0 };
+            self.refitted = true;
+        }
+        if let Some(slowed) = self.slowed_for(agreed.send_hz, agreed.send_baud, narrow) {
             self.sends_slowed = slowed;
         }
-        if let Some(slowed) = self.slowed_for(agreed.hear_hz, agreed.hear_baud) {
+        if let Some(slowed) = self.slowed_for(agreed.hear_hz, agreed.hear_baud, narrow) {
             self.hears_slowed = slowed;
             self.heard_once = true;
         }
@@ -806,6 +873,7 @@ impl Call {
                         heard: false,
                         asks_baud,
                         line,
+                        fit: 0,
                     },
                 )
             });
@@ -1190,8 +1258,8 @@ impl Call {
             for note in &agreed.notes {
                 rows.push(("note", note.clone()));
             }
-            if self.hears_slowed > 0 || self.sends_slowed > 0 {
-                let times = |by: u8| if by == 0 { "at full speed".to_owned() } else { format!("{} times slower", 1u32 << by) };
+            if times(self.hears_slowed) > 1 || times(self.sends_slowed) > 1 {
+                let times = |by: u8| if times(by) == 1 { "at full speed".to_owned() } else { format!("{} times slower", times(by)) };
                 rows.push((
                     "slowed",
                     format!("hearing {}, sending {}", times(self.hears_slowed), times(self.sends_slowed)),

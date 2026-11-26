@@ -138,6 +138,8 @@ pub struct Shape {
     pub real: bool,
     /// Which set of known symbols. See [`crate::dmt::Plan::coloured`].
     pub colour: u8,
+    /// Excess bandwidth of the root raised cosine.
+    pub rolloff: f64,
 }
 
 impl Shape {
@@ -148,7 +150,15 @@ impl Shape {
         if sps == 0 || (fs - sps as f64 * BAUD).abs() > 1.0 || !sps.is_multiple_of(3) {
             return None;
         }
-        Some(Self { fs, sps, carrier: if real { 0.0 } else { CARRIER }, real, colour: 0 })
+        Some(Self { fs, sps, carrier: if real { 0.0 } else { CARRIER }, real, colour: 0, rolloff: ROLLOFF })
+    }
+
+    /// V.ARC/QAM as it is built, at 48 kHz, with a carrier and an excess
+    /// bandwidth of somebody's choosing: for a modulation that is run at a
+    /// rate of its own and fitted to a line by [`crate::fit`]. `carrier`
+    /// is in hertz at 48 kHz, where the baud is 16 000.
+    pub fn fitted(carrier: f64, rolloff: f64) -> Self {
+        Self { fs: 48_000.0, sps: 3, carrier, real: false, colour: 0, rolloff }
     }
 
     /// V.ARC/QAM at this sample rate, which has to be a multiple of 48 kHz.
@@ -251,7 +261,7 @@ impl Shape {
 
     /// The shaping filter, unit power out for unit-power symbols in.
     fn pulse(&self) -> Vec<f64> {
-        let mut taps = rrc_taps(self.sps as f64, ROLLOFF, 2 * HALF_SPAN);
+        let mut taps = rrc_taps(self.sps as f64, self.rolloff, 2 * HALF_SPAN);
         taps.truncate(2 * HALF_SPAN * self.sps);
         // The window takes a little off the pulse's claim to cross nought
         // at every other symbol. The equaliser is there for that.
