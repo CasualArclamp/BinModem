@@ -204,15 +204,15 @@ impl Modulation {
             6 => &[300],
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
-            8..=13 => &[0],
+            8..=10 => &[0],
             // Bell 212A, and the Bell 103 it carries for a far end that is
             // one: a ceiling of 300 asks for the 103 outright.
-            14 => &[300, 1200],
-            15 => &[1200],
+            11 => &[300, 1200],
+            12 => &[1200],
             // HST's forward channel: V.17's four trellis rates, 2400 baud.
-            16 => &[7200, 9600, 12_000, 14_400],
+            13 => &[7200, 9600, 12_000, 14_400],
             // The 1986 HST: 9600 and nothing else.
-            17 => &[9600],
+            14 => &[9600],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -282,7 +282,7 @@ fn follow(
     if seen == Some(now) {
         return None;
     }
-    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier)?;
+    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier.trim_end_matches("2W"))?;
     let modulation =
         Modulation { automode: now.automode, min_rate: now.min_rate, max_rate: now.max_rate };
     (index != carrier || modulation != held).then_some((index, modulation))
@@ -973,7 +973,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 18] = [
+    const CARRIERS: [(&'static str, &'static str); 15] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -993,19 +993,10 @@ impl ScopeApp {
         ),
         (
             "VARC",
-            "V.ARC - our own, for a sound card wired to another of these by a stereo lead, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures",
+            "V.ARC - our own, for a sound card wired to another of these, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures. On one pair of wires each end takes its own echo out; the call finds that out for itself",
         ),
         ("VARCQ", "V.ARC/QAM - the same line with one carrier, at a third of the sample rate in baud"),
         ("VARCP", "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud"),
-        (
-            "VARC2W",
-            "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
-        ),
-        (
-            "VARCQ2W",
-            "V.ARC/QAM two-wire - one carrier on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
-        ),
-        ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
         (
             "B212",
             "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",
@@ -3267,15 +3258,15 @@ impl ScopeApp {
                         ui.label("");
                         ui.add_enabled_ui(self.v8bis, |ui| {
                             ui.horizontal(|ui| {
-                                const OFFERS: [(u8, bool, &str); 7] = [
+                                const OFFERS: [(u8, bool, &str); 4] = [
                                     (0, false, "do not list V.ARC"),
                                     (1, false, "list V.ARC"),
                                     (2, false, "list V.ARC/QAM"),
                                     (3, false, "list V.ARC/PCM"),
-                                    (1, true, "list V.ARC two-wire"),
-                                    (2, true, "list V.ARC/QAM two-wire"),
-                                    (3, true, "list V.ARC/PCM two-wire"),
                                 ];
+                                // A setting saved when one pair of wires was
+                                // a choice is the same mode now.
+                                self.varc_bis.1 = false;
                                 let name = OFFERS.iter().find(|o| (o.0, o.1) == self.varc_bis).map_or(OFFERS[0].2, |o| o.2);
                                 egui::ComboBox::from_id_salt("varc-bis")
                                     .width(190.0)
@@ -4971,27 +4962,24 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 18] = [
+    const MODES: [(usize, &'static str); 15] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
         (3, "V.32bis"),
         (2, "V.32"),
         (1, "V.22bis"),
-        (14, "Bell 212A"),
-        (15, "Bell 202"),
+        (11, "Bell 212A"),
+        (12, "Bell 202"),
         (6, "V.21"),
         (0, "Bell 103"),
         // Not a Recommendation's, and only for another of its kind.
-        (16, "HST"),
-        (17, "HST 9600"),
+        (13, "HST"),
+        (14, "HST 9600"),
         // Not slower than the rest: not for the same kind of line at all.
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
         (10, "V.ARC/PCM"),
-        (11, "V.ARC two-wire"),
-        (12, "V.ARC/QAM two-wire"),
-        (13, "V.ARC/PCM two-wire"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -6154,7 +6142,7 @@ fn from_remembered(
     let mut m = Modulation::default();
     let mut p = Protection::default();
     if let Some(name) = r.text("carrier")
-        && let Some(i) = ScopeApp::CARRIERS.iter().position(|c| c.0 == name)
+        && let Some(i) = ScopeApp::CARRIERS.iter().position(|c| c.0 == name.trim_end_matches("2W"))
     {
         carrier = i;
     }
@@ -6851,28 +6839,28 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS[16].0, "HST");
-        assert_eq!(Modulation::rates(16), &[7200, 9600, 12_000, 14_400]);
+        assert_eq!(ScopeApp::CARRIERS[13].0, "HST");
+        assert_eq!(Modulation::rates(13), &[7200, 9600, 12_000, 14_400]);
         assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
         assert_eq!(Modulation::rates(6), &[300]);
         // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W"), (12, "VARCQ2W"), (13, "VARCP2W")] {
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP")] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
             let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS[14].0, "B212");
-        assert_eq!(Modulation::rates(14), &[300, 1200]);
-        assert_eq!(ScopeApp::CARRIERS[15].0, "B202");
-        assert_eq!(Modulation::rates(15), &[1200]);
-        assert_eq!(ScopeApp::CARRIERS.len(), 18);
-        assert_eq!(ScopeApp::CARRIERS[17].0, "HST96");
-        assert_eq!(Modulation::rates(17), &[9600]);
+        assert_eq!(ScopeApp::CARRIERS[11].0, "B212");
+        assert_eq!(Modulation::rates(11), &[300, 1200]);
+        assert_eq!(ScopeApp::CARRIERS[12].0, "B202");
+        assert_eq!(Modulation::rates(12), &[1200]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 15);
+        assert_eq!(ScopeApp::CARRIERS[14].0, "HST96");
+        assert_eq!(Modulation::rates(14), &[9600]);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

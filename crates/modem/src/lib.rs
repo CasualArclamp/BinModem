@@ -1495,10 +1495,12 @@ impl Modem {
                 VarcMode::Pcm => 2,
                 _ => 0,
             };
-            return Some(v8::bis::varc::Offer { modulation, two_wire: named.ends_with("2W") });
+            return Some(v8::bis::varc::Offer { modulation, two_wire: false });
         }
-        let (mode, two_wire) = self.at.config.varc_bis;
-        (mode != 0).then(|| v8::bis::varc::Offer { modulation: mode - 1, two_wire })
+        // The second number said one pair of wires. Every call looks for an
+        // echo now, so it is taken and not used.
+        let (mode, _) = self.at.config.varc_bis;
+        (mode != 0).then(|| v8::bis::varc::Offer { modulation: mode - 1, two_wire: false })
     }
 
     /// Whether a call starts with a negotiation: automode, and always for a
@@ -2477,9 +2479,10 @@ impl Modem {
         self.varc.as_ref().and_then(varc::Call::far_end)
     }
 
-    /// On a two-wire V.ARC call (`+MS=VARC2W`): how far down each channel's
-    /// canceller has taken this end's own echo, in decibels, and how far
-    /// round the line it found it, in samples. Empty on any other call.
+    /// On a V.ARC call that hears its own echo: how far down each channel's
+    /// canceller has taken it, in decibels, and how far round the line it
+    /// found it, in samples. Empty on any other call, and once this end has
+    /// had the line to itself and heard no echo.
     pub fn varc_echo(&self) -> Vec<(f64, Option<usize>)> {
         self.varc.as_ref().map_or_else(Vec::new, varc::Call::echo)
     }
@@ -3590,7 +3593,6 @@ impl Modem {
             self.varc_bits = 0;
             self.state = State::Handshaking;
             let mut call = varc::Call::new(mode, role, looped);
-            call.two_wire(self.at.modulation.carrier.ends_with("2W"));
             let (baud, code, bits) = self.at.config.varc;
             call.ask_for(baud, code, bits);
             call.compress(self.varc_compressors());
@@ -3937,11 +3939,7 @@ impl Modem {
             2 => VarcMode::Pcm,
             _ => VarcMode::Dmt,
         };
-        self.line_notes.push(format!(
-            "V.8: both ends have V.ARC; {}{} follows, from its own handshake",
-            mode.name(),
-            if offer.two_wire { " on one pair of wires" } else { "" }
-        ));
+        self.line_notes.push(format!("V.8: both ends have V.ARC; {} follows, from its own handshake", mode.name()));
         self.since_dial_ms = 0;
         self.rate = 0;
         self.transmit_rate = 0;
@@ -3960,7 +3958,6 @@ impl Modem {
         self.varc_bits = 0;
         self.state = State::Handshaking;
         let mut call = varc::Call::new(mode, self.role, false);
-        call.two_wire(offer.two_wire);
         let (baud, code, bits) = self.at.config.varc;
         call.ask_for(baud, code, bits);
         call.compress(self.varc_compressors());

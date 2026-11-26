@@ -57,11 +57,12 @@ Results and behaviour:
   the speed of the modulation by halves until that end can hear. Codes from
   0.93 down to 0.25 are for lines with little margin. One direction went out
   of a loudspeaker and into a microphone: 20 kbit/s.
-- `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
-  canceller. Each end first learns its echo while it has the line to itself.
+- Each mode runs on one pair of wires also, with an echo canceller. Each
+  end first has the line to itself and looks for its echo. An end that
+  hears no echo uses no canceller, thus there is no two-wire mode to select.
   Two ends that share a virtual cable connect at 327 kbit/s and pass 75 dB.
 
-V.ARC works between two machines. The two-wire mode has never met a real
+V.ARC works between two machines. The echo canceller has never met a real
 two-wire line, and no mode has run through a telephone network. See
 [docs/design/v-arc.md](../design/v-arc.md).
 

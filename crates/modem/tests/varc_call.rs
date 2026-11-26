@@ -166,7 +166,9 @@ fn a_call_is_placed_answered_used_and_put_down() {
                 "V.8: both ends have V.ARC",
                 "V.ARC: calling the far end",
                 "V.ARC: agreeing with the far end",
-                "V.ARC: agreed on a wire each way",
+                "V.ARC: agreed on 48000 Hz out and 48000 Hz back",
+                // Each end had the line to itself and heard nothing back.
+                "V.ARC: no echo of this end on the line",
                 "V.ARC: loaded",
                 "V.ARC/DMT: ",
             ],
@@ -500,12 +502,12 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
     for law in [Law::A, Law::Mu] {
         for (carrier, name, least) in [
             ("VARC", "V.ARC/G.711", 48_000),
-            ("VARC2W", "V.ARC/G.711", 48_000),
             // Fitted to the call, 3700 baud where a third of the call's
             // rate is 2667, and on the trellis code: more than a V.34
             // carries at its best.
             ("VARCQ", "V.ARC/QAM", 35_000),
             ("VARCP", "V.ARC/PCM", 12_000),
+            // A name from when one pair of wires was a choice.
             ("VARCQ2W", "V.ARC/QAM", 35_000),
         ] {
             let what = format!("{carrier} in {law:?}");
@@ -516,14 +518,13 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
             assert!(call.told.contains("CONNECT ") && call.told.contains("/VARC"), "{what}: {}", call.told);
             for who in ["caller", "host"] {
                 let own: Vec<String> = call.notes.iter().filter(|note| note.starts_with(who)).cloned().collect();
-                in_order(&own, &["V.8: both ends have V.ARC", "V.ARC: agreeing with the far end", "V.ARC: agreed on a wire each way", "V.ARC: loaded"]);
+                in_order(&own, &["V.8: both ends have V.ARC", "V.ARC: agreeing with the far end", "V.ARC: agreed on 8000 Hz out and 8000 Hz back", "V.ARC: loaded"]);
             }
             let rate = call.caller.rate().unwrap_or(0);
             assert!(rate >= least, "{what}: {rate} bit/s");
-            if carrier.ends_with("2W") {
-                assert!(call.all_notes().contains("a SIP call has a path each way"), "{what}:\n{}", call.all_notes());
-                assert!(call.caller.varc_echo().is_empty(), "{what}: no canceller on a call of packets");
-            }
+            // A call of packets has a path each way: no echo is looked for.
+            assert!(!call.all_notes().contains("echo"), "{what}:\n{}", call.all_notes());
+            assert!(call.caller.varc_echo().is_empty(), "{what}: no canceller on a call of packets");
             let sent = page(6000);
             let got = call.send(&sent, 12.0);
             assert!(got == sent, "{what}: {} of {} octets, at {rate} bit/s", got.len(), sent.len());
@@ -666,7 +667,7 @@ fn on_a_call_of_exact_samples_the_samples_are_the_data() {
     assert_eq!(call.caller.standard(), "V.ARC/L16");
     assert_eq!(call.host.varc_wanted(), Some(VarcMode::Linear));
     assert!(call.told.contains("CONNECT 200434/VARC"), "{}", call.told);
-    in_order(&call.notes, &["V.8: both ends have V.ARC", "V.ARC: agreed on a wire each way"]);
+    in_order(&call.notes, &["V.8: both ends have V.ARC", "V.ARC: agreed on 16000 Hz out and 16000 Hz back"]);
     let got = call.send(b"samples that are the data", 2.0);
     assert_eq!(said(&got), "samples that are the data");
 
@@ -840,7 +841,7 @@ fn two_devices_at_two_rates_are_a_line_each_way() {
 /// whatever the line is.
 #[test]
 fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
-    let (mut caller, mut host) = dialled("AT+MS=VARC2W", "AT+MS=VARC2W");
+    let (mut caller, mut host) = dialled("AT+MS=VARC", "AT+MS=VARC");
     through_v8(&mut caller, &mut host);
     assert_eq!(caller.standard(), "V.ARC/DMT");
     // What each end's own signal comes back as, and how long after.
@@ -890,25 +891,6 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     let told = caller.take_line_notes().join("\n") + &host.take_line_notes().join("\n");
     assert_eq!(told.matches("learned with the line to itself").count(), 2, "{told}");
     eprintln!("two-wire: {rate} bit/s, echo {:.1} dB down", echo[0].0);
-}
-
-/// Without the canceller the same line carries nothing: each end hears
-/// itself louder than the other.
-#[test]
-fn the_same_pair_without_a_canceller_never_connects() {
-    let (mut caller, mut host) = dialled("AT+MS=VARC", "AT+MS=VARC");
-    through_v8(&mut caller, &mut host);
-    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
-    let mut line = std::collections::VecDeque::from(vec![(0.0, 0.0); 1500]);
-    for _ in 0..(12.0 * FS) as usize {
-        let (own_caller, own_host) = line[1499];
-        caller.varc_step(FS, &[0.5 * from_host[0] + own_caller], &mut from_caller);
-        host.varc_step(FS, &[0.5 * from_caller[0] + own_host], &mut from_host);
-        line.pop_back();
-        line.push_front((from_caller[0], from_host[0]));
-    }
-    assert_ne!(caller.state(), State::Data);
-    assert!(caller.varc_echo().is_empty());
 }
 
 /// Two ends on a line each way, each with its own rates hearing and
@@ -964,20 +946,21 @@ fn across(
 }
 
 /// The rig that the handshake was written for: each end hears on one sound
-/// device and sends on another at a different rate, and both were told the
-/// line was two-wire, which on two devices cannot be run. They used to hear
-/// nothing and say NO CARRIER.
+/// device and sends on another at a different rate. Two devices cannot
+/// cancel an echo, so no echo is looked for. They used to hear nothing and
+/// say NO CARRIER.
 #[test]
-fn ends_that_were_told_two_wire_and_cannot_be_run_a_wire_each_way() {
-    let (caller, host, told, got, notes) = across("VARC2W", (48_000.0, 192_000.0), (192_000.0, 48_000.0), 16.0);
+fn ends_on_two_sound_cards_each_look_for_no_echo() {
+    let (caller, host, told, got, notes) = across("VARC", (48_000.0, 192_000.0), (192_000.0, 48_000.0), 16.0);
     assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
     assert_eq!(host.state(), State::Data);
     assert_eq!(got, "said, then agreed, then sent");
     assert!(caller.varc_echo().is_empty(), "no canceller on a wire each way");
     let all = notes.join("\n");
     assert!(all.contains("the far end hears at 192000 Hz and sends at 48000 Hz"), "{all}");
-    assert!(all.contains("two-wire was asked for"), "{all}");
-    assert!(all.contains("agreed on a wire each way, 192000 Hz out and 48000 Hz back"), "{all}");
+    assert!(all.contains("cannot cancel an echo"), "{all}");
+    assert!(all.contains("agreed on 192000 Hz out and 48000 Hz back"), "{all}");
+    assert!(!all.contains("looks for its own echo"), "{all}");
 }
 
 /// A card at 192 kHz calling one at 48 kHz. The modulation runs at 48 kHz
@@ -989,7 +972,7 @@ fn a_fast_card_and_a_slow_card_run_at_the_slow_cards_rate() {
     assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
     assert_eq!(got, "said, then agreed, then sent");
     let all = notes.join("\n");
-    assert!(all.contains("agreed on a wire each way, 48000 Hz out and 48000 Hz back"), "{all}");
+    assert!(all.contains("agreed on 48000 Hz out and 48000 Hz back"), "{all}");
     assert!(all.contains("the ends' sound cards differ"), "{all}");
     // What a 48 kHz line carries, each way.
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
@@ -1051,7 +1034,7 @@ fn an_end_that_cannot_hear_asks_for_it_slower_and_gets_it() {
     let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
     let (mut caller_notes, mut host_notes) = (Vec::new(), Vec::new());
     let mut typed = false;
-    for _ in 0..(70.0 * FS) as usize {
+    for _ in 0..(95.0 * FS) as usize {
         // The caller hears the host through the dull path; the host hears
         // the caller as it was sent.
         let to_caller = [dull.pass(from_host[0])];
@@ -1081,7 +1064,10 @@ fn an_end_that_cannot_hear_asks_for_it_slower_and_gets_it() {
     assert!(heard.contains("the far end cannot hear this end; sending 4 times slower"), "{heard}");
     // And the rates say so: a quarter of the baud one way.
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
-    assert!(down > 10_000 && down < 100_000 && up > 150_000, "{down} down the dull way, {up} up the cable");
+    assert!(down > 10_000 && down < 100_000 && up > 150_000, "{down} down the dull way, {up} up the cable
+{told}
+--
+{heard}");
 }
 
 /// The baud, the code and the bits a symbol, chosen by hand at one end for
