@@ -94,19 +94,46 @@ jobs:
             "wlanapi.dll"
           )
 
+          $blockedFunctions = @(
+            "SHGetKnownFolderPath",
+            "GetSystemTimePreciseAsFileTime",
+            "InitializeConditionVariable",
+            "SleepConditionVariableCS",
+            "WakeAllConditionVariable",
+            "WakeConditionVariable",
+            "AcquireSRWLockExclusive",
+            "AcquireSRWLockShared",
+            "ReleaseSRWLockExclusive",
+            "ReleaseSRWLockShared",
+            "TryAcquireSRWLockExclusive",
+            "TryAcquireSRWLockShared",
+            "InitOnceExecuteOnce"
+          )
+          $funcPattern = ($blockedFunctions | ForEach-Object { [regex]::Escape($_) }) -join "|"
+
           foreach ($name in "binmodem", "dialsnoop") {
             $exe = "target/i686-pc-windows-msvc/release/$name.exe"
             Write-Host "=== Imports for $name.exe ==="
             $imports = & $dumpbin.FullName /imports $exe
             $imports | Write-Host
 
-            $foundBlocked = $imports |
+            $foundBlockedDlls = $imports |
               ForEach-Object { if ($_ -match "^\s+([A-Za-z0-9_\-\.]+\.dll)\s*$") { $matches[1].ToLower() } } |
               Where-Object { $blockedDlls -contains $_ -or $_ -like "api-ms-win-*" } |
               Sort-Object -Unique
 
-            if ($foundBlocked) {
-              Write-Host "::error::$name.exe has non-XP or API-set DLL imports: $($foundBlocked -join ', ')"
+            $foundBlockedFuncs = $imports |
+              Select-String -Pattern $funcPattern |
+              ForEach-Object { $_.Line.Trim() } |
+              Sort-Object -Unique
+
+            if ($foundBlockedDlls) {
+              Write-Host "::error::$name.exe has non-XP or API-set DLL imports: $($foundBlockedDlls -join ', ')"
+              exit 1
+            }
+
+            if ($foundBlockedFuncs) {
+              Write-Host "::error::$name.exe has blocked post-XP function imports:`n$($foundBlockedFuncs -join "`n")"
               exit 1
             }
           }
