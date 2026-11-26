@@ -908,6 +908,22 @@ impl Modem {
         self.settings
     }
 
+    /// Whether this end is sending the TRN of phase 3.
+    ///
+    /// That is the one stretch of the start-up in which the far end is
+    /// silent and this end sends a signal with no pattern in it (11.3.1.1,
+    /// 11.3.1.2): the answer modem sends its TRN before the call modem has
+    /// sent anything, and stops its J when it hears the call modem's S. An
+    /// echo canceller trains here and nowhere else.
+    pub fn training_echo(&self) -> bool {
+        matches!(self.stage, Stage::AnswerSendTraining | Stage::CallSendTraining) && self.source.segment == Segment::Trn
+    }
+
+    /// How long this end sends the TRN of phase 3 for, in seconds.
+    pub fn training_echo_seconds(&self) -> f64 {
+        self.trn_symbols as f64 / self.settings.transmit.baud()
+    }
+
     pub fn status(&self) -> Status {
         self.status
     }
