@@ -363,6 +363,7 @@ fn a_full_start_up_asks_for_a_dil_and_a_quick_connect_does_not() {
     let mut pair = v92_pair();
     let (notes, first) = noted_connect(&mut pair, "first call");
     assert_eq!(pair.caller.quick_connected(), None, "{notes}");
+    assert!(!notes.contains("quick connect: QC1a"), "nothing was asked: {notes}");
     assert!(notes.contains("caller: V.92: PCM upstream (Table 18)") && notes.contains("asking for a DIL"), "{notes}");
     assert!(notes.contains("caller: Jp' read, DIL of 3528 symbols"), "{notes}");
     assert!(notes.contains("caller: the DIL chose"), "{notes}");
@@ -373,6 +374,8 @@ fn a_full_start_up_asks_for_a_dil_and_a_quick_connect_does_not() {
     pair.caller.set_quick_memo(Some(memo));
     let (notes, second) = noted_connect(&mut pair, "second call");
     assert_eq!(pair.caller.quick_connected(), Some(true), "{notes}");
+    assert!(notes.contains("caller: V.92 quick connect: QC1a sent, QCA1d heard"), "{notes}");
+    assert!(notes.contains("host: V.92 quick connect: QC1a heard, QCA1d sent"), "{notes}");
     assert!(notes.contains("no DIL after a quick connect"), "{notes}");
     assert!(notes.contains("caller: Jp' read, DIL of 0 symbols"), "{notes}");
     assert!(!notes.contains("the DIL chose"), "{notes}");
@@ -387,7 +390,8 @@ fn a_quick_connect_nobody_answers_is_a_full_start_up() {
     let mut pair = v92_pair();
     pair.caller.set_quick_connect(modem::QuickConnect::Always);
     pair.host.set_quick_connect(modem::QuickConnect::Off);
-    timed_connect(&mut pair, "QC1a to a modem that does not answer it");
+    let (notes, _) = noted_connect(&mut pair, "QC1a to a modem that does not answer it");
+    assert!(notes.contains("caller: V.92 quick connect: QC1a sent; the far end answered with JM"), "{notes}");
     assert_eq!(pair.caller.quick_connected(), None);
     assert_eq!(pair.host.quick_connected(), None);
     carries_text(&mut pair, "after a QC1a nobody answered", "");

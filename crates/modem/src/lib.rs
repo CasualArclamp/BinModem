@@ -4057,6 +4057,11 @@ impl Modem {
                 }
             }
             v8line::Status::Agreed(modulation) => {
+                // A QC1a went out ahead of the CM and a JM came back: the far
+                // end read the CM and left the short start-up alone.
+                if negotiation.quick_declined() {
+                    self.line_notes.push("V.92 quick connect: QC1a sent; the far end answered with JM, so a full start-up".to_owned());
+                }
                 if VarcMode::from_carrier(&self.at.modulation.carrier).is_some() {
                     self.line_notes.push(format!(
                         "V.8: the far end has no V.ARC; an ordinary call instead, on {}",
@@ -4084,6 +4089,13 @@ impl Modem {
             // V.92's short Phase 1 in V.8's place (9.2/V.92): no menus, and
             // the pair is a V.92 one by what the two sequences said.
             v8line::Status::Quick(quick) => {
+                self.line_notes.push(
+                    match quick.role {
+                        PcmRole::Analogue => "V.92 quick connect: QC1a sent, QCA1d heard; short Phase 1",
+                        PcmRole::Digital => "V.92 quick connect: QC1a heard, QCA1d sent; short Phase 1",
+                    }
+                    .to_owned(),
+                );
                 self.declared_lapm = quick.lapm;
                 self.quick = Some(quick);
                 self.pcm_role = Some(quick.role);
