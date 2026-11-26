@@ -11,6 +11,36 @@ dialsnoop.exe                 the same reader, as a program of its own
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.6.0
+
+### V.ARC: a negotiation on every call, and every mode on every SIP coding
+
+**The start of a call.** A V.ARC call no longer starts its own signal immediately. The sequence is now:
+
+1. **V.8:** ANSam, CM, JM and CJ. A modem that is set to V.ARC puts a V.ARC block in the non-standard facilities category of its menu.
+2. **The V.ARC handshake:** the 200 bit/s tones. Each end now also says what its line is: a sound card, linear samples, A-law or mu-law.
+3. **The mode.**
+
+- The sequence is the same on a sound card, on EasySip and on a SIP account. `ATDLOOP` is the one exception, because it has no far end.
+- A far end with no V.ARC gets the ordinary mode that V.8 agreed, for example V.34 or V.32bis.
+- With `AT+A8E=,,,1`, V.8 bis lists V.ARC, and V.8 follows the ACK.
+
+**Any coding.** Every V.ARC mode now runs on PCMU, PCMA and linear PCM.
+
+| Line | `VARC` | `VARCQ`, `VARCP` |
+|---|---|---|
+| Sound card | multicarrier | QAM, baseband levels |
+| SIP, the same coding at both ends | the samples or the codewords are the data | QAM or levels at the rate of the call |
+| SIP, different codings at the two ends | multicarrier at the rate of the call | QAM or levels at the rate of the call |
+
+- A direct mode that fails continues as the multicarrier modulation. The handshake does not run again.
+- A two-wire mode on a SIP call runs with one path in each direction, and the transcript says so.
+- Between two `modem-sip` on one machine: PCMU or PCMA with `VARC` gave `CONNECT 48640/VARC`, PCMU with `VARCQ` gave `CONNECT 23250/VARC`, and PCMA with `VARCP` gave `CONNECT 22500/VARC`.
+
+**Not compatible with earlier builds.** A build before 5.6.0 sends no V.8 on a `+MS=VARC` call, so it cannot make a V.ARC call with this build. Use 5.6.0 at both ends.
+
+**Not tried:** no V.ARC mode has run through a PBX, a gateway or a telephone line.
+
 ## What's new in 5.5.2
 
 ### V.34 phase 2: a tone that stops is not a phase reversal
