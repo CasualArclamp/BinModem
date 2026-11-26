@@ -19,3 +19,4 @@ pub mod rs;
 pub mod sc;
 pub mod squeeze;
 pub mod station;
+pub mod trellis;

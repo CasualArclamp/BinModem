@@ -501,11 +501,12 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
         for (carrier, name, least) in [
             ("VARC", "V.ARC/G.711", 48_000),
             ("VARC2W", "V.ARC/G.711", 48_000),
-            // Fitted to the call: 3700 baud where a third of the call's
-            // rate is 2667.
-            ("VARCQ", "V.ARC/QAM", 30_000),
+            // Fitted to the call, 3700 baud where a third of the call's
+            // rate is 2667, and on the trellis code: more than a V.34
+            // carries at its best.
+            ("VARCQ", "V.ARC/QAM", 35_000),
             ("VARCP", "V.ARC/PCM", 12_000),
-            ("VARCQ2W", "V.ARC/QAM", 30_000),
+            ("VARCQ2W", "V.ARC/QAM", 35_000),
         ] {
             let what = format!("{carrier} in {law:?}");
             let mut call = Sip::clean(Coding::G711(law), carrier);
@@ -586,7 +587,32 @@ fn a_single_carrier_is_fitted_to_the_band_the_call_passes() {
     assert_eq!(call.caller.varc_bauds(), (3700, 3700));
     assert_eq!(call.host.varc_bauds(), (3700, 3700));
     let wide = call.caller.rate().unwrap_or(0);
-    assert!(wide > 31_000, "{wide} bit/s");
+    assert!(wide > 35_000, "{wide} bit/s");
+    // And it is a rate the call keeps: a quarter of a megabyte crosses
+    // whole, at nine-tenths of that rate or better, with the tables left
+    // as they were first made.
+    let before = call.notes.len();
+    // Octets with no pattern to them, or the call's compression would
+    // carry them in a fraction of the time.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let sent: Vec<u8> = (0..250_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    let started = call.seconds;
+    let got = call.send(&sent, 80.0);
+    assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+    let carried = 8.0 * sent.len() as f64 / (call.seconds - started);
+    eprintln!("V.ARC/QAM through mu-law: {wide} bit/s on the line, {carried:.0} bit/s carried");
+    assert!(carried > 0.9 * f64::from(wide), "{carried:.0} bit/s carried at {wide}
+{}", call.notes[before..].join("
+"));
+    assert!(!call.notes[before..].iter().any(|note| note.contains("exchanging tables")), "{}", call.notes[before..].join("
+"));
 
     let mut call = Sip::clean(Coding::G711(Law::Mu), "VARCQ");
     let band = || (Dull::new(8_000.0, 3_400.0), Dull::new(8_000.0, 300.0));

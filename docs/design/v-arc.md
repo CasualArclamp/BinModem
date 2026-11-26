@@ -128,13 +128,15 @@ thus its band is the band of the call:
 |---|---|---|
 | V.ARC/G.711 | 8000 codewords each second | 60 928 bit/s in A-law, 56 832 in mu-law, after the first tables |
 | V.ARC/DMT | carriers 15.6 Hz apart, to 3.4 kHz | 25 700 to 26 100 bit/s |
-| V.ARC/QAM | 2666 baud on a carrier at 1750 Hz, 250 Hz to 3250 Hz | 23 250 bit/s |
+| V.ARC/QAM | 3700 baud on a carrier at 2000 Hz, 58 Hz to 3942 Hz, with the trellis code | 37 000 bit/s |
 | V.ARC/PCM | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
 
 - The modulations do not need exact codewords. A call that a gateway
   decodes and codes again carries them at the same rates.
 - With a 300 Hz high-pass filter in the path, V.ARC/PCM connected at
-  9000 bit/s and V.ARC/QAM at 23 250 bit/s.
+  9000 bit/s.
+- V.ARC/QAM fits its baud to the band that the call passes. See
+  [V.ARC/QAM on a narrow line](#varcqam-on-a-narrow-line).
 - `AT+VARC=<baud>,<code>,<bits>` applies on a SIP call also. The baud is
   the nearest one that the rate of the call permits.
 
@@ -350,6 +352,151 @@ simulation `AT+VARC=8000,50,4` at one end of a 48 kHz line gives that end
 8000 baud, sixteen points and a code of a half, 15 kbit/s, with the other
 way left at 16 000 baud and whatever it will bear.
 
+## V.ARC/QAM on a narrow line
+
+A V.34 modem carries 33 600 bit/s at its best. On a G.711 call, V.ARC/QAM
+carried 23 250 bit/s. It now carries 37 000 bit/s on the same call. Three
+changes give that, and each one is for a line of 16 kHz or less. A sound
+card is not changed.
+
+| Step | Baud | Bits in a symbol | Rate through mu-law |
+|---|---|---|---|
+| Before | 2667 | 9 | 23 250 bit/s |
+| The baud fitted to the call | 3700 | 9 | 31 797 bit/s |
+| The trellis code and the shell mapper | 3700 | 10.375 | 37 000 bit/s |
+
+Two `modem-sip` ends on one machine give `CONNECT 37000/VARC` in PCMU and
+in PCMA. In simulation, 250 000 random octets crossed a mu-law call with no
+incorrect octet at 34 626 bit/s of data. The difference from 37 000 is the
+frame overhead and the blocks that were sent again.
+
+### The baud
+
+V.ARC/QAM is built for three samples in each symbol (`sc.rs`). Run sample
+for sample at 8 kHz, that is 2667 baud between 150 Hz and 3350 Hz. A G.711
+call between two BinModems has no filter in it and passes almost all of its
+4 kHz.
+
+- The modulation now runs at a rate of its own: three times the baud that
+  is selected. A resampler brings it to the rate of the line and back
+  (`fit.rs`). The modulation itself is not changed.
+- The resampler is a windowed sinc with 72 samples on each side. The band
+  goes to 98% of half the sample rate, and a short resampler is not
+  accurate there.
+- `Shape::fitted` gives the modulation a carrier and an excess bandwidth
+  that put its band where the line is.
+
+There are three fits, as shares of the sample rate (`hello::FITS`):
+
+| Fit | Baud at 8 kHz | Carrier | Excess bandwidth | Band | Through mu-law, no trellis code |
+|---|---|---|---|---|---|
+| 1 | 3700 | 2000 Hz | 5% | 58 Hz to 3942 Hz | 31 797 bit/s at 37.6 dB |
+| 2 | 3429 | 2000 Hz | 10% | 114 Hz to 3886 Hz | 29 468 bit/s at 38.0 dB |
+| 3 | 3000 | 1900 Hz | 20% | 100 Hz to 3700 Hz | 26 062 bit/s at 38.5 dB |
+| none | 2667 | 1750 Hz | 20% | 150 Hz to 3350 Hz | 23 250 bit/s at 39.0 dB |
+
+### The line probe
+
+A line that passes 300 Hz to 3400 Hz cannot carry 3700 baud. Thus each end
+must know the band before it selects a fit. The V.ARC handshake measures
+it, as the line probe of V.34 does (10.1.2.3), but smaller.
+
+- On a line of 16 kHz or less, each end sends seven weak steady tones below
+  its handshake tones. At 8 kHz they are 600 Hz and 2800 Hz in the middle of
+  the band, 100 Hz and 200 Hz at the bottom, and 3600 Hz, 3800 Hz and
+  3900 Hz at the top.
+- The two middle tones are two bit rates from the nearest handshake tone.
+  The handshake receiver hears nothing there.
+- Each end measures the tones of the other end in blocks of 0.1 s. It
+  waits for three blocks in which the middle tones are present and stable.
+- An edge tone passes if it is not more than 6 dB below the middle tones.
+
+| Tones that pass | Fit |
+|---|---|
+| 100 Hz and 3900 Hz | 1 |
+| 200 Hz and 3800 Hz | 2 |
+| 200 Hz and 3600 Hz | 3 |
+| less than that | none: the carrier as it is built |
+
+- An end sends no handshake message until it has measured. Until then it
+  sends the idle tone and its probe. The message then says which fit this
+  end can hear.
+- If the message of the far end arrives and no probe was measured, the far
+  end has no probe. The end then says "none" and continues.
+- If an end hears nothing of the modulation at one fit, it asks for the
+  next fit, then for the carrier as it is built, then for halves of that.
+  This is the procedure of
+  [When one end cannot hear the other](#when-one-end-cannot-hear-the-other).
+- `AT+VARC=<baud>` selects the nearest baud of all of these.
+
+In simulation, a line that passes 300 Hz to 3400 Hz gets no fit and
+2667 baud. A line that stops at 3850 Hz gets fit 2. A line that stops at
+3700 Hz gets fit 3.
+
+### The trellis code
+
+A grid with no code needs approximately 11 dB between its points and the
+noise. `trellis.rs` has a trellis code, as V.34 has, in its simplest form.
+
+- The grid has two times the points that the data needs. It is divided
+  into eight subsets (Ungerboeck, 1982). Points in one subset are 9 dB
+  farther apart than adjacent points.
+- A convolutional code of rate 2/3 selects the subset of each symbol. It
+  has 64 states. Thus only some sequences of subsets are sent.
+- The receiver uses the Viterbi algorithm. It finds the permitted sequence
+  that is nearest to what arrived.
+- The code is not the code of V.34. The V.34 code has four dimensions and
+  is not changed by a quarter turn. V.ARC has a sync word that gives the
+  direction, thus a code of two dimensions is sufficient.
+- A computer search of all codes of this size selected the polynomials
+  (`0o105`, `0o032`, `0o060`). The squared free distance is 7, where
+  adjacent points are 1 apart. A grid with half the points and no code has
+  2. That is 5.4 dB.
+- Each block is coded as one unit. The code starts at state zero, and the
+  last four symbols of the block steer it back to state zero. Those four
+  symbols give up 8 bits.
+
+### The shell mapper
+
+The shell mapper is that of V.34 (9.4).
+
+- The points of each subset are put in rings by their energy.
+- A frame is eight symbols. The number of a frame selects its eight rings.
+  The numbers go to the frames with the smallest total energy first.
+- Thus the outer rings are used less than the inner rings. This is the
+  shaping gain, almost 1 dB.
+- A frame can carry any whole number of bits. Thus a symbol carries its
+  bits in steps of an eighth of a bit.
+- The grid has 20% more rings than the bits need, so that the mapper has
+  frames to omit.
+
+Measured with white noise, for blocks of 248 symbols with no Reed-Solomon
+code: one block in a thousand is incorrect at 4 dB above the Shannon limit,
+and none in a thousand at 4.5 dB. That is the same at 5, 9, 10, 10.5 and
+11 bits in a symbol.
+
+### What the receiver asks for
+
+A table for the trellis code has two entries: the whole bits in a symbol,
+and the eighths of a bit. A receiver calculates the best table with the
+code and the best table with no code, and asks for the one that carries
+more.
+
+| Reed-Solomon code | Margin with no trellis code | Margin with the trellis code |
+|---|---|---|
+| none | 11.5 dB | 6.5 dB |
+| 2 check octets | 10 dB | 5.5 dB |
+| 16 check octets | 8 dB | 5 dB |
+
+- The noise is measured against what the code decided, one block at a
+  time. One point in thirty is nearer to an adjacent point than to its own,
+  thus the distance to the nearest point is not a good measure.
+- The equaliser and the carrier loop use the nearest point, as before.
+- A grid that is set by hand (`AT+VARC=,,<bits>`) is a grid with no code.
+- V.ARC/PCM does not have the code.
+- On a very good line, a grid with no code carries more: the code stops at
+  12.5 bits in a symbol and a grid goes to 24.
+
 ## The handshake
 
 After V.8, each end says what it is (`hello.rs`). Two ends need
@@ -373,8 +520,9 @@ nothing for a minute and said `NO CARRIER`.
   clock to recover.
 - **One message of 16 octets, over and over**: the rates this end hears and
   sends at, how many channels, which modulation it was asked for, whether it
-  was told two-wire, what its line is made of, and whether it has the far
-  end's message yet; then a CRC.
+  was told two-wire, what its line is made of, which fit of a single carrier
+  its band passes, and whether it has the far end's message yet; then a
+  CRC.
 - When an end has the far end's message and has seen in it that the far end
   has its own, it sends once more and stops. About four seconds.
 
