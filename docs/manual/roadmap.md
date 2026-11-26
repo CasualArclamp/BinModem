@@ -4,14 +4,6 @@
 
 ## Work in progress
 
-### V.90 between two BinModems through softphones
-
-V.90 between two BinModems through softphones falls back to V.34. The
-codewords of the server are resampled on their way into its softphone and
-requantised. This leaves noise at approximately 1.7% of every codeword. The
-server of a real provider puts exact codewords on the network. That is why a
-real modem gets 56k on the same line.
-
 ### V.ARC
 
 V.ARC is our own wideband mode for a sound card, not for a telephone line.
@@ -49,8 +41,8 @@ Results and behaviour:
 - Between two SIP accounts that say `linear = yes`, the call carries
   sixteen-bit samples exactly. The samples are the data, at 200 kbit/s.
 
-V.ARC has never run between two machines. The two-wire mode has never met a
-real two-wire line. See [docs/design/v-arc.md](../design/v-arc.md).
+V.ARC works between two machines. The two-wire mode has never met a real
+two-wire line. See [docs/design/v-arc.md](../design/v-arc.md).
 
 ## Next
 
@@ -65,8 +57,7 @@ V.92 carries data between two BinModems. Set `AT+MS=V92` at both ends with
 `BINMODEM_V92_PCM_UP=1`. PCM then goes in both directions, 48 000 up and up to
 56 000 down, over a pair of virtual cables.
 
-V.92 has not carried a call with a real V.92 modem yet. The side that calls
-still needs a line with no echo and one clock.
+V.92 works with many real V.92 modems.
 
 #### Quick connect
 
