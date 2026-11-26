@@ -66,6 +66,7 @@ fn a_real_super_g3_call_menu_is_read_and_answered() {
             protocol: Protocol::Unstated,
             access: None,
             pcm: None,
+            varc: None,
         }
     );
     // Each menu is a sixth of a second, and two identical ones are wanted;

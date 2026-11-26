@@ -2366,6 +2366,7 @@ mod tests {
             protocol: v8::Protocol::Unstated,
             access: None,
             pcm: None,
+            varc: None,
         };
         for _ in 0..3 {
             let mut bits = vec![true; v8::PREAMBLE_ONES];

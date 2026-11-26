@@ -5,8 +5,12 @@ with anything: both ends have to be BinModem.
 
 Status: built and run on real sound devices, from the `varc-link` tool and
 from the modem itself (`AT+MS=VARC`, `ATD`, `CONNECT .../VARC`, the window's
-mode box), and over a SIP call between two of these on one machine. See
+mode box), and over a SIP call between two of these. See
 [What is not done](#what-is-not-done) for what has not been tried.
+
+Every V.ARC call starts with V.8, then the V.ARC handshake, then the mode.
+Every mode runs on every SIP coding, G.711 included. See
+[The start of a call](#the-start-of-a-call).
 
 Code: `crates/varc`. Line: `crates/line/src/wide.rs`. The call:
 `crates/modem/src/varc.rs`. Tool: `crates/modem/src/bin/varc-link.rs`.
@@ -25,6 +29,123 @@ Two ends, full duplex, each direction on its own wire. A stereo lead is two
 wires, used either as one each way (one machine, a loopback) or both the same
 way (two machines, a lead each way), in which case the two are bonded into
 one octet stream.
+
+## The start of a call
+
+A V.ARC call does not start with its own signal. It starts as each other
+call of this modem starts, because the far end can be any modem.
+
+| Step | What it is | What it decides |
+|---|---|---|
+| 1 | V.8: ANSam, CM, JM, CJ | Whether the two ends have V.ARC |
+| 2 | The V.ARC handshake: 200 bit/s, two tones for each direction | Rates, channels, wires, the modulation, and what the line is made of |
+| 3 | The mode | The tables, then data |
+
+This sequence is the same on a sound card, on an EasySip line and on a SIP
+account. A call with `AT+A8E=,,,1` has the V.8 bis transaction before step 1.
+The one exception is `ATDLOOP`. A lead that comes straight back has no far
+end, thus that call starts at step 3.
+
+### Step 1: V.ARC in V.8
+
+V.8 has a category for non-standard facilities (tag `1111`, Table 8). A
+modem that is set to V.ARC puts one block in that category of its menu:
+
+| Octets | Contents |
+|---|---|
+| `09` | the length: nine octets follow |
+| `FF FF` | the T.35 country code |
+| `04` `42 69 6E 4D` | the length of the provider code, and the code "BinM" |
+| `01` | the edition of this block |
+| flags | bits 1 and 2: multicarrier, QAM or baseband levels; bit 3: one pair of wires |
+
+- The block is the same block that V.8 bis carries. See
+  [V.8 bis](#v8-bis). The codes are not registered.
+- The block goes in extension octets, five bits in each octet, as Table 8
+  specifies. That is sixteen octets after the category octet.
+- The calling modem puts the block in its CM. The answering modem puts its
+  own block in the JM only if the CM had one.
+- A modem that is not BinModem ignores the category. Clause 5 of V.8 tells
+  it to ignore what it does not know.
+- The menu also offers V.92 and all the modes below it. Thus the two ends
+  agree on an ordinary mode in the same exchange.
+
+A modem is set to V.ARC if `+MS` names a V.ARC mode, or if `+VARCBIS` is
+not 0.
+
+After CJ, each end knows whether both menus had the block:
+
+- If both had it, each end keeps the line quiet for 0.4 s. Then the V.ARC
+  handshake starts. The quiet time lets a sound card send the end of CJ
+  before the window opens the card again at its own rate.
+- If one menu did not have it, the call continues as the ordinary mode that
+  V.8 agreed. `+MS` stays as it was set. The transcript says
+  `V.8: the far end has no V.ARC; an ordinary call instead`.
+
+The flags in the block say what each end was set to. They do not select the
+mode. Step 2 does that.
+
+### Step 2: the V.ARC handshake
+
+This is the V.ARC equivalent of V.8. See [The handshake](#the-handshake)
+for the signal. Each end sends one message again and again until each has
+the message of the other. The message says:
+
+- the rates at which this end hears and sends
+- the number of channels
+- the modulation that this end was set to
+- whether this end was told that the line is one pair of wires
+- what the line of this end is made of: a sound card, a SIP call in linear
+  samples, a SIP call in A-law, or a SIP call in mu-law
+
+Both ends then calculate the same result from the two messages. On a SIP
+call the handshake runs at the rate of the call. For G.711 that is 8 kHz.
+
+### Step 3: the mode on each line
+
+| Line | `VARC` | `VARCQ`, `VARCP` |
+|---|---|---|
+| Sound card | multicarrier | QAM, baseband levels |
+| SIP, linear samples, the same at both ends | V.ARC/L16: the samples are the data | QAM or levels on the samples |
+| SIP, G.711, the same law at both ends | V.ARC/G.711: the codewords are the data | QAM or levels at 8 kHz |
+| SIP, but the ends do not have the same coding | multicarrier at the rate of the call | QAM or levels at the rate of the call |
+
+- The two direct modes (V.ARC/L16, V.ARC/G.711) are a trial. If nothing is
+  heard in 4 s, or the ends have no connection in 10 s, the call continues
+  as the multicarrier modulation. The handshake does not run again.
+- `VARC2W` on a SIP call runs as `VARC`. A SIP call has a path for each
+  direction and no echo. The transcript says so.
+- If the two ends were set to different modulations, the multicarrier
+  modulation runs.
+
+### Each mode on G.711
+
+A G.711 call has 8000 samples each second. The law gives a signal to noise
+ratio of approximately 38 dB. Each modulation runs at the rate of the call,
+thus its band is the band of the call:
+
+| Mode | At 8 kHz | Measured in simulation, A-law and mu-law |
+|---|---|---|
+| V.ARC/G.711 | 8000 codewords each second | 60 928 bit/s in A-law, 56 832 in mu-law, after the first tables |
+| V.ARC/DMT | carriers 15.6 Hz apart, to 3.4 kHz | 25 700 to 26 100 bit/s |
+| V.ARC/QAM | 2666 baud on a carrier at 1750 Hz, 250 Hz to 3250 Hz | 23 250 bit/s |
+| V.ARC/PCM | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
+
+- The modulations do not need exact codewords. A call that a gateway
+  decodes and codes again carries them at the same rates.
+- With a 300 Hz high-pass filter in the path, V.ARC/PCM connected at
+  9000 bit/s and V.ARC/QAM at 23 250 bit/s.
+- `AT+VARC=<baud>,<code>,<bits>` applies on a SIP call also. The baud is
+  the nearest one that the rate of the call permits.
+
+The tests are in `crates/modem/tests/varc_call.rs`. Each mode connects
+through simulated PCMU and PCMA and passes a page with no incorrect octet.
+
+### An older BinModem
+
+A BinModem before this change starts a `+MS=VARC` call with the V.ARC
+handshake and no V.8. It cannot make a V.ARC call with this one. Use the
+same build at both ends.
 
 ## The three modulations
 
@@ -231,7 +352,7 @@ way left at 16 000 baud and whatever it will bear.
 
 ## The handshake
 
-A call begins with each end saying what it is (`hello.rs`). Two ends need
+After V.8, each end says what it is (`hello.rs`). Two ends need
 not have the same sound card: one hears at 192 kHz and sends at 48, the
 other has one device both ways, one was told the line is a single pair of
 wires and the other was not. Nothing in a wideband signal can settle that,
@@ -252,8 +373,8 @@ nothing for a minute and said `NO CARRIER`.
   clock to recover.
 - **One message of 16 octets, over and over**: the rates this end hears and
   sends at, how many channels, which modulation it was asked for, whether it
-  was told two-wire, and whether it has the far end's message yet; then a
-  CRC.
+  was told two-wire, what its line is made of, and whether it has the far
+  end's message yet; then a CRC.
 - When an end has the far end's message and has seen in it that the far end
   has its own, it sends once more and stops. About four seconds.
 
@@ -270,7 +391,8 @@ Both ends then work out the same answer from the same two messages
 | Question | Answer |
 |---|---|
 | What rate does each direction run at? | The slower of the two cards on it. The end with the faster card converts, by a whole number of times (`Faster`, `Slower`). Cards that no whole number relates, 44.1 and 48 kHz, are told so. |
-| One pair of wires? | If either end was told so, and both hear and send on one card at one rate. Otherwise a wire each way, with a note. |
+| One pair of wires? | If either end was told so, and both hear and send on one card at one rate, and the line is not a SIP call. Otherwise a wire each way, with a note. |
+| Are the numbers of the call the data? | Only if both ends are on a SIP call of the same coding at one rate. See [The start of a call](#the-start-of-a-call). |
 | Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
 
 While it lasts the symbol scope shows the far end's tones as it shows any
@@ -280,7 +402,7 @@ agreed, where a V.8 menu would be:
 ![What the far end said in the handshake](../images/v-arc/hello.png)
 
 There is no handshake on a lead that comes straight back (`ATDLOOP`), where
-there is nobody else, or on a SIP call that carries samples exactly.
+there is nobody else. Each other call has it, a SIP call included.
 
 Run for real, both on one machine: Line In at 192 kHz with CABLE-B at 48 kHz
 the other way (2.13 and 0.80 Mbit/s, as before it), and two ends sharing
@@ -297,15 +419,13 @@ Two things it turned up in the receiver, both now fixed:
   and could not then find a real signal. The clock now goes back to where
   it was last right whenever the signal is lost.
 
-## Found through V.8 bis
+## V.8 bis
 
-A call dialled as `+MS=VARC` starts with V.ARC's handshake and nothing
-else, so both ends have to have been set to it. `AT+VARCBIS` lets an
-ordinary call find it instead.
+`AT+A8E=,,,1` puts a V.8 bis transaction before V.8. A modem that is set to
+V.ARC lists it there also.
 
 V.8 bis has a non-standard information field for what the ITU did not
-define (8.5), and a station set `+VARCBIS=1` puts a block in it beside its
-usual list:
+define (8.5). The modem puts a block in that field beside its usual list:
 
 | Octets | |
 |---|---|
@@ -315,39 +435,34 @@ usual list:
 | `01` | edition of this block |
 | flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: one pair of wires |
 
-with "non-standard field" set in the identification field (Table 5-1) and
-"non-standard capabilities" under the data mode (Table 6-3a).
+"Non-standard field" is set in the identification field (Table 5-1) and
+"non-standard capabilities" is set below the data mode (Table 6-3a).
 
-**The country and provider codes are not registered.** T.35 codes are
-allocated by a national administration and BinModem has none; these are
-made up. Another BinModem knows them. Anything else steps over the block,
-as 8.5 has it do with any block it does not know.
+**The country and provider codes are not registered.** A national
+administration allocates T.35 codes and BinModem has none. These codes are
+made up. Another BinModem knows them. A different modem ignores the block,
+as 8.5 tells it to do with a block that it does not know.
 
-Then it is the transaction as it was (CRe, CRd, CL, MS, ACK):
+The transaction is then as it was (CRe, CRd, CL, MS, ACK):
 
 - If both lists have the block, the MS names the data mode, the block and no
-  modulation of the ITU's. After the ACK there is no V.8: V.ARC's own
-  handshake starts, with the station that received the MS answering, and
-  settles rates, channels and wires as on any V.ARC call. If the two were
-  set to different modulations that handshake runs the multicarrier one.
-- If only one has it, or the far end's list was never seen, the call is
-  exactly what it would have been.
-- If V.ARC is chosen and the line cannot carry it (a SIP call answered in
-  G.711), the call starts again from V.8 bis without the block.
+  ITU modulation. V.8 follows the ACK, as it follows each transaction. Both
+  V.8 menus then have the V.ARC block, and the V.ARC handshake follows V.8.
+- If only one list has the block, the MS names an ordinary mode. The V.8
+  that follows finds no V.ARC at the far end, and the call is an ordinary
+  call.
 
-`+VARCBIS=<mode>,<wires>`: mode 0 off (the default), 1 multicarrier, 2 QAM,
-3 PCM; wires 1 for one pair of wires. It needs `+A8E=,,,1`, and in the
-window it is under the V.8 bis switch.
+`+VARCBIS=<mode>,<wires>` sets what a modem lists when `+MS` names an
+ordinary mode. Mode 0 is off (the default), 1 is multicarrier, 2 is QAM, 3
+is PCM. Wires 1 is one pair of wires. With `+MS=VARC` or one of the other
+V.ARC modes, the modem lists that mode and `+VARCBIS` is not necessary.
+In the window, the setting is below the V.8 bis switch.
 
-The end that sends the ACK holds the line 0.4 s before going over. Going to
-V.ARC closes the sound card and opens it again as it is, and on real cards
-that cut the end of the ACK off, so the caller never heard it.
+Before this sequence, an MS that named V.ARC had no V.8 after it. The V.ARC
+handshake started 0.4 s after the ACK.
 
-Measured between two windows on two VB-Audio cables at 48 kHz, each set
-`+MS=V92;+VARCBIS=1`: V.8 bis, V.ARC's handshake, and 404 534 bit/s each
-way. Not tried between two machines or over a telephone line. A caller
-that misses the ACK goes on to V.8 while the answerer is in V.ARC, and
-that call does not recover.
+Measured between two windows on two VB-Audio cables at 48 kHz with the
+earlier sequence, each set `+MS=V92;+VARCBIS=1`: 404 534 bit/s each way.
 
 ![A call that started in V.8 bis, on V.ARC](../images/v-arc/varc-v8bis.png)
 
@@ -736,13 +851,13 @@ the square evenly.
 
 ![The window as the caller on a V.ARC/L16 call over SIP](../images/v-arc/window-sip.png)
 
-What the call turns out to be decides what runs on it:
+What the call is decides what `AT+MS=VARC` becomes:
 
 | The call | What `AT+MS=VARC` becomes |
 |---|---|
-| L16, and the samples arrive exactly | V.ARC/L16 |
-| L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's rate |
-| G.711, because the far end answered with it | an ordinary call from V.8, with `+MS` set to `V92` |
+| L16 at both ends, and the samples arrive exactly | V.ARC/L16 |
+| L16 at both ends, but nothing is heard in 4 s, or the two ends have no connection in 10 s | V.ARC/DMT at the rate of the call |
+| G.711 | See the next section |
 
 `VARCQ` and `VARCP` run on a linear call at 48 kHz as they do on a lead,
 modulating the samples rather than using them: between two windows on
@@ -752,22 +867,26 @@ because they are better there.
 
 ## Over a SIP call in G.711: V.ARC/G.711
 
-A call in G.711 is 8000 codewords a second, and between two of these on a
-direct call nothing touches them. So they are the data, as the samples of
-a linear call are (`crates/varc/src/octets.rs`): a sync word of 48 octets
-and a block of 952, eight times a second. Any of the three modes becomes
-this on such a call, since none of them has anything to modulate at 8 kHz
-that the codewords do not carry better as they are, and both directions
-carry the same, which V.90 cannot say.
+A call in G.711 is 8000 codewords each second. Between two BinModems on a
+direct call nothing changes them. Thus `AT+MS=VARC` uses them as the data,
+as it uses the samples of a linear call (`crates/varc/src/octets.rs`): a
+sync word of 48 octets and a block of 952, eight times each second. Both
+directions carry the same rate, which V.90 cannot do.
 
-- mu-law has two codewords for nought, and the path between the modem and
-  the packet turns one into the other. `0xFF` arriving is therefore treated
-  as not having arrived, an erasure, and mu-law keeps sixteen check octets
-  a codeword where A-law needs none: 56 832 bit/s against 60 928.
-- A lost packet is filled with silence, which is a run of one codeword, and
-  is erased the same way.
-- A call that something recodes never produces a sync word. After four
-  seconds of that the call carries on as an ordinary one, from V.8.
+- mu-law has two codewords for zero, and the path between the modem and
+  the packet changes one into the other. Thus `0xFF` on arrival is an
+  erasure. mu-law keeps sixteen check octets in each codeword where A-law
+  needs none: 56 832 bit/s against 60 928.
+- A lost packet is filled with silence, which is a run of one codeword. It
+  is erased in the same way.
+- The two ends try the codewords only if both said the same law in the
+  V.ARC handshake.
+- A call that something recodes never gives a sync word. After 4 s the
+  call continues as V.ARC/DMT at 8 kHz. In earlier builds it continued as
+  an ordinary call from V.8.
+
+`VARCQ` and `VARCP` do not become V.ARC/G.711. They run as themselves at
+8 kHz. See [Each mode on G.711](#each-mode-on-g711).
 
 The symbol diagram is successive octets against each other.
 
@@ -884,7 +1003,8 @@ first finding below.
 | | |
 |---|---|
 | Choosing it | `AT+MS=VARC` (multicarrier), `AT+MS=VARCQ` (QAM), `AT+MS=VARCP` (PCM), or the window's mode box |
-| Calling | `ATD` with any number at one end, `ATA` at the other. No V.8, no tones |
+| Calling | `ATD` with any number at one end, `ATA` at the other. V.8 first, then the V.ARC handshake |
+| A far end with no V.ARC | an ordinary call, from V.92 down, as V.8 agreed it |
 | A lead that comes straight back | `ATDLOOP`: the modem listens for its own signal and what is typed comes back |
 | Connected | `CONNECT <rate>/VARC`, the rate being what arrives, in bit/s of data, over the channels that loaded |
 | A lead with one channel wired | connects on that one after waiting 6 s for the other |
@@ -896,13 +1016,19 @@ first finding below.
 The two ends differ in which known points they send, so one must dial and
 the other answer.
 
-On a SIP line the same commands are used and the account has to say
-`linear = yes`. The call is placed and answered as any SIP call is.
+On a SIP line the same commands are used. The account can say
+`linear = yes` for linear samples, or it can have G.711 only. The call is
+placed and answered as any SIP call is.
 
 The sound card: the rest of the modem runs at 16 kHz on one channel through
-`line::Duplex`. While a V.ARC call is up the window closes that and opens the
-same two devices with `line::Wide`, and steps `Modem::varc_step` with the
-card's own frames; when the call ends it puts the two-wire line back.
+`line::Duplex`, and V.8 runs there. When V.8 has found V.ARC at both ends,
+the window closes that line and opens the same two devices with
+`line::Wide`. It then steps `Modem::varc_step` with the frames of the card.
+When the call ends it puts the two-wire line back.
+
+A program that has only the wide card uses `Modem::wide_step`. That
+function runs V.8 on the card through a simple rate conversion and then
+V.ARC on the frames as they are. `varc-link --modem` does this.
 
 The two devices need not run at the same rate. A line can be a lead one way
 and a virtual cable the other, at 192 kHz and 48 kHz, and then each direction
@@ -1037,13 +1163,9 @@ Three faults that simulation with one clean wire each way did not show:
 - **SIP beyond this machine.** Never run over a network, through a PBX, or
   with packets really lost. Whether any PBX passes L16 at 16 kHz untouched
   is not known.
-- **The G.711 fallback, to a connection.** A V.ARC call answered in G.711
-  does carry on as an ordinary call, and between two `modem-sip` on this
-  machine it trained to V.90 data and then never said `CONNECT`. A plain
-  `AT+MS=V92` call between the same two does exactly the same, and a plain
-  `AT+MS=V34` one ends in `NO CARRIER`, on `main` as well as here, so that is
-  not V.ARC's; but it means the fallback has not been seen to end in a
-  connection.
+- **A real telephone network.** Each mode runs through simulated G.711 and
+  between two `modem-sip` on EasySip in PCMU. No mode has run through a
+  PBX, a gateway or a telephone line.
 - **The probe on a real poor line.** The starting table is tested on poor
   lines in simulation only. The only real lines so far are a lead and a
   virtual cable, both good.
@@ -1060,11 +1182,8 @@ Three faults that simulation with one clean wire each way did not show:
   (`ATDLOOP`) through VB-Cable A and through the Realtek lead. Choosing it
   from the mode box rather than typing `AT+MS`, and a file or PPP over it,
   have not been tried. The QAM and PCM modes have run in the window as loop
-  calls on the Realtek lead. The headless tools
-  (`modem-sip`, `--answer`) do not know about V.ARC.
-- **Two machines.** Never run between two sound cards with separate clocks.
+  calls on the Realtek lead.
 - **44.1 kHz** for the single-carrier modes (they need a multiple of 48 kHz).
-- **Compression** on top.
 
 ## Running it
 
@@ -1076,8 +1195,8 @@ varc-link --in "Line In" --out "Speakers" --oneway --csv snr.csv
 varc-link --in "Line In" --out "Speakers" --modem
 ```
 
-Over SIP, with two accounts that have `linear = yes` and point at each
-other:
+Over SIP, with two accounts that point at each other, in linear samples or
+in G.711:
 
 ```text
 modem-sip --accounts FILE --account host --answer --type AT+MS=VARC
@@ -1085,7 +1204,9 @@ modem-sip --accounts FILE --account caller --type AT+MS=VARC --type ATD100 --sen
 ```
 
 `--modem` drives the lead through a whole modem as the window does
-(`AT+MS=VARC`, `ATDLOOP`) and checks what comes back.
+(`AT+MS=VARC`, `ATDLOOP`) and checks what comes back. With `--dial ATA` at
+one end and `--dial ATD1` at the other, the two ends run V.8 on the card
+first.
 `--loop` needs each output channel joined to the same input channel.
 `--oneway` sends on both channels and returns the tables and
 acknowledgements inside the program. `--csv` writes SNR and bits per carrier.

@@ -410,10 +410,10 @@ fn run(
         if from_line.is_empty() {
             std::thread::sleep(Duration::from_millis(2));
         } else {
-            // A V.ARC call wants a call that carries linear samples. On
-            // one, the network's own samples are the modem's line and what
-            // it says goes back untouched; on any other it is an ordinary
-            // call after all.
+            // A V.ARC call starts with V.8 through the ordinary path below.
+            // Once V.8 has found V.ARC at both ends, the numbers of the
+            // call are the line of the modem, one for one, and what it
+            // says goes back as it is: linear samples, or G.711 codewords.
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             to_line.clear();
             if modem.varc_wanted().is_some() {

@@ -1018,6 +1018,7 @@ mod tests {
             protocol: crate::Protocol::Lapm,
             access: None,
             pcm: None,
+            varc: None,
         };
         let mut octets = crate::sequence(crate::Signal::Cm, &menu);
         // Spliced in directly behind the modulation category octet, which is

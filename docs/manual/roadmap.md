@@ -6,27 +6,44 @@
 
 ### V.ARC
 
-V.ARC is our own wideband mode for a sound card, not for a telephone line.
-Both ends must be BinModem.
+V.ARC is our own wideband mode. It is made for a sound card, and it runs on
+a SIP call in each coding also. Both ends must be BinModem.
 
 - It has a multicarrier modulation that is loaded one carrier at a time.
 - It has QAM and baseband levels that fill the band of the card (`AT+VARC`
   sets their baud, code and grid by hand).
-- `AT+VARCBIS` lists it in V.8 bis, so an ordinary call between two BinModems
-  finds it.
-- Over SIP, linear PCM at 8 to 48 kHz carries it exactly.
-- EasySip is that with no account: type the address of the other end.
 - `AT+MS=VARC` or the mode box of the window selects it.
 - `ATD` and `ATA` place and answer the call.
+- EasySip is a SIP line with no account: type the address of the other end.
+
+Each V.ARC call has the same start-up, on a sound card, on EasySip and on a
+SIP account:
+
+1. V.8. Each end says in the non-standard category of its menu that it has
+   V.ARC.
+2. The V.ARC handshake at 200 bit/s in the voice band. Each end says what
+   its sound cards are and what its line is made of.
+3. The mode.
+
+- A far end that has no V.ARC gets an ordinary call, from V.92 down. V.8
+  agrees it in the same exchange.
+- With `AT+A8E=,,,1`, V.8 bis comes first and lists V.ARC also.
+  `AT+VARCBIS` lists it when `+MS` names an ordinary mode.
+- Each mode runs on each SIP coding. In G.711 (PCMU or PCMA) the
+  modulations run at 8 kHz: approximately 26 kbit/s for the multicarrier
+  mode, 23 kbit/s for QAM and 22 kbit/s for the levels.
+- Where both ends have the same coding, `AT+MS=VARC` uses the numbers of
+  the call as the data: 200 kbit/s on linear samples at 16 kHz, 61 kbit/s
+  on A-law, 57 kbit/s on mu-law. If the path changes the numbers, the call
+  continues as the multicarrier modulation.
 
 Results and behaviour:
 
 - Through a real lead between a Realtek line output and its line input at
   192 kHz, it carried 1.4 Mbit/s with no incorrect octet. A call is one
   signal, the same on both channels.
-- A call starts with a handshake at 200 bit/s in the voice band. In the
-  handshake each end says what its sound cards are. Thus ends that are
-  different agree on what to run and do not fail.
+- In the V.ARC handshake each end says what its sound cards are. Thus ends
+  that are different agree on what to run and do not fail.
 - It starts on a line about which it knows nothing. The first signal needs any
   2.3 kHz of the band. It loads only where the line is.
 - Each end tells the other end what it hears. A sender that is too loud
@@ -38,11 +55,10 @@ Results and behaviour:
 - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
   canceller. Each end first learns its echo while it has the line to itself.
   Two ends that share a virtual cable connect at 327 kbit/s and pass 75 dB.
-- Between two SIP accounts that say `linear = yes`, the call carries
-  sixteen-bit samples exactly. The samples are the data, at 200 kbit/s.
 
 V.ARC works between two machines. The two-wire mode has never met a real
-two-wire line. See [docs/design/v-arc.md](../design/v-arc.md).
+two-wire line, and no mode has run through a telephone network. See
+[docs/design/v-arc.md](../design/v-arc.md).
 
 ## Next
 
