@@ -7,6 +7,7 @@
 pub mod dmt;
 pub mod echo;
 pub mod exact;
+pub mod fit;
 pub mod octets;
 pub mod frame;
 pub mod hello;
@@ -18,3 +19,4 @@ pub mod rs;
 pub mod sc;
 pub mod squeeze;
 pub mod station;
+pub mod trellis;

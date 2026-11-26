@@ -2175,12 +2175,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             modem.give_network_levels(&levels);
         }
-        // A V.ARC call on a SIP line. If the call agreed on linear samples
-        // the network's own samples are the modem's line, one for one, and
-        // what it says goes back as it is. If it is in G.711 the same is
-        // true of its codewords, between two of these with nothing recoding
-        // them on the way; the modem finds out whether that is so, and
-        // carries on as an ordinary call if it is not.
+        // A V.ARC call on a SIP line, once V.8 has found V.ARC at both
+        // ends. If the call agreed on linear samples the network's own
+        // samples are the modem's line, one for one, and what it says goes
+        // back as it is. If it is in G.711 the same is true of its
+        // codewords. The modem finds out whether they arrive as they were
+        // sent, and runs a modulation at the rate of the call if not.
         let mut exact_sent: Option<Vec<f32>> = None;
         // Nothing of a V.ARC call can arrive before the call is up, and what
         // does is the last call's tail, still in the media path. Handed to

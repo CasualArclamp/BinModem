@@ -42,6 +42,7 @@ use crate::frame::Layout;
 use crate::interp::{Interp, bessel_i0};
 use crate::link::{Arrived, Bin, Health, POINTS_KEPT, Receiver, Sender, Table};
 use crate::map::{BitReader, BitWriter, MAX_BITS, pam_level, pam_slice, qam_point, qam_slice};
+use crate::trellis::{self, Grid, Near};
 
 /// Symbols a second.
 pub const BAUD: f64 = 16_000.0;
@@ -126,6 +127,24 @@ pub const LEVEL: f64 = 0.2;
 /// As [`crate::dmt::GAP_DB`].
 pub const GAP_DB: f64 = 8.0;
 
+/// How many decibels a point of the trellis code's grid has to stand clear
+/// of the noise, for each of the Reed-Solomon codes it is used with: the
+/// lightest three of [`crate::link::CODES`], which are no code, two check
+/// octets, and sixteen. `None` for the rest.
+///
+/// The code by itself reads a block of 248 symbols wrong once in a
+/// thousand at 4 dB from the limit there is to what any code can carry,
+/// and never in a thousand at 4.5 (`what_the_code_wants_of_a_line`). These
+/// are that and two decibels in hand, less what sixteen check octets mend.
+fn coded_gap_db(rate: Option<f64>) -> Option<f64> {
+    match rate {
+        Some(rate) if rate > 0.995 => Some(6.5),
+        Some(rate) if rate > 0.97 => Some(5.5),
+        None => Some(5.0),
+        _ => None,
+    }
+}
+
 /// Which single-carrier mode, at what sample rate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
@@ -138,6 +157,8 @@ pub struct Shape {
     pub real: bool,
     /// Which set of known symbols. See [`crate::dmt::Plan::coloured`].
     pub colour: u8,
+    /// Excess bandwidth of the root raised cosine.
+    pub rolloff: f64,
 }
 
 impl Shape {
@@ -148,7 +169,15 @@ impl Shape {
         if sps == 0 || (fs - sps as f64 * BAUD).abs() > 1.0 || !sps.is_multiple_of(3) {
             return None;
         }
-        Some(Self { fs, sps, carrier: if real { 0.0 } else { CARRIER }, real, colour: 0 })
+        Some(Self { fs, sps, carrier: if real { 0.0 } else { CARRIER }, real, colour: 0, rolloff: ROLLOFF })
+    }
+
+    /// V.ARC/QAM as it is built, at 48 kHz, with a carrier and an excess
+    /// bandwidth of somebody's choosing: for a modulation that is run at a
+    /// rate of its own and fitted to a line by [`crate::fit`]. `carrier`
+    /// is in hertz at 48 kHz, where the baud is 16 000.
+    pub fn fitted(carrier: f64, rolloff: f64) -> Self {
+        Self { fs: 48_000.0, sps: 3, carrier, real: false, colour: 0, rolloff }
     }
 
     /// V.ARC/QAM at this sample rate, which has to be a multiple of 48 kHz.
@@ -188,6 +217,47 @@ impl Shape {
         table.bits.first().copied().unwrap_or(0).min(self.max_bits())
     }
 
+    /// The data bits a frame of eight symbols carries, where `table` is
+    /// one for the trellis code of [`crate::trellis`] and not for a bare
+    /// grid. Such a table has two entries: whole bits a symbol, and
+    /// eighths of a bit over.
+    pub fn coded(&self, table: &Table) -> Option<u16> {
+        if self.real || table.bits.len() < 2 {
+            return None;
+        }
+        let frame = 8 * u16::from(table.bits[0]) + u16::from(table.bits[1] & 7);
+        Some(frame.clamp(trellis::LEAST, trellis::MOST))
+    }
+
+    /// The table for the trellis code at `frame` data bits to eight
+    /// symbols, with `parity` check octets a codeword.
+    pub fn coded_table(frame: u16, parity: u8) -> Table {
+        Table { parity, bits: vec![(frame / 8) as u8, (frame % 8) as u8] }
+    }
+
+    /// What a table carries, in eighths of a bit a symbol: for telling
+    /// whether one table asks more of a line than another.
+    fn weight(&self, table: &Table) -> u16 {
+        self.coded(table).unwrap_or(8 * u16::from(self.bits_of(table)))
+    }
+
+    /// Bits a group carries with `table`, before what a coded block's last
+    /// symbols give up.
+    fn table_group_bits(&self, table: &Table) -> usize {
+        match self.coded(table) {
+            Some(frame) => GROUP / trellis::FRAME * usize::from(frame),
+            None => self.group_bits(self.bits_of(table)),
+        }
+    }
+
+    /// Bits a block carries with `table`.
+    fn block_bits(&self, table: &Table) -> usize {
+        match self.coded(table) {
+            Some(frame) => Grid::block_bits(frame, self.block(table) * GROUP),
+            None => self.block(table) * self.group_bits(self.bits_of(table)),
+        }
+    }
+
     /// Bits a group carries with `bits` to the symbol.
     fn group_bits(&self, bits: u8) -> usize {
         if bits == 0 {
@@ -202,7 +272,7 @@ impl Shape {
 
     /// Groups in each block sent with `table`.
     fn block(&self, table: &Table) -> usize {
-        let per = self.group_bits(self.bits_of(table));
+        let per = self.table_group_bits(table);
         let mut groups = 1;
         while groups < GROUPS && groups * per / 8 < BLOCK_OCTETS {
             groups *= 2;
@@ -211,13 +281,12 @@ impl Shape {
     }
 
     pub fn layout(&self, table: &Table) -> Option<Layout> {
-        let bits = self.block(table) * self.group_bits(self.bits_of(table));
-        Layout::new(bits / 8, usize::from(table.parity))
+        Layout::new(self.block_bits(table) / 8, usize::from(table.parity))
     }
 
     /// Bits a second `table` carries on the line, coding and all.
     pub fn gross(&self, table: &Table) -> f64 {
-        (GROUPS * self.group_bits(self.bits_of(table))) as f64 / self.superframe()
+        (GROUPS * self.table_group_bits(table)) as f64 / self.superframe()
     }
 
     /// Bits a second of frames `table` carries.
@@ -251,7 +320,7 @@ impl Shape {
 
     /// The shaping filter, unit power out for unit-power symbols in.
     fn pulse(&self) -> Vec<f64> {
-        let mut taps = rrc_taps(self.sps as f64, ROLLOFF, 2 * HALF_SPAN);
+        let mut taps = rrc_taps(self.sps as f64, self.rolloff, 2 * HALF_SPAN);
         taps.truncate(2 * HALF_SPAN * self.sps);
         // The window takes a little off the pulse's claim to cross nought
         // at every other symbol. The equaliser is there for that.
@@ -308,8 +377,11 @@ pub struct Tx {
     at: usize,
     reader: BitReader,
     wanting: bool,
-    /// Data symbols made and waiting their turn: a polarity block's worth.
+    /// Data symbols made and waiting their turn: a polarity block's worth,
+    /// or a whole block of the trellis code.
     queue: VecDeque<Complex>,
+    /// The grid of the table in use, where it is one for the trellis code.
+    grid: Option<Grid>,
     /// The running sum of every level sent, which the polarity holds down.
     sum: f64,
     /// The symbols under the pulse, newest first.
@@ -346,6 +418,7 @@ impl Tx {
             reader: BitReader::default(),
             wanting: false,
             queue: VecDeque::new(),
+            grid: None,
             sum: 0.0,
             recent: VecDeque::from(vec![Complex::ZERO; 2 * HALF_SPAN]),
             phase: 0,
@@ -397,6 +470,11 @@ impl Tx {
             if self.queue.is_empty() {
                 if bits == 0 {
                     self.queue.push_back(Complex::ZERO);
+                } else if let Some(grid) = self.grid.as_ref() {
+                    // A block is coded whole, and the queue runs out
+                    // exactly where a block begins.
+                    let symbols = self.shape.block(&self.table) * GROUP;
+                    self.queue.extend(grid.encode(&mut self.reader, symbols));
                 } else if self.shape.real {
                     self.polarity_block(bits);
                 } else {
@@ -414,7 +492,9 @@ impl Tx {
             self.at = 0;
             if let Some((id, table)) = self.next.take() {
                 self.id = id;
+                self.grid = self.shape.coded(&table).map(Grid::new);
                 self.table = table;
+                self.queue.clear();
             }
         }
         // Ask for the next block's octets as the symbol before it goes out.
@@ -463,10 +543,12 @@ impl Sender for Tx {
     }
 
     fn adopt(&mut self, id: u8, mut table: Table) {
-        table.bits.truncate(1);
         let least = if self.shape.real { 1 } else { 2 };
         let bits = self.shape.bits_of(&table).max(least);
-        table.bits = vec![bits];
+        table.bits = match self.shape.coded(&table) {
+            Some(frame) => Shape::coded_table(frame, table.parity).bits,
+            None => vec![bits],
+        };
         self.next = Some((id & 3, table));
     }
 
@@ -552,6 +634,11 @@ pub struct Rx {
     writer: BitWriter,
     /// Sliced values of the polarity block being gathered.
     block: Vec<u32>,
+    /// The grid of the trellis code now arriving, and what each symbol of
+    /// the block being gathered was nearest to in each of its subsets:
+    /// the block is decoded whole when it has all arrived.
+    grid: Option<Grid>,
+    heard_block: Vec<[Near; 8]>,
     groups_in: usize,
     arrived: VecDeque<Arrived>,
 
@@ -562,9 +649,10 @@ pub struct Rx {
     measured: f64,
     trained: usize,
     proposal: Option<Table>,
-    /// Bits a symbol in the table last proposed, and for how many sync
-    /// words in a row the line has looked good for more.
-    proposed: u8,
+    /// What the table last proposed carries, in eighths of a bit a symbol,
+    /// and for how many sync words in a row the line has looked good for
+    /// more.
+    proposed: u16,
     better: usize,
     gap_db: f64,
     remeasure: bool,
@@ -627,6 +715,8 @@ impl Rx {
             id: None,
             writer: BitWriter::default(),
             block: Vec::with_capacity(DC_BLOCK),
+            grid: None,
+            heard_block: Vec::new(),
             groups_in: 0,
             arrived: VecDeque::new(),
             noise: 1.0,
@@ -707,15 +797,34 @@ impl Rx {
                 let capacity = self.shape.block(&table) * self.shape.group_bits(bits) / 8;
                 table.parity = crate::link::checks_for(rate, capacity);
             }
-            let net = self.shape.net(&table);
-            // A code the line bears beats one it does not, whatever each
-            // would carry if it worked; then whichever carries most.
-            let better = match best.as_ref() {
-                None => true,
-                Some((most, fitted, _)) => (fits && !fitted) || (fits == *fitted && net > *most),
-            };
-            if better {
-                best = Some((net, fits, table));
+            let mut tables = vec![(fits, table)];
+            // The same with the trellis code, which wants far less of the
+            // line for the same bits, and carries eighths of a bit. Not
+            // where somebody chose the bits by hand: a grid that was asked
+            // for is the grid.
+            if let (false, None, Some(coded_gap)) = (self.shape.real, self.fixed.0, coded_gap_db(rate)) {
+                let gap = 10f64.powf((coded_gap + extra) / 10.0);
+                let frame = (8.0 * (1.0 + snr / gap).log2()).floor().min(f64::from(trellis::MOST)) as u16;
+                if frame >= trellis::LEAST {
+                    let mut table = Shape::coded_table(frame, LOADED_PARITY);
+                    if let Some(rate) = rate {
+                        table.parity = crate::link::checks_for(rate, self.shape.block_bits(&table) / 8);
+                    }
+                    tables.push((true, table));
+                }
+            }
+            for (fits, table) in tables {
+                let net = self.shape.net(&table);
+                // A code the line bears beats one it does not, whatever
+                // each would carry if it worked; then whichever carries
+                // most.
+                let better = match best.as_ref() {
+                    None => true,
+                    Some((most, fitted, _)) => (fits && !fitted) || (fits == *fitted && net > *most),
+                };
+                if better {
+                    best = Some((net, fits, table));
+                }
             }
         }
         best.map(|(_, _, table)| table).expect("there are codes")
@@ -723,7 +832,7 @@ impl Rx {
 
     fn propose(&mut self) {
         let table = self.load();
-        self.proposed = table.bits[0];
+        self.proposed = self.shape.weight(&table);
         self.better = 0;
         self.proposal = Some(table);
     }
@@ -798,6 +907,7 @@ impl Rx {
         self.measured = 0.0;
         self.noise = 1.0;
         self.block.clear();
+        self.heard_block.clear();
         self.groups_in = 0;
         self.writer = BitWriter::default();
     }
@@ -861,10 +971,29 @@ impl Rx {
         }
         let least = if self.shape.real { 1 } else { 2 };
         let bits = if in_sync { least } else { table.as_ref().map_or(0, |t| self.shape.bits_of(t)) };
+        // Data on the trellis code's grid, and the grid for it.
+        let frame = if in_sync { None } else { table.as_ref().and_then(|t| self.shape.coded(t)) };
+        if let Some(frame) = frame
+            && self.grid.as_ref().is_none_or(|grid| grid.frame_bits() != frame)
+        {
+            self.grid = Some(Grid::new(frame));
+            self.heard_block.clear();
+        }
+        let coded = frame.and(self.grid.as_ref());
 
         // The diagram shows the data. The sync word is on the smallest grid
         // whatever the data is on, so it is shown only until there is data.
-        if bits > 0 && (!in_sync || table.is_none()) {
+        if let Some(grid) = coded {
+            // As many bits as say how many points there are, near enough.
+            let shown = (grid.size() as f64).log2().round() as u8;
+            if shown != self.shown {
+                self.shown = shown;
+                self.points.clear();
+            }
+            if self.points.len() < POINTS_KEPT {
+                self.points.push((seen.re / grid.reach(), seen.im / grid.reach()));
+            }
+        } else if bits > 0 && (!in_sync || table.is_none()) {
             if bits != self.shown {
                 self.shown = bits;
                 self.points.clear();
@@ -884,7 +1013,19 @@ impl Rx {
         }
 
         if bits > 0 {
-            let (value, point) = self.shape.slice(seen, bits);
+            // On the trellis code's grid the nearest point is only what
+            // the equaliser and the carrier are steered by. What was sent
+            // is settled when the whole block has arrived.
+            let (value, point, near) = match coded {
+                Some(grid) => {
+                    let (near, point) = grid.nearest(seen);
+                    (0, point, Some(near))
+                }
+                None => {
+                    let (value, point) = self.shape.slice(seen, bits);
+                    (value, point, None)
+                }
+            };
             let mut error = point - seen;
             if self.shape.real {
                 error.im = 0.0;
@@ -906,7 +1047,12 @@ impl Rx {
             }
             if self.stage == Stage::Training && self.trained >= SETTLE {
                 self.measured += e2;
-            } else if steady && !faded {
+            } else if steady && !faded && near.is_none() {
+                // Not on the trellis code's grid, where one point in
+                // thirty is taken for its neighbour and the distance to the
+                // nearest says less than there is: there the noise is
+                // measured against what the code decided, a block at a
+                // time.
                 self.noise += (e2 - self.noise) / 8192.0;
             }
             // The equaliser sees the error turned back to where it works.
@@ -935,7 +1081,9 @@ impl Rx {
                 self.drift += 1.5e-5 * lean;
                 self.phase = (self.phase + 5.5e-3 * lean + self.drift) % TAU;
             }
-            if !in_sync {
+            if let Some(near) = near {
+                self.heard_block.push(near);
+            } else if !in_sync {
                 self.data(value, bits);
             }
             // Measuring waits for the timing to have come to rest: an
@@ -999,6 +1147,18 @@ impl Rx {
             return;
         }
         self.groups_in = 0;
+        // A block of the trellis code, all here: what was sent, and how
+        // far what arrived was from it.
+        if let (Some(grid), Some(_)) = (self.grid.as_ref(), table.and_then(|t| self.shape.coded(t))) {
+            let symbols = self.heard_block.len();
+            if symbols == block * GROUP {
+                let off = grid.decode(&self.heard_block, &mut self.writer);
+                if self.stage == Stage::Steady {
+                    self.noise += (off - self.noise) * (symbols as f64 / 8192.0).min(1.0);
+                }
+            }
+            self.heard_block.clear();
+        }
         match table.and_then(|t| self.shape.layout(t)) {
             Some(layout) => {
                 let line = self.writer.finish(layout.capacity());
@@ -1013,6 +1173,7 @@ impl Rx {
 
     fn end_of_sync(&mut self) {
         self.block.clear();
+        self.heard_block.clear();
         self.groups_in = 0;
         self.writer = BitWriter::default();
         if !self.whole_sync {
@@ -1096,7 +1257,9 @@ impl Rx {
         // seconds after that. A line that has looked good for more bits for
         // two seconds running is asked for them.
         if self.stage == Stage::Steady {
-            if self.load().bits[0] > self.proposed {
+            // By three-eighths of a bit at the least, or a line that sits
+            // on the edge of an eighth is asked about for ever.
+            if self.shape.weight(&self.load()) >= self.proposed + 3 {
                 self.better += 1;
                 if self.better >= 8 {
                     self.propose();
@@ -1461,6 +1624,54 @@ mod tests {
             // way up the constellation is.
             assert!(pair.b.channels[0].tally.failed < 10, "{snr} dB, {ppm} ppm");
         }
+    }
+
+    /// A line as good as a telephone call is at its best, where a bare
+    /// grid carries nine bits a symbol: the receiver asks for the trellis
+    /// code, which carries ten and a half, in eighths of a bit, and the
+    /// stream arrives whole.
+    #[test]
+    fn a_line_at_38_db_gets_the_trellis_code_and_a_bit_and_a_half_more() {
+        // 38 dB at the slicer is 36.2 dB over the whole band.
+        let shape = Shape::qam(48_000.0).unwrap();
+        let mut pair = Pair::new(shape.clone(), 36.2, 20.0, 0.0);
+        let (to_b, to_a) = (stream(5, 400_000), stream(6, 100_000));
+        pair.a.write(&to_b);
+        pair.b.write(&to_a);
+        pair.run(30.0);
+        let rx = &pair.b.channels[0].rx;
+        assert!((rx.snr_db() - 38.0).abs() < 1.0, "measured {:.1} dB", rx.snr_db());
+        let table = pair.a.channels[0].tx.table().clone();
+        let frame = shape.coded(&table).expect("a table for the trellis code");
+        assert!((80..=90).contains(&frame), "{frame} bits to eight symbols");
+        // What a bare grid would have been asked for on the same line.
+        let bare = Table { parity: 0, bits: vec![9] };
+        assert!(shape.net(&table) > 1.12 * shape.net(&bare), "{} against {}", shape.net(&table), shape.net(&bare));
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(pair.at_a == to_a);
+        // The code is asked to work near its limit, and the odd block
+        // that it reads wrong is sent again; but only the odd one.
+        let tally = pair.b.channels[0].tally;
+        assert!(tally.failed * 50 < tally.words, "{tally:?}");
+    }
+
+    /// A table for the trellis code says how many bits a frame of eight
+    /// symbols carries, and a block's worth is that less what its last
+    /// symbols give up.
+    #[test]
+    fn a_table_for_the_trellis_code_counts_its_bits_in_eighths() {
+        let shape = Shape::qam(48_000.0).unwrap();
+        let table = Shape::coded_table(85, 2);
+        assert_eq!(table.bits, vec![10, 5]);
+        assert_eq!(shape.coded(&table), Some(85));
+        assert_eq!(shape.coded(&Table { parity: 2, bits: vec![10] }), None);
+        assert_eq!(Shape::pcm(48_000.0).unwrap().coded(&table), None);
+        // One group is enough for a block: 31 frames, less the tail.
+        assert_eq!(shape.block(&table), 1);
+        let layout = shape.layout(&table).expect("a layout");
+        assert_eq!(layout.capacity(), (31 * 85 - 2 * trellis::TAIL) / 8);
+        // Through a frame, as the far end is told it.
+        assert_eq!(Table::decode(&table.encode()), Some(table));
     }
 
     /// A line with 8 dB at the slicer, where a code of sixteen check octets

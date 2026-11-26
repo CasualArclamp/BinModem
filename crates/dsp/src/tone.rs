@@ -146,8 +146,10 @@ impl ToneDetector {
 #[derive(Debug, Clone)]
 pub struct ReversalDetector {
     tone: ToneDetector,
-    /// Phasor directions, oldest at the back.
-    history: VecDeque<Option<(f64, f64)>>,
+    /// Phasor directions, oldest at the back, each with whether the phasor
+    /// stood at the tone's own length when it was taken rather than
+    /// collapsed below half of it.
+    history: VecDeque<Option<((f64, f64), bool)>>,
     threshold: f64,
     /// Samples the phasor has been opposed to its past for.
     opposed: u32,
@@ -299,6 +301,11 @@ impl ReversalDetector {
         } else {
             None
         };
+        // Whether the phasor has fallen to half the tone or less: the null in
+        // the middle of a reversal, or what is left of a tone that has
+        // stopped. Both the drift below and the decision at the end have to
+        // tell those two apart.
+        let collapsed = 2.0 * magnitude <= 0.5 * self.envelope.value();
         // How fast the phasor is turning, before anything is compared. Taken
         // from consecutive samples, where a reversal is a step of pi spread
         // over a couple of time constants and so contributes about a hertz to
@@ -347,7 +354,6 @@ impl ReversalDetector {
             // the twelve seconds of silence at the end of a recorded call
             // into twelve reversals.
             let warmup = self.history.len() as u32;
-            let collapsed = 2.0 * magnitude <= 0.5 * self.envelope.value();
             self.null = if collapsed { self.null.saturating_add(1) } else { 0 };
             let reversing = collapsed && self.null <= 2 * self.confirm;
             if let Some(n) =
@@ -368,7 +374,7 @@ impl ReversalDetector {
         self.previous = now;
 
         let then = self.history.pop_back().flatten();
-        self.history.push_front(now);
+        self.history.push_front(now.map(|d| (d, !collapsed)));
 
         if self.quiet > 0 {
             self.quiet -= 1;
@@ -382,7 +388,7 @@ impl ReversalDetector {
         // Too small at either end to compare: pass over it rather than start
         // again, because the hole in the middle of a reversal is exactly where
         // this happens and starting again there would mean never seeing one.
-        let (Some(now), Some(then)) = (now, then) else {
+        let (Some(now), Some((then, then_whole))) = (now, then) else {
             return false;
         };
 
@@ -402,8 +408,32 @@ impl ReversalDetector {
         }
 
         if now.0 * then.0 + now.1 * then.1 < -0.7 {
-            self.opposed += 1;
-            if self.opposed >= self.confirm {
+            self.opposed = self.opposed.saturating_add(1);
+            // Only with the tone there on both sides: a phasor standing at
+            // its length now, against one that stood at it then.
+            //
+            // The opposition is counted through the null, since the null is
+            // where a reversal lives, but it is not declared from inside one.
+            // A reversal fills back in: by the time the opposition has held
+            // for its time constant the phasor is back to two thirds of its
+            // length, the null having ended a third of a time constant
+            // before. A tone that has stopped never fills back in. What is
+            // left of it is whatever else is on the line, whose direction
+            // means nothing, while the slow envelope goes on saying the tone
+            // is there -- and a direction that means nothing is opposed to
+            // the one before it a quarter of the time. A tone arriving where
+            // another has just stopped is the same thing the other way round,
+            // compared against what the stop left.
+            //
+            // live-1789986211 lost its call to the first. The server's tone B
+            // stopped dead at 104.554 s while phase 2 waited for it to
+            // reverse, and 52 ms into the silence phase 2 took the stop for
+            // that reversal and answered it with tone A's and L1. Forty
+            // milliseconds of digital silence every three seconds does both:
+            // through a V.90 retrain storm of them the two ends' phase 2
+            // measured round trips of 0.140, 0.176, 0.887 and 1.249 s on a
+            // line of 1.211, and with this they measure 1.211 every time.
+            if self.opposed >= self.confirm && !collapsed && then_whole {
                 self.opposed = 0;
                 self.quiet = self.refractory;
                 self.count += 1;
@@ -808,6 +838,103 @@ mod tests {
             "seven hertz of offset was read as {} reversals",
             d.count()
         );
+    }
+
+    /// Tone B as live-1789986211 had it at the end, into V.34 phase 2's own
+    /// detector: 1200 Hz at the level it arrived, on for `on` seconds with
+    /// its phase reversed at `reverse` seconds if at all, and then gone.
+    ///
+    /// Under all of it, a line a millionth loud. The capture holds exact
+    /// zeros after the tone, but it was rounded to sixteen bits and what the
+    /// modem was given was not, and a millionth is under half of the
+    /// capture's least significant bit. The replay described below is what
+    /// anything that small does. Returns where each reversal was reported,
+    /// in samples.
+    fn tone_b_then_nothing(on: f64, reverse: Option<f64>, seed: u64) -> Vec<usize> {
+        let mut d = ReversalDetector::new(1200.0, 60.0, 0.008, FS);
+        let mut rng = seed;
+        let mut line = || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            ((rng >> 33) as f64 / (1u64 << 31) as f64 - 1.0) * 1.0e-6
+        };
+        let mut found = Vec::new();
+        for i in 0..(FS * (on + 0.5)) as usize {
+            let t = i as f64 / FS;
+            let flip = if reverse.is_some_and(|r| t >= r) {
+                std::f64::consts::PI
+            } else {
+                0.0
+            };
+            let tone = if t < on {
+                0.051 * (TAU * 1200.0 * t - std::f64::consts::FRAC_PI_4 + flip).cos()
+            } else {
+                0.0
+            };
+            if d.feed(tone + line()) {
+                found.push(i);
+            }
+        }
+        found
+    }
+
+    /// A tone that stops has not reversed.
+    ///
+    /// live-1789986211: the server's last tone B stopped dead at 104.554 s
+    /// with its phase still at the -45 degrees it had held since it began,
+    /// and phase 2, waiting in 11.2.1.2.4 for tone B's reversal, took the
+    /// stop for one. It sent tone A's second reversal at 104.64 s and L1
+    /// after it, on a line that had nothing more to say. Replayed through
+    /// phase 2 from the retrain's first sample, the capture exactly as
+    /// recorded does not do it -- but with a ten-millionth of noise added,
+    /// far under the capture's own resolution, the detector as it was took
+    /// the stop for a reversal in 186 of 200 tries, at a median of 104.608 s
+    /// against the 104.606 the call did it at, and at every level up to
+    /// three thousandths in no fewer than 131. Asking for the tone on both
+    /// sides of a reversal, it does in none.
+    #[test]
+    fn a_tone_that_stops_is_not_a_reversal() {
+        for on in [0.125, 0.3, 1.0] {
+            for seed in 1..=20 {
+                let found = tone_b_then_nothing(on, None, seed);
+                assert!(
+                    found.is_empty(),
+                    "a tone {on} s long that stopped was read as reversing {:.1} ms after it stopped \
+                     (seed {seed})",
+                    found[0] as f64 / FS * 1000.0 - on * 1000.0,
+                );
+            }
+        }
+    }
+
+    /// And a tone that reverses and then stops has reversed once, where it
+    /// did.
+    ///
+    /// Which is how every tone reversal in V.34's phase 2 ends: the tone goes
+    /// on "for another 10 ms after the phase reversal" and then stops, for
+    /// silence (11.2.1.1.3, 11.2.1.2.6) or for L1, from which 1200 and 2400
+    /// Hz "are omitted" (10.1.2.4; 11.2.1.1.6, 11.2.1.2.5). So the reversal
+    /// has to be believed inside those ten milliseconds, before the stop
+    /// that follows it.
+    #[test]
+    fn a_tone_that_reverses_and_then_stops_has_reversed_once() {
+        for on in [0.125, 0.3, 1.0] {
+            let at = on - 0.010;
+            for seed in 1..=20 {
+                let found = tone_b_then_nothing(on, Some(at), seed);
+                assert_eq!(
+                    found.len(),
+                    1,
+                    "a tone {on} s long reversed once and was read as {found:?} (seed {seed})"
+                );
+                let d = ReversalDetector::new(1200.0, 60.0, 0.008, FS);
+                let late = found[0] as i64 - (at * FS).round() as i64;
+                let claimed = i64::from(d.latency());
+                assert!(
+                    (late - claimed).abs() < claimed / 8,
+                    "reported {late} samples after the reversal against the {claimed} claimed (seed {seed})",
+                );
+            }
+        }
     }
 
     #[test]

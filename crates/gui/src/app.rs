@@ -993,17 +993,17 @@ impl ScopeApp {
         ),
         (
             "VARC",
-            "V.ARC - our own, for a sound card wired to another of these by a stereo lead and not for a telephone line. Hundreds of carriers, each loaded for what the lead measures",
+            "V.ARC - our own, for a sound card wired to another of these by a stereo lead, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures",
         ),
-        ("VARCQ", "V.ARC/QAM - the same lead with one carrier at 16000 baud"),
-        ("VARCP", "V.ARC/PCM - the same lead with levels at baseband, 16000 baud"),
+        ("VARCQ", "V.ARC/QAM - the same line with one carrier, at a third of the sample rate in baud"),
+        ("VARCP", "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud"),
         (
             "VARC2W",
             "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
         ),
         (
             "VARCQ2W",
-            "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
+            "V.ARC/QAM two-wire - one carrier on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
         ),
         ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
         (
@@ -1284,7 +1284,8 @@ impl ScopeApp {
                     .on_hover_text(
                         "What the call is carried in. Linear PCM arrives exactly as sent, \
                          which V.ARC/L16 needs; G.711 is what a telephone network carries, \
-                         for the ordinary modes as they would be on a real call. The \
+                         for the ordinary modes as they would be on a real call, and every \
+                         V.ARC mode runs in it at 8 kHz. The \
                          caller's choice is the one tried first; a far end that chose a \
                          different linear rate gets G.711",
                     );
@@ -3286,7 +3287,7 @@ impl ScopeApp {
                                     })
                                     .response
                                     .on_hover_text(
-                                        "AT+VARCBIS. Say in the V.8 bis transaction, in its non-standard field, that this modem has V.ARC as well as what is chosen above. If the far end says the same the call goes to V.ARC, by V.ARC's own handshake, and not to V.8; if it does not, or is not BinModem, the call is what it would have been. Set it at both ends",
+                                        "AT+VARCBIS. Say in the V.8 bis transaction, in its non-standard field, that this modem has V.ARC as well as what is chosen above. If the far end says the same the call goes to V.ARC, by V.8 and then V.ARC's own handshake; if it does not, or is not BinModem, the call is what it would have been. Set it at both ends",
                                     );
                                 ui.label(RichText::new("in the transaction, and go to it if the far end does too").small().color(dim));
                             });
@@ -3396,7 +3397,7 @@ impl ScopeApp {
                 if top == 0 {
                     ui.label(
                         RichText::new(
-                            "V.ARC is for a stereo lead between two sound cards: line out to the far end's line in, each way. Dial anything to call and answer at the other end, or dial LOOP on a lead that comes straight back. It will not work down a telephone line or a SIP call.",
+                            "V.ARC is for a stereo lead between two sound cards: line out to the far end's line in, each way. It also runs on a SIP call in any coding. Dial to call and answer at the other end: the call starts with V.8, then V.ARC's own handshake. Dial LOOP on a lead that comes straight back.",
                         )
                         .small()
                         .color(dim),

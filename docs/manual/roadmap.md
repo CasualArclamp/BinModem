@@ -4,37 +4,51 @@
 
 ## Work in progress
 
-### V.90 between two BinModems through softphones
-
-V.90 between two BinModems through softphones falls back to V.34. The
-codewords of the server are resampled on their way into its softphone and
-requantised. This leaves noise at approximately 1.7% of every codeword. The
-server of a real provider puts exact codewords on the network. That is why a
-real modem gets 56k on the same line.
-
 ### V.ARC
 
-V.ARC is our own wideband mode for a sound card, not for a telephone line.
-Both ends must be BinModem.
+V.ARC is our own wideband mode. It is made for a sound card, and it runs on
+a SIP call in each coding also. Both ends must be BinModem.
 
 - It has a multicarrier modulation that is loaded one carrier at a time.
 - It has QAM and baseband levels that fill the band of the card (`AT+VARC`
   sets their baud, code and grid by hand).
-- `AT+VARCBIS` lists it in V.8 bis, so an ordinary call between two BinModems
-  finds it.
-- Over SIP, linear PCM at 8 to 48 kHz carries it exactly.
-- EasySip is that with no account: type the address of the other end.
 - `AT+MS=VARC` or the mode box of the window selects it.
 - `ATD` and `ATA` place and answer the call.
+- EasySip is a SIP line with no account: type the address of the other end.
+
+Each V.ARC call has the same start-up, on a sound card, on EasySip and on a
+SIP account:
+
+1. V.8. Each end says in the non-standard category of its menu that it has
+   V.ARC.
+2. The V.ARC handshake at 200 bit/s in the voice band. Each end says what
+   its sound cards are and what its line is made of.
+3. The mode.
+
+- A far end that has no V.ARC gets an ordinary call, from V.92 down. V.8
+  agrees it in the same exchange.
+- With `AT+A8E=,,,1`, V.8 bis comes first and lists V.ARC also.
+  `AT+VARCBIS` lists it when `+MS` names an ordinary mode.
+- Each mode runs on each SIP coding. In G.711 (PCMU or PCMA) the
+  modulations run at 8 kHz: approximately 26 kbit/s for the multicarrier
+  mode, 37 kbit/s for QAM and 22 kbit/s for the levels.
+- On a call of 16 kHz or less, QAM fits its baud to the band of the call. A
+  line probe in the handshake measures the band. In G.711 the baud is 3700.
+- QAM has a trellis code of 64 states and a shell mapper, as V.34 has. A
+  symbol carries its bits in steps of an eighth of a bit. Through G.711
+  that is 37 000 bit/s, more than the 33 600 bit/s of V.34.
+- Where both ends have the same coding, `AT+MS=VARC` uses the numbers of
+  the call as the data: 200 kbit/s on linear samples at 16 kHz, 61 kbit/s
+  on A-law, 57 kbit/s on mu-law. If the path changes the numbers, the call
+  continues as the multicarrier modulation.
 
 Results and behaviour:
 
 - Through a real lead between a Realtek line output and its line input at
   192 kHz, it carried 1.4 Mbit/s with no incorrect octet. A call is one
   signal, the same on both channels.
-- A call starts with a handshake at 200 bit/s in the voice band. In the
-  handshake each end says what its sound cards are. Thus ends that are
-  different agree on what to run and do not fail.
+- In the V.ARC handshake each end says what its sound cards are. Thus ends
+  that are different agree on what to run and do not fail.
 - It starts on a line about which it knows nothing. The first signal needs any
   2.3 kHz of the band. It loads only where the line is.
 - Each end tells the other end what it hears. A sender that is too loud
@@ -46,11 +60,10 @@ Results and behaviour:
 - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
   canceller. Each end first learns its echo while it has the line to itself.
   Two ends that share a virtual cable connect at 327 kbit/s and pass 75 dB.
-- Between two SIP accounts that say `linear = yes`, the call carries
-  sixteen-bit samples exactly. The samples are the data, at 200 kbit/s.
 
-V.ARC has never run between two machines. The two-wire mode has never met a
-real two-wire line. See [docs/design/v-arc.md](../design/v-arc.md).
+V.ARC works between two machines. The two-wire mode has never met a real
+two-wire line, and no mode has run through a telephone network. See
+[docs/design/v-arc.md](../design/v-arc.md).
 
 ## Next
 
@@ -65,8 +78,7 @@ V.92 carries data between two BinModems. Set `AT+MS=V92` at both ends with
 `BINMODEM_V92_PCM_UP=1`. PCM then goes in both directions, 48 000 up and up to
 56 000 down, over a pair of virtual cables.
 
-V.92 has not carried a call with a real V.92 modem yet. The side that calls
-still needs a line with no echo and one clock.
+V.92 works with many real V.92 modems.
 
 #### Quick connect
 

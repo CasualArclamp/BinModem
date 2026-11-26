@@ -61,12 +61,37 @@ const PARTING: u32 = 1;
 /// ahead is silent in these tones from then on.
 const PATIENCE: f64 = 4.0;
 
+/// How long an end on a narrow line waits to measure the far end's probe
+/// before it gives up and says its message without, in seconds.
+const UNPROBED: f64 = 6.0;
+
 /// The modulations a call may be asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wanted {
     Dmt,
     Qam,
     Pcm,
+}
+
+/// What the line of an end is made of.
+///
+/// A sound card carries a waveform. A SIP call carries numbers, and between
+/// two ends that have the same kind of call, with nothing that recodes them
+/// on the way, the numbers arrive as they were sent. The two ends can then
+/// try to use the numbers as the data. They try only when both say the same
+/// kind: an end on a sound card behind a gateway hears a waveform whatever
+/// the far end has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Line {
+    /// A sound card, or anything else that carries a waveform.
+    #[default]
+    Sound,
+    /// A call of sixteen-bit linear samples.
+    Samples,
+    /// A call in G.711, A-law.
+    ALaw,
+    /// A call in G.711, mu-law.
+    MuLaw,
 }
 
 /// What an end is.
@@ -84,6 +109,12 @@ pub struct Caps {
     /// The baud this end wants to be sent to at, where somebody has chosen
     /// one for a single-carrier mode; nought for whatever the line bears.
     pub asks_baud: u32,
+    /// What the line of this end is made of.
+    pub line: Line,
+    /// The widest fit of a single carrier that the band this end hears
+    /// will pass, as the probe measured it: one more than its place in
+    /// [`FITS`], and nought for none, which is the carrier as it is built.
+    pub fit: u8,
 }
 
 impl Caps {
@@ -91,7 +122,13 @@ impl Caps {
         let mut out = [0u8; FRAME];
         out[..2].copy_from_slice(&HEAD);
         out[2] = 1;
-        out[3] = u8::from(self.two_wire) | u8::from(self.heard) << 1;
+        let line = match self.line {
+            Line::Sound => 0,
+            Line::Samples => 1,
+            Line::ALaw => 2,
+            Line::MuLaw => 3,
+        };
+        out[3] = u8::from(self.two_wire) | u8::from(self.heard) << 1 | line << 2 | (self.fit & 15) << 4;
         out[4] = match self.wanted {
             Wanted::Dmt => 0,
             Wanted::Qam => 1,
@@ -126,6 +163,13 @@ impl Caps {
             hears_hz: u32::from_le_bytes(frame[6..10].try_into().ok()?),
             sends_hz: u32::from_le_bytes(frame[10..14].try_into().ok()?),
             asks_baud: u32::from_le_bytes(frame[14..18].try_into().ok()?),
+            line: match frame[3] >> 2 & 3 {
+                1 => Line::Samples,
+                2 => Line::ALaw,
+                3 => Line::MuLaw,
+                _ => Line::Sound,
+            },
+            fit: frame[3] >> 4,
         })
     }
 }
@@ -202,6 +246,15 @@ pub struct Agreed {
     /// the line: what this end is to send at, and what it asked for itself.
     pub send_baud: u32,
     pub hear_baud: u32,
+    /// The fit of a single carrier each direction's band will pass, as the
+    /// end that hears it measured: what this end is to send with, and what
+    /// it asked for itself. One more than a place in [`FITS`]; nought for
+    /// the carrier as it is built.
+    pub send_fit: u8,
+    pub hear_fit: u8,
+    /// Both ends are on the same kind of SIP call, at one rate, so the
+    /// numbers the call carries can be tried as the data.
+    pub direct: bool,
     /// Anything asked for that could not be had, for whoever is watching.
     pub notes: Vec<String>,
 }
@@ -230,7 +283,11 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     // echo, which wants one sound card: hearing and sending at one rate.
     let asked = mine.two_wire || theirs.two_wire;
     let able = mine.hears_hz == mine.sends_hz && theirs.hears_hz == theirs.sends_hz;
-    if asked && !able {
+    // A call made of packets has a path each way and no echo to cancel.
+    let packets = mine.line != Line::Sound && theirs.line != Line::Sound;
+    if asked && packets {
+        notes.push("two-wire was asked for, and a SIP call has a path each way: running as a wire each way".to_owned());
+    } else if asked && !able {
         notes.push(
             "two-wire was asked for, and an end hears and sends on different sound cards, which cannot cancel an echo: running as a wire each way"
                 .to_owned(),
@@ -243,9 +300,20 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     } else {
         mine.wanted
     };
+    // A fit is for a single carrier on a narrow line that both ends run at
+    // one rate. A sound card has room for the carrier as it is built.
+    let fits = wanted == Wanted::Qam && send_times == 1 && hear_times == 1 && send_hz <= NARROW && hear_hz <= NARROW;
+    let fit = |asked: u8| if fits && usize::from(asked) <= FITS.len() { asked } else { 0 };
     Ok(Agreed {
         wanted,
-        two_wire: asked && able,
+        send_fit: fit(theirs.fit),
+        hear_fit: fit(mine.fit),
+        two_wire: asked && able && !packets,
+        direct: mine.line != Line::Sound
+            && mine.line == theirs.line
+            && send_times == 1
+            && hear_times == 1
+            && send_hz == hear_hz,
         send_hz,
         hear_hz,
         send_times,
@@ -254,6 +322,130 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         hear_baud: mine.asks_baud,
         notes,
     })
+}
+
+/// The fastest a line runs for it to be probed, in samples a second.
+///
+/// A single carrier is built for a third of the line's rate in baud and
+/// four-fifths of its band. On a sound card that is what the card passes
+/// cleanly. On a call at 8 or 16 kHz it leaves a fifth of a band that was
+/// narrow to begin with, and the call passes nearly all of it.
+pub const NARROW: f64 = 16_000.0;
+
+/// The ways a single carrier is fitted to a narrow line, the fastest first:
+/// the baud and the carrier as shares of the line's sample rate, and the
+/// excess bandwidth. At 8 kHz they are 3700, 3429 and 3000 baud, where the
+/// carrier as it is built is 2667.
+///
+/// | Baud at 8 kHz | Carrier | Band |
+/// |---|---|---|
+/// | 3700 | 2000 Hz | 58 to 3942 Hz |
+/// | 3429 | 2000 Hz | 114 to 3886 Hz |
+/// | 3000 | 1900 Hz | 100 to 3700 Hz |
+pub const FITS: [(f64, f64, f64); 3] = [(0.4625, 0.25, 0.05), (3.0 / 7.0, 0.25, 0.1), (0.375, 0.2375, 0.2)];
+
+/// The probe's tones, as shares of the sample rate: two in the middle of
+/// the band, which any line passes and the rest are measured against; two
+/// at the bottom; three at the top. At 8 kHz: 600 and 2800 Hz, 100 and
+/// 200 Hz, 3600, 3800 and 3900 Hz.
+///
+/// The two in the middle are each two bit rates from the nearest of the
+/// handshake's own tones, which is where the handshake's ear hears nothing.
+const PROBE: [f64; 7] = [0.075, 0.35, 0.0125, 0.025, 0.45, 0.475, 0.4875];
+
+/// The level of each of the probe's tones.
+const PROBE_LEVEL: f64 = 0.04;
+
+/// How far below the middle of the band a tone at its edge may arrive and
+/// the edge still be counted as band: 6 dB, as a ratio of powers.
+const PASSES: f64 = 0.25;
+
+/// The probe's ear: how loud each of the far end's probe tones arrives.
+///
+/// The handshake's tones cross any line. What a single carrier needs to
+/// know is how much more of the band the line passes than those do, and
+/// nothing in the handshake says. So each end sends, under its handshake, a
+/// few faint steady tones at the edges of the band, and each end measures
+/// the other's. That is V.34's line probe (10.1.2.3) in miniature.
+struct Probe {
+    /// Samples in a tenth of a second, over which every tone is a whole
+    /// number of cycles; and how many have been heard of this one.
+    block: usize,
+    heard: usize,
+    turn: [f64; 7],
+    step: [f64; 7],
+    sums: [(f64, f64); 7],
+    /// The power of each tone over the last three tenths.
+    last: [[f64; 7]; 3],
+    blocks: usize,
+    /// The fit the line will pass, once it has been steady long enough to
+    /// say.
+    fit: Option<u8>,
+}
+
+impl Probe {
+    fn new(fs: f64) -> Self {
+        let mut step = [0.0; 7];
+        for (step, share) in step.iter_mut().zip(PROBE) {
+            *step = std::f64::consts::TAU * share;
+        }
+        Self {
+            block: (fs / 10.0).round() as usize,
+            heard: 0,
+            turn: [0.0; 7],
+            step,
+            sums: [(0.0, 0.0); 7],
+            last: [[0.0; 7]; 3],
+            blocks: 0,
+            fit: None,
+        }
+    }
+
+    fn hear(&mut self, x: f64) {
+        for i in 0..7 {
+            self.sums[i].0 += x * self.turn[i].cos();
+            self.sums[i].1 += x * self.turn[i].sin();
+            self.turn[i] = (self.turn[i] + self.step[i]) % std::f64::consts::TAU;
+        }
+        self.heard += 1;
+        if self.heard < self.block {
+            return;
+        }
+        self.heard = 0;
+        let scale = 2.0 / self.block as f64;
+        let mut now = [0.0; 7];
+        for (power, sum) in now.iter_mut().zip(&mut self.sums) {
+            *power = (sum.0 * sum.0 + sum.1 * sum.1) * scale * scale;
+            *sum = (0.0, 0.0);
+        }
+        self.last.rotate_left(1);
+        self.last[2] = now;
+        self.blocks += 1;
+        // The middle of the band, three tenths running, there and steady:
+        // the far end's probe, whole, and not the start of it.
+        let middle = |block: &[f64; 7]| (block[0] + block[1]) / 2.0;
+        let (least, most) = self.last.iter().map(middle).fold((f64::MAX, 0.0f64), |(a, b), m| (a.min(m), b.max(m)));
+        if self.blocks < 3 || least < 1e-9 || most > 2.0 * least {
+            return;
+        }
+        let mean = |tone: usize| self.last.iter().map(|block| block[tone]).sum::<f64>() / 3.0;
+        let reference = (mean(0) + mean(1)) / 2.0;
+        // The two in the middle should arrive alike. Where one is far
+        // above the other, what is being heard is not a probe.
+        if mean(0) > 8.0 * mean(1) || mean(1) > 8.0 * mean(0) {
+            return;
+        }
+        let passes = |tone: usize| mean(tone) >= PASSES * reference;
+        self.fit = Some(if passes(2) && passes(6) {
+            1
+        } else if passes(3) && passes(5) {
+            2
+        } else if passes(3) && passes(4) {
+            3
+        } else {
+            0
+        });
+    }
 }
 
 /// One tone pair's detector on one channel: is the bit now arriving a one
@@ -426,6 +618,15 @@ pub struct Hello {
     since: f64,
     fs_in: f64,
     done: bool,
+    /// The probe's tones this end sends under its own, on a narrow line,
+    /// and its ear for the far end's.
+    probe_turn: [f64; 7],
+    probe: Option<Probe>,
+    /// Whether this end has measured the far end's probe, or has given up
+    /// on there being one, and so knows what to say in its message. Until
+    /// then it sends the idle tone and no message.
+    ready: bool,
+    heard_for: f64,
 }
 
 impl std::fmt::Debug for Hello {
@@ -453,6 +654,10 @@ impl Hello {
             since: 0.0,
             fs_in,
             done: false,
+            probe_turn: [0.0; 7],
+            probe: (fs_in <= NARROW).then(|| Probe::new(fs_in)),
+            ready: fs_in > NARROW,
+            heard_for: 0.0,
         };
         hello.message();
         hello
@@ -496,6 +701,19 @@ impl Hello {
 
     /// A frame as it arrived, a sample a channel.
     pub fn hear(&mut self, input: &[f64]) {
+        self.heard_for += 1.0;
+        if let Some(probe) = self.probe.as_mut().filter(|_| !self.ready) {
+            probe.hear(input.iter().sum::<f64>() / input.len().max(1) as f64);
+            // The far end's probe measured; or its message read with no
+            // probe under it, which is a far end that sends none; or
+            // nothing in a long while.
+            let fit = probe.fit.or((self.theirs.is_some() || self.heard_for > UNPROBED * self.fs_in).then_some(0));
+            if let Some(fit) = fit {
+                self.mine.fit = fit;
+                self.ready = true;
+                self.message();
+            }
+        }
         for (ear, &x) in self.ears.iter_mut().zip(input) {
             if let Some(Heard::Caps(caps)) = ear.hear(x) {
                 // The latest is the one that counts: it may now say the far
@@ -516,6 +734,19 @@ impl Hello {
         if self.done {
             return 0.0;
         }
+        // The probe's tones, under whatever else is said, on a narrow line.
+        let mut probe = 0.0;
+        if self.fs_out <= NARROW {
+            for (turn, share) in self.probe_turn.iter_mut().zip(PROBE) {
+                *turn = (*turn + std::f64::consts::TAU * share) % std::f64::consts::TAU;
+                probe += PROBE_LEVEL * turn.sin();
+            }
+        }
+        if !self.ready {
+            // Nothing to say yet: the idle tone, which is a one.
+            self.turn = (self.turn + std::f64::consts::TAU * self.tones.0 / self.fs_out) % std::f64::consts::TAU;
+            return LEVEL * self.turn.sin() + probe;
+        }
         if self.left_in_bit <= 0.0 {
             self.left_in_bit += self.fs_out / BAUD;
             self.at += 1;
@@ -535,7 +766,7 @@ impl Hello {
         self.left_in_bit -= 1.0;
         let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
         self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
-        LEVEL * self.turn.sin()
+        LEVEL * self.turn.sin() + probe
     }
 }
 
@@ -1004,12 +1235,12 @@ mod tests {
     use super::*;
 
     fn caps(hears: u32, sends: u32) -> Caps {
-        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0 }
+        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0, line: Line::Sound, fit: 0 }
     }
 
     #[test]
     fn a_message_survives_being_written_down() {
-        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, ..caps(192_000, 48_000) };
+        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, line: Line::MuLaw, fit: 3, ..caps(192_000, 48_000) };
         assert_eq!(Caps::decode(&said.encode()), Some(said));
         let mut spoiled = said.encode();
         spoiled[7] ^= 1;
@@ -1060,6 +1291,98 @@ mod tests {
         (caller, host, tick as f64 / line)
     }
 
+    /// A line that passes `low` to `high` hertz and nothing else: a
+    /// windowed sinc.
+    struct Band {
+        taps: Vec<f64>,
+        past: std::collections::VecDeque<f64>,
+    }
+
+    impl Band {
+        fn new(fs: f64, low: f64, high: f64) -> Self {
+            let half = 160i64;
+            let sinc = |cut: f64, t: f64| if t == 0.0 { 2.0 * cut / fs } else { (std::f64::consts::TAU * cut * t / fs).sin() / (std::f64::consts::PI * t) };
+            let taps: Vec<f64> = (-half..=half)
+                .map(|i| {
+                    let t = i as f64;
+                    (sinc(high, t) - sinc(low, t)) * (0.5 + 0.5 * (std::f64::consts::PI * t / (half + 1) as f64).cos())
+                })
+                .collect();
+            Self { past: std::collections::VecDeque::from(vec![0.0; taps.len()]), taps }
+        }
+
+        fn pass(&mut self, x: f64) -> f64 {
+            self.past.pop_back();
+            self.past.push_front(x);
+            self.taps.iter().zip(&self.past).map(|(t, p)| t * p).sum()
+        }
+    }
+
+    /// Two ends at 8 kHz say hello through a line that passes `band`, the
+    /// host starting `late` seconds after the caller: what each made of
+    /// the band it hears, and how long it took.
+    fn probed(band: Option<(f64, f64)>, late: f64, wanted: Wanted) -> (Agreed, Agreed, f64) {
+        let fs = 8_000.0;
+        let mine = Caps { wanted, channels: 1, line: Line::MuLaw, ..caps(8_000, 8_000) };
+        let (mut caller, mut host) = (Hello::new(true, mine), Hello::new(false, mine));
+        let mut lines = band.map(|(low, high)| (Band::new(fs, low, high), Band::new(fs, low, high)));
+        let (mut from_caller, mut from_host) = (0.0, 0.0);
+        let mut tick = 0usize;
+        while !(caller.done() && host.done()) && tick < (20.0 * fs) as usize {
+            let (to_host, to_caller) = match lines.as_mut() {
+                Some((out, back)) => (out.pass(from_caller), back.pass(from_host)),
+                None => (from_caller, from_host),
+            };
+            from_caller = caller.say();
+            caller.hear(&[to_caller]);
+            if tick as f64 >= late * fs {
+                from_host = host.say();
+                host.hear(&[to_host]);
+            }
+            tick += 1;
+        }
+        assert!(caller.done() && host.done(), "{band:?}: not done");
+        (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap(), tick as f64 / fs)
+    }
+
+    #[test]
+    fn the_probe_finds_how_much_of_the_band_a_narrow_line_passes() {
+        // A call that passes everything, as G.711 between two of these
+        // does: the widest fit, each way.
+        let (caller, host, took) = probed(None, 0.0, Wanted::Qam);
+        assert_eq!((caller.hear_fit, caller.send_fit, host.hear_fit, host.send_fit), (1, 1, 1, 1));
+        // And it costs the handshake a few tenths of a second.
+        assert!(took < 6.0, "{took} s");
+        // An end that starts most of a second after the other.
+        let (caller, host, _) = probed(None, 0.8, Wanted::Qam);
+        assert_eq!((caller.hear_fit, host.hear_fit), (1, 1));
+        // What a telephone network passes: none of them fits, and the
+        // carrier runs as it is built.
+        let (caller, host, _) = probed(Some((300.0, 3400.0)), 0.0, Wanted::Qam);
+        assert_eq!((caller.hear_fit, caller.send_fit, host.hear_fit, host.send_fit), (0, 0, 0, 0));
+        // A line that stops between the two.
+        let (caller, host, _) = probed(Some((50.0, 3850.0)), 0.3, Wanted::Qam);
+        assert_eq!((caller.hear_fit, host.hear_fit), (2, 2));
+        let (caller, host, _) = probed(Some((150.0, 3700.0)), 0.0, Wanted::Qam);
+        assert_eq!((caller.hear_fit, host.hear_fit), (3, 3));
+        // Only a single carrier is fitted; the others take no notice.
+        let (caller, host, _) = probed(None, 0.0, Wanted::Dmt);
+        assert_eq!((caller.hear_fit, caller.send_fit, host.hear_fit, host.send_fit), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_far_end_that_sends_no_probe_is_not_waited_for() {
+        // A sound card at 48 kHz calling an end at 8 kHz: nothing to fit,
+        // and the handshake takes what it took.
+        let narrow = Caps { wanted: Wanted::Qam, ..caps(8_000, 8_000) };
+        let wide = Caps { wanted: Wanted::Qam, ..caps(48_000, 48_000) };
+        let (caller, host, took) = meet(narrow, wide, 0.0, 0.0);
+        assert!(caller.done() && host.done());
+        assert!(took < 8.0, "{took} s");
+        let agreed = caller.agreed().unwrap().unwrap();
+        assert_eq!((agreed.hear_fit, agreed.send_fit), (0, 0));
+    }
+
     #[test]
     fn two_ends_learn_what_each_other_are_and_agree() {
         // The rig that started this: each end hears on one device and sends
@@ -1077,6 +1400,34 @@ mod tests {
         assert_eq!((theirs.send_hz, theirs.hear_hz), (48_000.0, 192_000.0));
         assert_eq!((ours.send_times, ours.hear_times), (1, 1));
         assert!(ours.notes.iter().any(|n| n.contains("two-wire was asked for")), "{:?}", ours.notes);
+    }
+
+    #[test]
+    fn the_numbers_of_a_call_are_tried_only_between_two_ends_on_the_same_kind_of_call() {
+        let on = |line: Line| Caps { line, ..caps(8_000, 8_000) };
+        for line in [Line::Samples, Line::ALaw, Line::MuLaw] {
+            assert!(agree(&on(line), &on(line)).unwrap().direct, "{line:?}");
+            // What the line is made of crosses in the message.
+            assert_eq!(Caps::decode(&on(line).encode()), Some(on(line)));
+        }
+        // A sound card each end, or one behind a gateway, or a gateway
+        // that changes one law into the other: a waveform.
+        assert!(!agree(&on(Line::Sound), &on(Line::Sound)).unwrap().direct);
+        assert!(!agree(&on(Line::MuLaw), &on(Line::Sound)).unwrap().direct);
+        assert!(!agree(&on(Line::ALaw), &on(Line::MuLaw)).unwrap().direct);
+        // And not across a change of rate.
+        let fast = Caps { line: Line::Samples, ..caps(16_000, 16_000) };
+        assert!(!agree(&fast, &on(Line::Samples)).unwrap().direct);
+    }
+
+    #[test]
+    fn a_call_of_packets_is_never_run_as_one_pair_of_wires() {
+        let on = |line: Line| Caps { line, two_wire: true, ..caps(8_000, 8_000) };
+        let agreed = agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap();
+        assert!(!agreed.two_wire);
+        assert!(agreed.notes.iter().any(|note| note.contains("a SIP call has a path each way")), "{:?}", agreed.notes);
+        // One end on a sound card can still have an echo to cancel.
+        assert!(agree(&on(Line::Sound), &on(Line::MuLaw)).unwrap().two_wire);
     }
 
     #[test]
