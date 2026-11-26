@@ -370,6 +370,9 @@ struct Sip {
     host: Modem,
     told: String,
     notes: Vec<String>,
+    /// What the call passes of the band, if not all of it: a filter each
+    /// way, as a network of telephone lines has.
+    band: Option<[(Dull, Dull); 2]>,
     /// What each end last said, and last heard, at the rate of the call.
     from: [f64; 2],
     heard: [f64; 2],
@@ -380,7 +383,7 @@ impl Sip {
     fn new(coding: (Coding, Coding), recoded: bool, caller_set: &str, host_set: &str) -> Self {
         assert_eq!(coding.0.rate(), coding.1.rate());
         let (caller, host) = dialled(caller_set, host_set);
-        Self { coding, recoded, caller, host, told: String::new(), notes: Vec::new(), from: [0.0; 2], heard: [0.0; 2], seconds: 0.0 }
+        Self { coding, recoded, caller, host, told: String::new(), notes: Vec::new(), band: None, from: [0.0; 2], heard: [0.0; 2], seconds: 0.0 }
     }
 
     /// A call in one coding from end to end, with nothing in the way, and
@@ -412,17 +415,27 @@ impl Sip {
     }
 
     fn tick(&mut self) {
+        let filtered = self.band.is_some();
         let across = |level: f64, to: Coding, from: Coding, recoded: bool| {
             if recoded {
-                to.carry(0.93 * level + 0.0007)
+                to.carry(if filtered { level } else { 0.93 * level + 0.0007 })
             } else if to == from {
                 level
             } else {
                 to.carry(level)
             }
         };
-        let to_caller = across(self.from[1], self.coding.0, self.coding.1, self.recoded);
-        let to_host = across(self.from[0], self.coding.1, self.coding.0, self.recoded);
+        // What is between the two ends decodes the call to filter it, and
+        // codes it again.
+        let mut passed = [self.from[0], self.from[1]];
+        if let Some(band) = self.band.as_mut() {
+            for (level, (top, bottom)) in passed.iter_mut().zip(band.iter_mut()) {
+                *level = top.pass(*level) - bottom.pass(*level);
+            }
+        }
+        let recoded = self.recoded || self.band.is_some();
+        let to_caller = across(passed[1], self.coding.0, self.coding.1, recoded);
+        let to_host = across(passed[0], self.coding.1, self.coding.0, recoded);
         self.from[0] = Self::end(&mut self.caller, self.coding.0, to_caller, &mut self.heard[0]);
         self.from[1] = Self::end(&mut self.host, self.coding.1, to_host, &mut self.heard[1]);
         self.told.push_str(&said(&self.caller.take_dte()));
@@ -488,9 +501,12 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
         for (carrier, name, least) in [
             ("VARC", "V.ARC/G.711", 48_000),
             ("VARC2W", "V.ARC/G.711", 48_000),
-            ("VARCQ", "V.ARC/QAM", 15_000),
+            // Fitted to the call, 3700 baud where a third of the call's
+            // rate is 2667, and on the trellis code: more than a V.34
+            // carries at its best.
+            ("VARCQ", "V.ARC/QAM", 35_000),
             ("VARCP", "V.ARC/PCM", 12_000),
-            ("VARCQ2W", "V.ARC/QAM", 15_000),
+            ("VARCQ2W", "V.ARC/QAM", 35_000),
         ] {
             let what = format!("{carrier} in {law:?}");
             let mut call = Sip::clean(Coding::G711(law), carrier);
@@ -559,14 +575,67 @@ fn ends_in_different_laws_run_the_modulation_and_do_not_try_the_codewords() {
     assert!(got == sent, "{} of {} octets", got.len(), sent.len());
 }
 
+/// A single carrier is fitted to the call: the handshake's probe finds
+/// that a call in G.711 passes nearly all of its 4 kHz, and the carrier
+/// runs at 3700 baud across it. Where the call goes through something that
+/// passes a telephone's band and no more, the probe finds that too, and
+/// the carrier runs as it is built, inside that band.
+#[test]
+fn a_single_carrier_is_fitted_to_the_band_the_call_passes() {
+    let mut call = Sip::clean(Coding::G711(Law::Mu), "VARCQ");
+    assert!(call.connect(60.0), "{}", call.all_notes());
+    assert_eq!(call.caller.varc_bauds(), (3700, 3700));
+    assert_eq!(call.host.varc_bauds(), (3700, 3700));
+    let wide = call.caller.rate().unwrap_or(0);
+    assert!(wide > 35_000, "{wide} bit/s");
+    // And it is a rate the call keeps: a quarter of a megabyte crosses
+    // whole, at nine-tenths of that rate or better, with the tables left
+    // as they were first made.
+    let before = call.notes.len();
+    // Octets with no pattern to them, or the call's compression would
+    // carry them in a fraction of the time.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let sent: Vec<u8> = (0..250_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    let started = call.seconds;
+    let got = call.send(&sent, 80.0);
+    assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+    let carried = 8.0 * sent.len() as f64 / (call.seconds - started);
+    eprintln!("V.ARC/QAM through mu-law: {wide} bit/s on the line, {carried:.0} bit/s carried");
+    assert!(carried > 0.9 * f64::from(wide), "{carried:.0} bit/s carried at {wide}
+{}", call.notes[before..].join("
+"));
+    assert!(!call.notes[before..].iter().any(|note| note.contains("exchanging tables")), "{}", call.notes[before..].join("
+"));
+
+    let mut call = Sip::clean(Coding::G711(Law::Mu), "VARCQ");
+    let band = || (Dull::new(8_000.0, 3_400.0), Dull::new(8_000.0, 300.0));
+    call.band = Some([band(), band()]);
+    assert!(call.connect(80.0), "{}", call.all_notes());
+    assert_eq!(call.caller.varc_bauds(), (2666, 2666), "{}", call.all_notes());
+    assert_eq!(call.host.varc_bauds(), (2666, 2666));
+    let narrow = call.caller.rate().unwrap_or(0);
+    assert!(narrow > 12_000 && narrow < wide, "{narrow} bit/s");
+    let sent = page(4000);
+    let got = call.send(&sent, 12.0);
+    assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+}
+
 /// A baud, a code and a grid chosen by hand hold on a call in G.711 too,
 /// where a carrier at full speed is 2666 baud.
 #[test]
 fn a_mode_set_by_hand_runs_on_a_call_in_g711() {
     let mut call = Sip::new((Coding::G711(Law::Mu), Coding::G711(Law::Mu)), false, "AT+MS=VARCQ;+VARC=1333,50,4", "AT+MS=VARCQ");
     assert!(call.connect(70.0), "{}", call.all_notes());
-    assert_eq!(call.caller.varc_bauds(), (1333, 2666));
-    assert_eq!(call.host.varc_bauds(), (2666, 1333));
+    // The way nobody chose is the widest fit the call passes.
+    assert_eq!(call.caller.varc_bauds(), (1333, 3700));
+    assert_eq!(call.host.varc_bauds(), (3700, 1333));
     let (n, k) = call.caller.varc_code().expect("a code");
     assert!((k as f64 / n as f64 - 0.5).abs() < 0.03, "a code of {k}/{n}");
     // 1333 baud of four bits, half of them data, less the sync words.
@@ -636,10 +705,15 @@ fn a_call_that_is_not_exact_after_all_carries_on_as_the_multicarrier_mode() {
     assert!(call.all_notes().contains("does not carry samples exactly"), "{}", call.all_notes());
     // The handshake is not run again: what the two ends agreed stands.
     assert_eq!(call.all_notes().matches("V.ARC: agreed on").count(), 2, "{}", call.all_notes());
-    // Sixteen-bit samples are a clean line by any other measure.
-    assert!(call.caller.rate().unwrap_or(0) > 100_000, "{:?} bit/s", call.caller.rate());
     let got = call.send(b"samples that are the data", 3.0);
     assert_eq!(said(&got), "samples that are the data");
+    // Sixteen-bit samples are a clean line by any other measure, once the
+    // table has followed the line up.
+    for _ in 0..(20.0 * 16_000.0) as usize {
+        call.tick();
+    }
+    assert!(call.caller.rate().unwrap_or(0) > 100_000, "{:?} bit/s
+{}", call.caller.rate(), call.all_notes());
 }
 
 /// A far end that has no V.ARC: V.8 finds that out, and the call is one of

@@ -31,7 +31,12 @@ SIP account:
   `AT+VARCBIS` lists it when `+MS` names an ordinary mode.
 - Each mode runs on each SIP coding. In G.711 (PCMU or PCMA) the
   modulations run at 8 kHz: approximately 26 kbit/s for the multicarrier
-  mode, 23 kbit/s for QAM and 22 kbit/s for the levels.
+  mode, 37 kbit/s for QAM and 22 kbit/s for the levels.
+- On a call of 16 kHz or less, QAM fits its baud to the band of the call. A
+  line probe in the handshake measures the band. In G.711 the baud is 3700.
+- QAM has a trellis code of 64 states and a shell mapper, as V.34 has. A
+  symbol carries its bits in steps of an eighth of a bit. Through G.711
+  that is 37 000 bit/s, more than the 33 600 bit/s of V.34.
 - Where both ends have the same coding, `AT+MS=VARC` uses the numbers of
   the call as the data: 200 kbit/s on linear samples at 16 kHz, 61 kbit/s
   on A-law, 57 kbit/s on mu-law. If the path changes the numbers, the call
