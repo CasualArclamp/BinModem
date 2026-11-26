@@ -27,8 +27,8 @@ BinModem had read that silence as the end of the burst.
 
 ## V.17
 
-V.17 carries the page at 14 400 down to 7200 between two BinModems. No real
-machine was tried at V.17 yet.
+V.17 carries the page at 14 400 down to 7200. It works between two BinModems
+and with real fax machines.
 
 ## Super G3
 
@@ -38,8 +38,7 @@ channel.
 
 Super G3 also works between two BinModems, over the delay and the slips of the
 VoIP line. A real Super G3 fax has sent a page to a BinModem at 33 600 on 3429
-baud, in JBIG. A transmission to a real Super G3 fax has not been successful
-yet.
+baud, in JBIG. A transmission to a real Super G3 fax was also successful.
 
 ## Error correction mode
 
