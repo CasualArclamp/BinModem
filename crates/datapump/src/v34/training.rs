@@ -1182,6 +1182,9 @@ impl Modem {
     }
 
     fn fail(&mut self, why: &'static str) {
+        if std::env::var_os("V34_ECHO_TRACE").is_some() {
+            eprintln!("v34 training[{:?}]: failed at {:.3} s in {}: {why}", self.settings.role, self.now as f64 / self.fs, self.stage.name());
+        }
         self.stopped_at = self.stage.name();
         self.status = Status::Failed(why);
         self.stage = Stage::Finished;
@@ -1191,6 +1194,9 @@ impl Modem {
     }
 
     fn enter(&mut self, stage: Stage) {
+        if std::env::var_os("V34_ECHO_TRACE").is_some() {
+            eprintln!("v34 training[{:?}]: {:.3} s {:?} -> {:?}", self.settings.role, self.now as f64 / self.fs, self.stage, stage);
+        }
         self.stage = stage;
     }
 
@@ -1595,6 +1601,11 @@ impl Modem {
                     self.source.change(Segment::J);
                 }
                 if self.source.segment == Segment::J {
+                    // Hunt for the answer modem's S from nothing, as the
+                    // answer modem does for the call modem's. On one pair of
+                    // wires the receiver heard this end's own phase 3 while
+                    // the canceller learned it, and would follow that.
+                    self.rx.hunt();
                     // 11.4.2.1.1: the answer modem's S-bar within 600 ms and a
                     // round trip of this end's J.
                     self.deadline = Some((self.samples(0.6 + self.rtd() + SLACK), "no S from the answer modem in phase 4"));

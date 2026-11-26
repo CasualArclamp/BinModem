@@ -125,6 +125,7 @@ pub struct Modem {
     left: (f64, f64),
     left_for: usize,
     worse_looks: u32,
+    trace: (f64, f64, f64, usize),
 }
 
 impl Modem {
@@ -165,6 +166,7 @@ impl Modem {
             left: (0.0, 0.0),
             left_for: 0,
             worse_looks: 0,
+            trace: (0.0, 0.0, 0.0, 0),
         }
     }
 
@@ -259,6 +261,15 @@ impl Modem {
                     self.trained_loss = self.trained_loss.max(learned.max(fitted));
                 }
             }
+            if std::env::var_os("V34_ECHO_TRACE").is_some() {
+                eprintln!(
+                    "v34 echo[{:?}]: round trip {:?} s, removed {removed:.1} dB, reflection {:?}, fit {:?}",
+                    self.phase2.role(),
+                    self.phase2.round_trip(),
+                    self.reflection,
+                    self.fitted
+                );
+            }
             // A sound card's cable does not keep its echo where training
             // found it. See [`Self::watch_drift`].
             if self.following {
@@ -271,6 +282,25 @@ impl Modem {
             }
         }
         self.was_training = training;
+        if std::env::var_os("V34_ECHO_TRACE").is_some() {
+            self.trace.0 += line * line;
+            self.trace.1 += cleaned * cleaned;
+            self.trace.2 += self.sent * self.sent;
+            self.trace.3 += 1;
+            if self.trace.3 >= (0.1 * self.fs) as usize {
+                let db = |x: f64| 10.0 * x.max(1e-30).log10();
+                eprintln!(
+                    "v34 trace[{:?}] {}: snr {:.1} line {:.1} left {:.1} sent {:.1} dB",
+                    self.phase2.role(),
+                    self.phase(),
+                    self.snr_db().unwrap_or(0.0),
+                    db(self.trace.0 / self.trace.3 as f64),
+                    db(self.trace.1 / self.trace.3 as f64),
+                    db(self.trace.2 / self.trace.3 as f64)
+                );
+                self.trace = (0.0, 0.0, 0.0, 0);
+            }
+        }
         cleaned
     }
 
@@ -340,6 +370,9 @@ impl Modem {
         {
             self.echo = follower;
             self.following = true;
+            if std::env::var_os("V34_ECHO_TRACE").is_some() {
+                eprintln!("v34 echo[{:?}]: the echo moves; following it", self.phase2.role());
+            }
         }
     }
 

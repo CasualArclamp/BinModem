@@ -184,6 +184,55 @@ fn an_echo_as_loud_as_the_far_end_costs_nothing() {
     }
 }
 
+/// An echo at any distance from the far end. These failed before the call
+/// modem hunted for the S of phase 4 afresh: its receiver had followed this
+/// end's own phase 3 while the canceller learned it.
+#[test]
+fn an_echo_at_another_distance_from_the_far_end_is_taken_out() {
+    for delay in [300, 500, 900] {
+        let mut pair = Pair::new(Echo::copy(delay, 1.0));
+        let what = format!("an echo {delay} samples away");
+        pair.connect_and_talk(&what);
+        assert_eq!((pair.caller.rate(), pair.host.rate()), (Some(33_600), Some(33_600)), "{what}");
+        let found = pair.caller.reflection().map(|r| r.delay);
+        assert!(found.is_some_and(|d| d.abs_diff(delay) < 4), "{what}: found at {found:?}");
+    }
+}
+
+/// One cable, as `modem-loop` and two windows use it: both ends send into
+/// it and both hear the sum, a crossing later. The VB-Audio cable here is
+/// 180 ms long, and with the canceller a call on it connects at 33 600.
+#[test]
+fn one_long_cable_carries_33600_both_ways() {
+    for crossing in [1000, 2850] {
+        let mut caller = Modem::new(FS);
+        let mut host = Modem::new(FS);
+        for m in [&mut caller, &mut host] {
+            for b in b"AT+MS=V34\r" {
+                m.feed_dte(*b);
+            }
+            m.take_dte();
+        }
+        for b in b"ATA\r" {
+            host.feed_dte(*b);
+        }
+        for b in b"ATD5551234\r" {
+            caller.feed_dte(*b);
+        }
+        let mut wire = VecDeque::from(vec![0.0; crossing]);
+        for _ in 0..(20.0 * FS) as usize {
+            let heard = wire.pop_front().unwrap_or(0.0);
+            let a = caller.step(heard);
+            let b = host.step(heard);
+            wire.push_back((a + b) * HEADROOM);
+            caller.take_dte();
+            host.take_dte();
+        }
+        assert_eq!(caller.state(), State::Data, "a cable {crossing} samples long: the caller is in {}", caller.line_phase());
+        assert_eq!((caller.rate(), host.rate()), (Some(33_600), Some(33_600)), "a cable {crossing} samples long");
+    }
+}
+
 /// A faint echo is found too. It was not, at the call modem: the answer
 /// modem's J was still arriving when the search started, and next to a
 /// faint echo that was most of the line.

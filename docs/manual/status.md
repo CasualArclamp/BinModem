@@ -55,6 +55,11 @@ Phase 2 reads the probe of the far end for 300 ms, not the full 500 that V.34
 permits. A real modem needed the difference to hear our reply. Without the
 difference that modem stalled three times in sequence.
 
+V.34 has an echo canceller for one pair of wires. Two of these modems on one
+shared virtual cable, with an echo 182 ms away, connect at 33 600. Phase 2
+can still fail on that cable. See
+[docs/design/v34-echo.md](../design/v34-echo.md).
+
 ## V.90
 
 V.90 works in both directions.
