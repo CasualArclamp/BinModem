@@ -11,6 +11,19 @@ dialsnoop.exe                 the same reader, as a program of its own
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.5.2
+
+### V.34 phase 2: a tone that stops is not a phase reversal
+
+- **The fault:** in phase 2, the far end's tone sometimes stopped before it reversed. The reversal detector then reported a reversal in the silence, approximately 50 ms later. This end answered a reversal that did not occur, and the retrain failed.
+- **The fix:** the detector now reports a reversal only when the tone is present before and after it. A real reversal is reported at the same sample as before.
+- **Where it shows:** V.34, V.90 and V.92 retrains on a VoIP line that has short gaps of digital silence.
+
+### Documentation
+
+- The README is now a short overview with links. The detail is in [docs/manual](https://github.com/CasualArclamp/BinModem/tree/main/docs/manual).
+- The README, `docs/usage.md` and `docs/quickstart.md` are now in Simplified Technical English.
+
 ## What's new in 5.5.1
 
 ### V.92 PCM upstream to Netstalgia, on every call

@@ -122,5 +122,5 @@ and one table.
 ## Portability
 
 BinModem is portable in principle. It uses `cpal` for the audio and `eframe`
-for the window, and it has no OS-specific code. But until now it was built and
-run only on Windows.
+for the window, and it has no OS-specific code. It is built and run on Windows
+and on Linux.

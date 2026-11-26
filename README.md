@@ -120,16 +120,9 @@ follow it. The session that it carried comes out as text.
 
 These items are not complete:
 
-- **V.90 between two BinModems through softphones** falls back to V.34.
-- **V.ARC**, our own wideband mode, has not run through a telephone network.
-- **V.92** has not carried a call with a real V.92 modem yet.
 - **x2** has not met a real x2 modem yet.
-- **V.17** fax was not tried with a real machine yet.
-- A fax transmission to a real Super G3 machine has not been successful yet.
 - **T.38** is not there yet.
 - **V.33** is next.
-- BinModem was built and run only on Windows until now. CI builds the Linux
-  executable but does not run it.
 
 [docs/manual/roadmap.md](docs/manual/roadmap.md) has the detail.
 
