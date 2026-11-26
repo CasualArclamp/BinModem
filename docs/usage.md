@@ -492,6 +492,9 @@ One end dials. The other end presses Answer when it rings.
 - Linear samples are offered first, the fastest rate first, and G.711
   after them. With `AT+MS=VARC` the call is V.ARC/L16: 601 kbit/s at
   48 kHz between two windows on one machine.
+- Each V.ARC mode runs on each coding, G.711 included. A V.ARC call starts
+  with V.8, then the V.ARC handshake. If the far end has no V.ARC, the call
+  is an ordinary call. See [the V.ARC design note](design/v-arc.md).
 - **coding** is the format that carries the call. "best both have" is the
   fastest linear coding that the two ends share. You can select one of the
   eight linear codings instead, or G.711 mu-law or A-law. G.711 is what a

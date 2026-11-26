@@ -1,11 +1,13 @@
 //! A V.ARC call, as the modem sees one.
 //!
-//! Every other call this modem makes starts with a negotiation, because the
-//! far end could be anything. A V.ARC call has nothing to negotiate: the
-//! far end is another of these on the other end of a lead, or it is nothing.
-//! `ATD` and `ATA` still mean what they mean, since the two ends have to
-//! differ in one respect (see [`varc::dmt::Plan::coloured`]) and "the one
-//! that dialled" is as good a way to tell them apart as any.
+//! A V.ARC call starts as every other call this modem makes does, with V.8,
+//! because the far end could be anything. Each end says in its V.8 menu
+//! that it has V.ARC, and only when both have said so does the call come
+//! here. What is here starts with a negotiation of its own, the handshake
+//! of [`varc::hello`], which settles what V.8 has no words for: rates,
+//! channels, wires, and what the line is made of. Then the mode runs.
+//! `ATD` and `ATA` mean what they mean, and the two ends have to differ in
+//! one respect anyway (see [`varc::dmt::Plan::coloured`]).
 //!
 //! The awkward part is the line. The rest of the modem runs at one rate on
 //! one channel, and a sound card is converted to suit. V.ARC is built on the
@@ -14,16 +16,18 @@
 //! sound card, with a frame of the card's own samples at a time. The modem
 //! says when it wants that, with [`crate::Modem::varc_wanted`].
 //!
-//! The other line it runs on is a SIP call that agreed on linear samples,
-//! where there is no sound card at all and every sample arrives as the
-//! sixteen bits that were sent. There the call starts with no modulation
-//! whatever ([`varc::exact`]), and if a few seconds show that the path is
-//! not exact after all it carries on as the multicarrier mode at the
-//! call's 16 kHz, which wants only that the path be clean.
+//! The other line it runs on is a SIP call, in any coding, where there is
+//! no sound card at all. Every mode runs on one: the modulations at the
+//! rate of the call, which for G.711 is 8 kHz, through whatever the coding
+//! does to a waveform. And where both ends say they are on the same kind of
+//! call, the multicarrier mode first tries no modulation whatever, the
+//! numbers of the call being the data ([`varc::exact`], [`varc::octets`]).
+//! If a few seconds show that the path does not carry them as they were
+//! sent, it carries on as the multicarrier modulation.
 
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
-use varc::hello::{Agreed, Caps, Faster, Half, Hello, Slower, Twice, Wanted, Watch};
+use varc::hello::{Agreed, Caps, Faster, Half, Hello, Line, Slower, Twice, Wanted, Watch};
 use datapump::v90::ucode::{self, Law};
 use varc::exact;
 use varc::octets;
@@ -47,7 +51,7 @@ pub enum VarcMode {
     /// samples exactly.
     Linear,
     /// No modulation on a call in G.711: its codewords are the data. What
-    /// any of the three becomes on a line that carries codewords exactly.
+    /// `VARC` becomes on a line that carries codewords exactly.
     G711,
 }
 
@@ -210,11 +214,10 @@ pub(crate) struct Call {
     g711: Option<Law>,
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
+    /// When the station now running was built, in samples.
+    built_at: u64,
     /// What the stream may be compressed with: `varc::squeeze`'s bits.
     squeeze: u8,
-    /// A line of codewords that turned out not to carry them has nothing
-    /// else V.ARC can run on, and the call is to go on as an ordinary one.
-    gave_up: bool,
     /// Something worth telling whoever is watching, once.
     notes: Vec<String>,
 }
@@ -274,8 +277,8 @@ impl Call {
             exact_line: false,
             g711: None,
             inexact: false,
+            built_at: 0,
             squeeze: 0,
-            gave_up: false,
             notes: Vec::new(),
         }
     }
@@ -318,9 +321,14 @@ impl Call {
         self.station.as_ref().is_some_and(|s| s.arq.squeeze.broken())
     }
 
-    /// Whether the call has found it cannot be a V.ARC call at all.
-    pub fn gave_up(&self) -> bool {
-        self.gave_up
+    /// What this end's line is made of, for the handshake to say.
+    fn line(&self) -> Line {
+        match self.g711 {
+            Some(Law::A) => Line::ALaw,
+            Some(Law::Mu) => Line::MuLaw,
+            None if self.exact_line => Line::Samples,
+            None => Line::Sound,
+        }
     }
 
     /// The level every codeword of the line's law is, and its silence.
@@ -513,19 +521,19 @@ impl Call {
         };
     }
 
-    /// Whether this call starts by saying what each end is. Not on a lead
-    /// that comes straight back, where there is nobody else; and not on a
-    /// line of exact samples, where the far end is known to be the same as
-    /// this one and the samples are not sound.
+    /// Whether this call starts by saying what each end is: every call
+    /// does, but one on a lead that comes straight back, where there is
+    /// nobody else.
     fn greets(&self) -> bool {
-        !self.looped && !((self.exact_line || self.g711.is_some()) && !self.inexact)
+        !self.looped
     }
 
     /// The ends as they would be with nothing to agree: both the same.
-    fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool) -> Agreed {
+    fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool, direct: bool) -> Agreed {
         Agreed {
             wanted,
             two_wire,
+            direct,
             send_hz: fs_out,
             hear_hz: fs,
             send_times: 1,
@@ -651,18 +659,19 @@ impl Call {
     }
 
     fn build(&mut self, fs: f64, agreed: &Agreed, channels: usize) -> Result<End, String> {
-        // On a line of exact samples the multicarrier mode gives way to no
-        // modulation at all, until that has been tried and failed.
-        // And on a line of G.711 codewords every mode does: none of the
-        // three has anything to modulate at 8000 samples a second that the
-        // codewords do not carry better as they are.
+        // Where both ends are on the same kind of SIP call, the
+        // multicarrier mode gives way to no modulation at all, the samples
+        // or the codewords of the call being the data, until that has been
+        // tried and failed. The single-carrier modes were asked for by
+        // name and run as themselves on any call.
         self.mode = match agreed.wanted {
-            _ if self.g711.is_some() && !self.inexact => VarcMode::G711,
             Wanted::Qam => VarcMode::Qam,
             Wanted::Pcm => VarcMode::Pcm,
-            Wanted::Dmt if self.exact_line && !self.inexact => VarcMode::Linear,
+            Wanted::Dmt if agreed.direct && !self.inexact && self.g711.is_some() => VarcMode::G711,
+            Wanted::Dmt if agreed.direct && !self.inexact && self.exact_line => VarcMode::Linear,
             Wanted::Dmt => VarcMode::Dmt,
         };
+        self.built_at = self.samples;
         // A baud that was asked for, by either end for what it hears, is
         // where that direction starts; and where it stays, since somebody
         // asked for it.
@@ -784,6 +793,7 @@ impl Call {
         // will do. Until that is done there is no modulation to run.
         if self.station.is_none() && self.agreed.is_none() && self.greets() {
             let (calling, wanted, two_wire, asks_baud) = (self.calling, self.wanted(), self.two_wire, self.asks_baud);
+            let line = self.line();
             let hello = self.hello.get_or_insert_with(|| {
                 Hello::new(
                     calling,
@@ -795,6 +805,7 @@ impl Call {
                         two_wire,
                         heard: false,
                         asks_baud,
+                        line,
                     },
                 )
             });
@@ -844,7 +855,7 @@ impl Call {
                             "V.ARC two-wire needs its input and output on one sound card at one rate: this line hears at {fs} Hz and sends at {fs_out} Hz. A line with a wire each way is plain V.ARC"
                         ));
                     }
-                    Self::alone(fs, fs_out, self.wanted(), self.two_wire)
+                    Self::alone(fs, fs_out, self.wanted(), self.two_wire, self.line() != Line::Sound)
                 }
             };
             let mut station = self.build(fs, &agreed, input.len())?;
@@ -877,7 +888,10 @@ impl Call {
         }
         if self.turn != Turn::Both {
             self.take_turns(fs, input);
-        } else if self.greets() {
+        } else if self.greets() && !matches!(self.mode, VarcMode::Linear | VarcMode::G711) {
+            // Not while the numbers of the call are the data: they are not
+            // sound, and the modes that use them say for themselves when
+            // they do not arrive.
             self.slow_down(fs, fs_out, input)?;
         }
         let station = self.station.as_mut().expect("just built");
@@ -958,33 +972,27 @@ impl Call {
         if self.first_loaded.is_none() && station.channels.iter().any(|c| c.loaded()) {
             self.first_loaded = Some(self.samples);
         }
-        // A line that was to carry samples exactly and has not: neither end
-        // can read the other, and both find that out at about the same
+        // A line that was to carry its numbers exactly and has not: neither
+        // end can read the other, and both find that out at about the same
         // time, so both give up on it at about the same time and start
-        // again as something that only wants the line to be clean.
-        if self.mode == VarcMode::G711 && self.first_loaded.is_none() && !self.gave_up {
-            let waited = self.samples as f64 / fs;
+        // again as the modulation, which only wants the line to be clean.
+        // What the two ends agreed in the handshake stands.
+        if matches!(self.mode, VarcMode::Linear | VarcMode::G711) && self.first_loaded.is_none() {
+            let waited = (self.samples - self.built_at) as f64 / fs;
             let heard = station.channels.iter().any(|c| c.rx.health().locked);
             if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
                 self.inexact = true;
-                self.gave_up = true;
-                self.notes.push(
-                    "V.ARC: the call does not carry G.711 codewords as they were sent, or the far end is not V.ARC".to_owned(),
-                );
-                return Ok(true);
-            }
-        }
-        if self.mode == VarcMode::Linear && self.first_loaded.is_none() {
-            let waited = self.samples as f64 / fs;
-            let heard = station.channels.iter().any(|c| c.rx.health().locked);
-            if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
-                self.inexact = true;
-                self.notes.push(
-                    "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned(),
-                );
-                self.agreed = None;
+                self.notes.push(if self.mode == VarcMode::G711 {
+                    "V.ARC: the call does not carry G.711 codewords as they were sent; carrying on as the multicarrier mode".to_owned()
+                } else {
+                    "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned()
+                });
                 self.station = None;
+                self.watch = None;
                 self.deaf = 0;
+                self.unheard = 0.0;
+                self.heard_once = false;
+                self.read_before = 0;
                 return Ok(true);
             }
         }
@@ -1148,8 +1156,8 @@ impl Call {
         let asked = |caps: &Caps| {
             let mode = match caps.wanted {
                 Wanted::Dmt => "multicarrier",
-                Wanted::Qam => "QAM at 16 000 baud",
-                Wanted::Pcm => "levels at 16 000 baud",
+                Wanted::Qam => "QAM",
+                Wanted::Pcm => "baseband levels",
             };
             format!("{mode}, {}", if caps.two_wire { "one pair of wires" } else { "a wire each way" })
         };

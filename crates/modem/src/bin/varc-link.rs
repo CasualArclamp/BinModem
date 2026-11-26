@@ -19,7 +19,9 @@
 //! `--modem` is the same lead driven the way the window drives it: one
 //! whole modem, typed at, with `AT+MS=VARC` and `ATDLOOP`, both channels
 //! together, and what is typed after the `CONNECT` checked as it comes
-//! back. It is the call rather than the modulation that is on trial.
+//! back. It is the call rather than the modulation that is on trial. With
+//! `--dial ATA` at one end and `--dial ATD1` at the other it is a call
+//! between two of these, which starts with V.8 on the card as it is.
 //!
 //! `--loop` is two ends in one program on one lead: one sends on the left
 //! channel and listens on the right, the other the reverse. It needs the
@@ -198,9 +200,9 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
             peak = peak.max(frame[0].abs()).max(frame[1].abs());
             let mut out = [0.0f64; 2];
             if apart {
-                modem.varc_hear(fs, f64::from(audio.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+                modem.wide_hear(fs, f64::from(audio.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
             } else {
-                modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                modem.wide_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
                 send.push(out[0] as f32);
                 send.push(out[1] as f32);
             }
@@ -208,7 +210,7 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
         if apart {
             for _ in 0..audio.wanted() {
                 let mut out = [0.0f64; 2];
-                modem.varc_say(&mut out);
+                modem.wide_say(&mut out);
                 send.push(out[0] as f32);
                 send.push(out[1] as f32);
             }

@@ -69,6 +69,27 @@ pub enum Wanted {
     Pcm,
 }
 
+/// What the line of an end is made of.
+///
+/// A sound card carries a waveform. A SIP call carries numbers, and between
+/// two ends that have the same kind of call, with nothing that recodes them
+/// on the way, the numbers arrive as they were sent. The two ends can then
+/// try to use the numbers as the data. They try only when both say the same
+/// kind: an end on a sound card behind a gateway hears a waveform whatever
+/// the far end has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Line {
+    /// A sound card, or anything else that carries a waveform.
+    #[default]
+    Sound,
+    /// A call of sixteen-bit linear samples.
+    Samples,
+    /// A call in G.711, A-law.
+    ALaw,
+    /// A call in G.711, mu-law.
+    MuLaw,
+}
+
 /// What an end is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
@@ -84,6 +105,8 @@ pub struct Caps {
     /// The baud this end wants to be sent to at, where somebody has chosen
     /// one for a single-carrier mode; nought for whatever the line bears.
     pub asks_baud: u32,
+    /// What the line of this end is made of.
+    pub line: Line,
 }
 
 impl Caps {
@@ -91,7 +114,13 @@ impl Caps {
         let mut out = [0u8; FRAME];
         out[..2].copy_from_slice(&HEAD);
         out[2] = 1;
-        out[3] = u8::from(self.two_wire) | u8::from(self.heard) << 1;
+        let line = match self.line {
+            Line::Sound => 0,
+            Line::Samples => 1,
+            Line::ALaw => 2,
+            Line::MuLaw => 3,
+        };
+        out[3] = u8::from(self.two_wire) | u8::from(self.heard) << 1 | line << 2;
         out[4] = match self.wanted {
             Wanted::Dmt => 0,
             Wanted::Qam => 1,
@@ -126,6 +155,12 @@ impl Caps {
             hears_hz: u32::from_le_bytes(frame[6..10].try_into().ok()?),
             sends_hz: u32::from_le_bytes(frame[10..14].try_into().ok()?),
             asks_baud: u32::from_le_bytes(frame[14..18].try_into().ok()?),
+            line: match frame[3] >> 2 & 3 {
+                1 => Line::Samples,
+                2 => Line::ALaw,
+                3 => Line::MuLaw,
+                _ => Line::Sound,
+            },
         })
     }
 }
@@ -202,6 +237,9 @@ pub struct Agreed {
     /// the line: what this end is to send at, and what it asked for itself.
     pub send_baud: u32,
     pub hear_baud: u32,
+    /// Both ends are on the same kind of SIP call, at one rate, so the
+    /// numbers the call carries can be tried as the data.
+    pub direct: bool,
     /// Anything asked for that could not be had, for whoever is watching.
     pub notes: Vec<String>,
 }
@@ -230,7 +268,11 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     // echo, which wants one sound card: hearing and sending at one rate.
     let asked = mine.two_wire || theirs.two_wire;
     let able = mine.hears_hz == mine.sends_hz && theirs.hears_hz == theirs.sends_hz;
-    if asked && !able {
+    // A call made of packets has a path each way and no echo to cancel.
+    let packets = mine.line != Line::Sound && theirs.line != Line::Sound;
+    if asked && packets {
+        notes.push("two-wire was asked for, and a SIP call has a path each way: running as a wire each way".to_owned());
+    } else if asked && !able {
         notes.push(
             "two-wire was asked for, and an end hears and sends on different sound cards, which cannot cancel an echo: running as a wire each way"
                 .to_owned(),
@@ -245,7 +287,12 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
     };
     Ok(Agreed {
         wanted,
-        two_wire: asked && able,
+        two_wire: asked && able && !packets,
+        direct: mine.line != Line::Sound
+            && mine.line == theirs.line
+            && send_times == 1
+            && hear_times == 1
+            && send_hz == hear_hz,
         send_hz,
         hear_hz,
         send_times,
@@ -1004,12 +1051,12 @@ mod tests {
     use super::*;
 
     fn caps(hears: u32, sends: u32) -> Caps {
-        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0 }
+        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0, line: Line::Sound }
     }
 
     #[test]
     fn a_message_survives_being_written_down() {
-        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, ..caps(192_000, 48_000) };
+        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, line: Line::MuLaw, ..caps(192_000, 48_000) };
         assert_eq!(Caps::decode(&said.encode()), Some(said));
         let mut spoiled = said.encode();
         spoiled[7] ^= 1;
@@ -1077,6 +1124,34 @@ mod tests {
         assert_eq!((theirs.send_hz, theirs.hear_hz), (48_000.0, 192_000.0));
         assert_eq!((ours.send_times, ours.hear_times), (1, 1));
         assert!(ours.notes.iter().any(|n| n.contains("two-wire was asked for")), "{:?}", ours.notes);
+    }
+
+    #[test]
+    fn the_numbers_of_a_call_are_tried_only_between_two_ends_on_the_same_kind_of_call() {
+        let on = |line: Line| Caps { line, ..caps(8_000, 8_000) };
+        for line in [Line::Samples, Line::ALaw, Line::MuLaw] {
+            assert!(agree(&on(line), &on(line)).unwrap().direct, "{line:?}");
+            // What the line is made of crosses in the message.
+            assert_eq!(Caps::decode(&on(line).encode()), Some(on(line)));
+        }
+        // A sound card each end, or one behind a gateway, or a gateway
+        // that changes one law into the other: a waveform.
+        assert!(!agree(&on(Line::Sound), &on(Line::Sound)).unwrap().direct);
+        assert!(!agree(&on(Line::MuLaw), &on(Line::Sound)).unwrap().direct);
+        assert!(!agree(&on(Line::ALaw), &on(Line::MuLaw)).unwrap().direct);
+        // And not across a change of rate.
+        let fast = Caps { line: Line::Samples, ..caps(16_000, 16_000) };
+        assert!(!agree(&fast, &on(Line::Samples)).unwrap().direct);
+    }
+
+    #[test]
+    fn a_call_of_packets_is_never_run_as_one_pair_of_wires() {
+        let on = |line: Line| Caps { line, two_wire: true, ..caps(8_000, 8_000) };
+        let agreed = agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap();
+        assert!(!agreed.two_wire);
+        assert!(agreed.notes.iter().any(|note| note.contains("a SIP call has a path each way")), "{:?}", agreed.notes);
+        // One end on a sound card can still have an echo to cancel.
+        assert!(agree(&on(Line::Sound), &on(Line::MuLaw)).unwrap().two_wire);
     }
 
     #[test]

@@ -1315,11 +1315,11 @@ pub struct Modem {
     varc_said: &'static str,
     /// Bits a symbol of the grid a V.ARC call's symbol diagram is showing.
     varc_bits: u8,
-    /// V.ARC has been tried on this call and the line turned out not to
-    /// carry it: it is not listed in V.8 bis again until the next call.
-    varc_spent: bool,
-    /// Samples since V.8 bis chose V.ARC, at the end that answers it.
+    /// Samples since V.8 found V.ARC at both ends.
     varc_wait: usize,
+    /// A sound card as it is, cut down to this modem's rate while the call
+    /// is not yet a V.ARC one: see [`Self::wide_hear`].
+    narrow: Narrow,
     /// Why the last call could not be run on this line at all, until asked.
     call_refused: Option<String>,
     /// An HST call, which like V.ARC is none of the above: no V.8, no V.42,
@@ -1393,8 +1393,8 @@ impl Modem {
             varc_owed_ms: 0.0,
             varc_said: "",
             varc_bits: 0,
-            varc_spent: false,
             varc_wait: 0,
+            narrow: Narrow::default(),
             call_refused: None,
             hst: None,
             hst_closing_ms: None,
@@ -1469,6 +1469,43 @@ impl Modem {
     /// The modulation in use, by the name `+MS` knows it as.
     pub fn modulation(&self) -> &str {
         &self.at.modulation.carrier
+    }
+
+    /// The carrier `+MS` named, as the ordinary modes see it. A V.ARC
+    /// carrier is V.92 to them: a V.ARC call starts with V.8 as any call
+    /// does, and its menu offers V.92 and everything below it for a far end
+    /// that has no V.ARC.
+    fn ordinary_carrier(&self) -> &str {
+        let named = self.at.modulation.carrier.as_str();
+        if VarcMode::from_carrier(named).is_some() { "V92" } else { named }
+    }
+
+    /// What this modem says of V.ARC in the non-standard category of V.8
+    /// and in the non-standard field of V.8 bis: the mode `+MS` named if it
+    /// named one of V.ARC, or else what `+VARCBIS` lists. `None` for a
+    /// modem that was not set to V.ARC at all, and on a fax call.
+    fn varc_offer(&self) -> Option<v8::bis::varc::Offer> {
+        if self.at.service_class == at::ServiceClass::Fax {
+            return None;
+        }
+        let named = self.at.modulation.carrier.as_str();
+        if let Some(mode) = VarcMode::from_carrier(named) {
+            let modulation = match mode {
+                VarcMode::Qam => 1,
+                VarcMode::Pcm => 2,
+                _ => 0,
+            };
+            return Some(v8::bis::varc::Offer { modulation, two_wire: named.ends_with("2W") });
+        }
+        let (mode, two_wire) = self.at.config.varc_bis;
+        (mode != 0).then(|| v8::bis::varc::Offer { modulation: mode - 1, two_wire })
+    }
+
+    /// Whether a call starts with a negotiation: automode, and always for a
+    /// V.ARC carrier, which has nothing else to start with.
+    fn negotiates(&self) -> bool {
+        (self.at.modulation.automode || VarcMode::from_carrier(&self.at.modulation.carrier).is_some())
+            && !self.offered().is_empty()
     }
 
     /// All of what `+MS` last selected: what `AT+MS?` would answer.
@@ -1684,11 +1721,20 @@ impl Modem {
 
     /// The modulation in use, or the one the next call will use.
     pub fn standard(&self) -> &'static str {
-        if let Some(mode) = self.varc_wanted().or_else(|| VarcMode::from_carrier(&self.at.modulation.carrier)) {
+        if let Some(mode) = self.varc_wanted() {
             return mode.name();
         }
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
+        }
+        // The next call, while there is none. A V.ARC call that is in its
+        // V.8, or that became an ordinary call, is named below.
+        if self.pump.is_none()
+            && self.negotiation.is_none()
+            && self.bis.is_none()
+            && let Some(mode) = VarcMode::from_carrier(&self.at.modulation.carrier)
+        {
+            return mode.name();
         }
         if self.hst.is_some() || self.pump.is_none() {
             match self.at.modulation.carrier.as_str() {
@@ -2217,7 +2263,7 @@ impl Modem {
         self.at.regs.get(X2_REGISTER) == Ok(1)
             && self.role == Role::Answering
             && self.pcm_end == Role::Answering
-            && matches!(self.at.modulation.carrier.as_str(), "V90" | "V92")
+            && matches!(self.ordinary_carrier(), "V90" | "V92")
             && !self.network_a_law
     }
 
@@ -2501,38 +2547,14 @@ impl Modem {
 
     /// Tell a V.ARC call that its line is a call in G.711, A-law if `a_law`
     /// and mu-law otherwise, or with `None` that it is not. On such a call
-    /// it starts with no modulation, the codewords being the data, and if
-    /// they turn out not to arrive as sent it carries on as an ordinary
-    /// call; see [`Self::varc_fall_back`].
+    /// the multicarrier mode starts with no modulation, the codewords being
+    /// the data, and if they turn out not to arrive as sent it carries on
+    /// as the multicarrier modulation at the 8 kHz of the call. The
+    /// single-carrier modes run as themselves.
     pub fn varc_codeword_line(&mut self, a_law: Option<bool>) {
         if let Some(call) = self.varc.as_mut() {
             call.codeword_line(a_law.map(|a| if a { datapump::v90::ucode::Law::A } else { datapump::v90::ucode::Law::Mu }));
         }
-    }
-
-    /// A V.ARC call has turned out to be on a line that cannot carry it: a
-    /// call in G.711 that something recodes, or whose far end is not V.ARC.
-    /// The call is not thrown away.
-    /// It carries on as an ordinary one, from V.8, as the same end it was,
-    /// with V.92 and everything below it on offer; `+MS` is left saying so.
-    pub fn varc_fall_back(&mut self) {
-        if self.varc.is_none() {
-            return;
-        }
-        self.line_notes.push(
-            "V.ARC: this call cannot carry it; an ordinary call instead, from V.92 down".to_owned(),
-        );
-        let role = self.role;
-        self.varc = None;
-        // Or the V.8 bis this starts again with would choose it again.
-        self.varc_spent = true;
-        self.at.modulation.carrier = "V92".to_owned();
-        self.at.modulation.automode = true;
-        self.at.modulation.min_rate = 0;
-        self.at.modulation.max_rate = 0;
-        let notes = std::mem::take(&mut self.line_notes);
-        self.place_call(role);
-        self.line_notes = notes;
     }
 
     /// One frame of a V.ARC call: a sample of each channel as the sound
@@ -2541,6 +2563,53 @@ impl Modem {
     pub fn varc_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
         self.varc_hear(fs, fs, input);
         self.varc_say(output);
+    }
+
+    /// One frame of a line that is a sound card as it is, at its own rate
+    /// `fs`, whatever the call is doing: for whatever has only such a line
+    /// and no line at the rate of this modem. A V.ARC call is stepped as
+    /// [`Self::varc_step`] steps it. Before that, while the call is in V.8,
+    /// the card is cut down to the rate of this modem: see
+    /// [`Self::wide_hear`].
+    pub fn wide_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
+        self.wide_hear(fs, fs, input);
+        self.wide_say(output);
+    }
+
+    /// One frame heard on a sound card as it is; see [`Self::wide_step`]
+    /// and, for the two rates, [`Self::varc_hear`].
+    ///
+    /// V.8 runs at the rate of this modem and nothing in it is above
+    /// 2225 Hz. So until the call is a V.ARC one the frames heard are
+    /// averaged down to that rate, over all channels, and each sample the
+    /// modem then says is held on every channel until the next. That is
+    /// crude, and it is enough for tones.
+    pub fn wide_hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) {
+        if self.varc.is_some() {
+            self.narrow = Narrow::default();
+            self.varc_hear(fs, fs_out, input);
+            return;
+        }
+        self.narrow.sum += input.iter().sum::<f64>() / input.len().max(1) as f64;
+        self.narrow.count += 1.0;
+        self.narrow.owed += self.fs;
+        // More than once a frame on a card slower than the modem.
+        let heard = self.narrow.sum / self.narrow.count;
+        while self.narrow.owed >= fs && self.varc.is_none() {
+            self.narrow.owed -= fs;
+            self.narrow.sum = 0.0;
+            self.narrow.count = 0.0;
+            self.narrow.said = self.step(heard);
+        }
+    }
+
+    /// One frame to send on a sound card as it is; see [`Self::wide_step`].
+    pub fn wide_say(&mut self, output: &mut [f64]) {
+        if self.varc.is_some() {
+            self.varc_say(output);
+        } else {
+            output.fill(self.narrow.said);
+        }
     }
 
     /// One frame of a V.ARC call to send, for a sound card whose two
@@ -2577,10 +2646,6 @@ impl Modem {
             return;
         }
         self.line_notes.extend(call.take_notes());
-        if call.gave_up() {
-            self.varc_fall_back();
-            return;
-        }
         let phase = call.phase();
         if phase != self.varc_said {
             self.varc_said = phase;
@@ -2767,7 +2832,7 @@ impl Modem {
                 // What a V.92 call that got this far has taught, for the
                 // next call to the same place (V.92 1 j).
                 if let Some(Pump::V90(m)) = self.pump.as_ref()
-                    && self.at.modulation.carrier == "V92"
+                    && self.ordinary_carrier() == "V92"
                     && m.is_v90()
                 {
                     let p2 = m.v34().phase2();
@@ -3437,7 +3502,6 @@ impl Modem {
                     }
                     self.dialled = Some(number.clone());
                     self.dial_request = Some(number);
-                    self.varc_spent = false;
                     self.place_call(Role::Calling);
                     self.memo_spent = self.quick_memo.is_some()
                         && self.at.modulation.carrier == "V92"
@@ -3445,7 +3509,6 @@ impl Modem {
                 }
                 Action::Answer => {
                     self.answer_request = true;
-                    self.varc_spent = false;
                     self.place_call(Role::Answering);
                 }
                 Action::HangUp if self.hst_linked() => self.hst_say_goodbye(),
@@ -3496,14 +3559,16 @@ impl Modem {
             self.place_hst_call(role);
             return;
         }
+        // A number with LOOP in it is a lead that comes straight back to
+        // this machine. There is nobody to negotiate with, so that call
+        // alone starts as V.ARC at once. Every other V.ARC call starts with
+        // V.8 below, as any call does.
         if let Some(mode) = VarcMode::from_carrier(&self.at.modulation.carrier)
             && self.at.service_class != at::ServiceClass::Fax
+            && role == Role::Calling
+            && self.dialled.as_ref().is_some_and(|n| n.to_ascii_uppercase().contains("LOOP"))
         {
-            // No V.8 and no tones: the far end is another of these or it is
-            // nothing. A number with LOOP in it is a lead that comes
-            // straight back to this machine.
-            let looped = role == Role::Calling
-                && self.dialled.as_ref().is_some_and(|n| n.to_ascii_uppercase().contains("LOOP"));
+            let looped = true;
             self.since_dial_ms = 0;
             self.call_samples = 0;
             self.line_notes.clear();
@@ -3595,11 +3660,10 @@ impl Modem {
         self.pcm_end = role;
         self.forced_carrier = None;
         self.offering = None;
-        self.pre_v8_ear = (role == Role::Calling && self.at.modulation.automode && !self.offered().is_empty())
-            .then(|| automode::Ear::new(self.fs));
+        self.pre_v8_ear = (role == Role::Calling && self.negotiates()).then(|| automode::Ear::new(self.fs));
         self.pump = None;
         self.negotiation = None;
-        if self.at.v8bis && self.at.modulation.automode && !self.offered().is_empty() {
+        if self.at.v8bis && self.negotiates() {
             // V.8 bis first (10.2). The answering station asks what the
             // caller can do, with CRe; the calling one answers with CRd, to
             // be told what the answerer can do and choose itself -- which is
@@ -3639,7 +3703,7 @@ impl Modem {
     /// with automode off, when there is nothing to negotiate.
     fn v8_end(&self) -> Option<v8line::Modem> {
         let offered = self.offered();
-        if self.at.modulation.automode && !offered.is_empty() {
+        if self.negotiates() {
             let role = match self.role {
                 Role::Calling => v8line::Role::Calling,
                 Role::Answering => v8line::Role::Answering,
@@ -3654,19 +3718,24 @@ impl Modem {
             if self.want_error_control {
                 negotiation = negotiation.offering_lapm();
             }
+            // V.ARC, for a far end that is another of these: a block in the
+            // non-standard category (Table 8). Any other steps over it.
+            if let Some(offer) = self.varc_offer() {
+                negotiation = negotiation.offering_varc(offer);
+            }
             // V.90: the analogue half from the end that dials, and the
             // digital half from the end that answers. Over a VoIP call the
             // answering end's samples reach a G.711 encoder, which is as near
             // to the digital network as a sound card gets.
             // A V.92 server takes the line at the start of V.8's handover
             // silence; a V.90 one at the end of it, as it always has.
-            if self.at.modulation.carrier == "V92" && self.pcm_end == Role::Answering {
+            if self.ordinary_carrier() == "V92" && self.pcm_end == Role::Answering {
                 negotiation = negotiation.handing_over_early();
             }
             if self.serves_x2() {
                 negotiation = negotiation.offering_x2();
             }
-            if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
+            if matches!(self.ordinary_carrier(), "V90" | "V92") {
                 negotiation = match self.pcm_end {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),
                     Role::Answering => negotiation.offering_pcm_on(
@@ -3710,8 +3779,7 @@ impl Modem {
     /// honest answer is not to negotiate at all.
     fn offered(&self) -> Modulations {
         let (lowest, highest) = self.rate_range();
-        let settings = &self.at.modulation;
-        let Some(preferred) = (match settings.carrier.as_str() {
+        let Some(preferred) = (match self.ordinary_carrier() {
             // One bit in V.8's menu covers both (Table 4: "V.32 bis/V.32
             // availability"), so the two carriers offer the same thing and
             // differ only in what they will then agree to.
@@ -3824,7 +3892,7 @@ impl Modem {
     /// modulations `+MS` allows, and V.42 if error control is wanted.
     fn bis_capabilities(&self) -> v8::bis::Message {
         use v8::bis::{Data, Identification, Kind, Message, Network};
-        let carrier = self.at.modulation.carrier.as_str();
+        let carrier = self.ordinary_carrier();
         let server = self.pcm_end == Role::Answering;
         let pcm = |name: &str| carrier == name || (name == "V90" && carrier == "V92");
         let at_least = |names: &[&str]| names.contains(&carrier);
@@ -3853,30 +3921,26 @@ impl Modem {
         let list = Message::data(Kind::Cl, identification, data);
         // `+VARCBIS`: V.ARC as well, in the non-standard field, for a far
         // end that is another of these. Any other steps over it.
-        let (mode, two_wire) = self.at.config.varc_bis;
-        if mode == 0 || self.varc_spent {
-            return list;
+        match self.varc_offer() {
+            Some(offer) => list.with_varc(offer),
+            None => list,
         }
-        list.with_varc(v8::bis::varc::Offer { modulation: mode - 1, two_wire })
     }
 
-    /// V.8 bis chose V.ARC: both ends listed it and the MS named it. No V.8
-    /// follows. What does is V.ARC's own handshake, at once, with the
-    /// station that received the MS as the answering end of it (9.9) --
+    /// V.8 found V.ARC at both ends: each menu had the block. What follows
+    /// is the handshake of V.ARC itself, with each end the end V.8 made it,
     /// and on the sound card as it is, which whatever owns the card sees
-    /// from [`Self::varc_wanted`], as it does for a call dialled as V.ARC.
-    fn varc_after_bis(&mut self, answer: bool) {
-        let (mode, two_wire) = self.at.config.varc_bis;
-        let mode = match mode {
-            2 => VarcMode::Qam,
-            3 => VarcMode::Pcm,
+    /// from [`Self::varc_wanted`].
+    fn start_varc(&mut self, offer: v8::bis::varc::Offer) {
+        let mode = match offer.modulation {
+            1 => VarcMode::Qam,
+            2 => VarcMode::Pcm,
             _ => VarcMode::Dmt,
         };
-        self.role = if answer { Role::Answering } else { Role::Calling };
         self.line_notes.push(format!(
-            "V.8 bis: both ends have V.ARC; {}{} follows, from its own handshake",
+            "V.8: both ends have V.ARC; {}{} follows, from its own handshake",
             mode.name(),
-            if two_wire { " on one pair of wires" } else { "" }
+            if offer.two_wire { " on one pair of wires" } else { "" }
         ));
         self.since_dial_ms = 0;
         self.rate = 0;
@@ -3884,6 +3948,7 @@ impl Modem {
         self.ec = None;
         self.pump = None;
         self.negotiation = None;
+        self.bis = None;
         self.announce = None;
         self.far_menu = None;
         self.v34_report = None;
@@ -3895,7 +3960,7 @@ impl Modem {
         self.varc_bits = 0;
         self.state = State::Handshaking;
         let mut call = varc::Call::new(mode, self.role, false);
-        call.two_wire(two_wire);
+        call.two_wire(offer.two_wire);
         let (baud, code, bits) = self.at.config.varc;
         call.ask_for(baud, code, bits);
         call.compress(self.varc_compressors());
@@ -3941,20 +4006,14 @@ impl Modem {
         }
         match status {
             v8bis::Status::Running => {}
-            v8bis::Status::Selected(selection) if selection.varc().is_some() => {
-                // The end that sent the ACK waits before it lets go of the
-                // line: going to V.ARC closes the sound card to open it
-                // again as it is, and what was still on its way out of the
-                // card went with it. On two real cards that was the end of
-                // the ACK, and a caller that never heard it.
-                self.varc_wait += 1;
-                if !selection.answer || self.varc_wait as f64 > VARC_AFTER_ACK * self.fs {
-                    self.bis = None;
-                    self.varc_after_bis(selection.answer);
-                }
-            }
             v8bis::Status::Selected(selection) => {
                 self.bis = None;
+                // An MS that names V.ARC is followed by V.8 as any other
+                // is. Both menus then have the V.ARC block, and the
+                // handshake of V.ARC follows V.8.
+                if selection.varc().is_some() {
+                    self.line_notes.push("V.8 bis: both ends have V.ARC; V.8 first, then the V.ARC handshake".to_owned());
+                }
                 // 9.9: "the station which receives the MS message shall
                 // configure its modem as the answer modem irrespective of
                 // which station originated the call."
@@ -3979,11 +4038,31 @@ impl Modem {
     /// Carry the negotiation one sample further, and build the pump when it
     /// has decided.
     fn negotiate(&mut self, line: f64) -> f64 {
+        let ours = self.varc_offer();
         let negotiation = self.negotiation.as_mut().expect("checked by the caller");
         let out = negotiation.step(line);
         match negotiation.status() {
             v8line::Status::Negotiating => {}
+            // Both menus had the V.ARC block. The modulation V.8 agreed is
+            // not used. Each end keeps the line quiet for a moment first:
+            // going to V.ARC on a sound card closes the card and opens it
+            // again as it is, and that cuts off what is still on its way
+            // out, which at the calling end is the end of CJ.
+            v8line::Status::Agreed(_) if negotiation.varc().is_some() && ours.is_some() => {
+                self.varc_wait += 1;
+                if self.varc_wait as f64 > VARC_AFTER_V8 * self.fs
+                    && let Some(offer) = ours
+                {
+                    self.start_varc(offer);
+                }
+            }
             v8line::Status::Agreed(modulation) => {
+                if VarcMode::from_carrier(&self.at.modulation.carrier).is_some() {
+                    self.line_notes.push(format!(
+                        "V.8: the far end has no V.ARC; an ordinary call instead, on {}",
+                        modulation.name()
+                    ));
+                }
                 self.declared_lapm = negotiation.lapm();
                 if std::env::var_os("V92_EC_TRACE").is_some() {
                     eprintln!(
@@ -4078,13 +4157,13 @@ impl Modem {
             // What V.8 agreed is V.34's bit either way; which V.90-family
             // modulation this end asked to be is what +MS said.
             Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Analogue) => {
-                match self.at.modulation.carrier.as_str() {
+                match self.ordinary_carrier() {
                     "V92" => "V92".to_owned(),
                     _ => "V90".to_owned(),
                 }
             }
             Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Digital) => {
-                match self.at.modulation.carrier.as_str() {
+                match self.ordinary_carrier() {
                     "V92" => "V92S".to_owned(),
                     _ => "V90S".to_owned(),
                 }
@@ -4097,7 +4176,7 @@ impl Modem {
             // change which of them was asked for. Anything else -- a far end
             // that offered it when this end had chosen V.22bis, say -- takes
             // the faster carrier, since there is no reason to hold back.
-            Some(Modulation::V32bis) => match self.at.modulation.carrier.as_str() {
+            Some(Modulation::V32bis) => match self.ordinary_carrier() {
                 chosen @ ("V32" | "V32B") => chosen.to_owned(),
                 _ => "V32B".to_owned(),
             },
@@ -4106,7 +4185,7 @@ impl Modem {
             // Except that V.34 without V.8 is not V.34: 11.1.1.3 sends a call
             // whose far end answered with a plain ANS on to V.32bis's own
             // start-up, and so does a V.8 that was turned off.
-            _ => match self.at.modulation.carrier.as_str() {
+            _ => match self.ordinary_carrier() {
                 "V34" | "V90" | "V92" => "V32B".to_owned(),
                 other => other.to_owned(),
             },
@@ -4573,11 +4652,21 @@ fn back_bps(back: hst::BackRate) -> u32 {
     }
 }
 
+/// A sound card as it is, cut down to the rate of the modem: what has been
+/// heard since the modem was last stepped, and what it then said.
+#[derive(Debug, Default, Clone, Copy)]
+struct Narrow {
+    sum: f64,
+    count: f64,
+    owed: f64,
+    said: f64,
+}
+
 /// How long a V.ARC call waits to hear another end before giving up.
 const VARC_WAIT_MS: u32 = 120_000;
-/// Seconds of silence between the ACK that accepts V.ARC in V.8 bis and
-/// this end letting go of the line for it: longer than a sound card holds.
-const VARC_AFTER_ACK: f64 = 0.4;
+/// Seconds of silence between V.8 finding V.ARC at both ends and this end
+/// letting go of the line for it: longer than a sound card holds.
+const VARC_AFTER_V8: f64 = 0.4;
 
 /// How long a V.ARC call that was up may hear nothing before it is over.
 const VARC_DEAF_SECONDS: f64 = 5.0;

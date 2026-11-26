@@ -411,7 +411,7 @@ impl Modem {
         tx.set_transmitting(false);
         Self {
             role,
-            menu: Menu { function, modulations: ours, protocol: Protocol::Unstated, access: None, pcm: None },
+            menu: Menu { function, modulations: ours, protocol: Protocol::Unstated, access: None, pcm: None, varc: None },
             tx,
             rx: Bell103Rx::with_tones(rx_space, rx_mark, fs),
             bits: AsyncBits::new(8),
@@ -713,6 +713,24 @@ impl Modem {
         self.menu.access = Some(access);
         self.menu.modulations.insert(Modulation::V34Duplex);
         self
+    }
+
+    /// Say that this end has V.ARC, BinModem's own mode, in the non-standard
+    /// facilities category of its menu (Table 8). A calling modem puts the
+    /// block in its CM. An answering modem puts its own in the JM only when
+    /// the CM had one. Any other modem steps over the category.
+    pub fn offering_varc(mut self, offer: v8::bis::varc::Offer) -> Self {
+        self.menu.varc = Some(offer);
+        self
+    }
+
+    /// What the far end said of V.ARC, once the menus are settled and both
+    /// ends have it. From the calling end that is the block in the JM, which
+    /// is there only if the CM had one; from the answering end it is the
+    /// block in the CM, and only if this end has V.ARC too.
+    pub fn varc(&self) -> Option<v8::bis::varc::Offer> {
+        self.menu.varc?;
+        self.far_menu?.varc
     }
 
     /// Which half of a V.90 pair this end is to be, once the menus are
@@ -1308,6 +1326,8 @@ impl Modem {
             Some(access) if self.x2 && cm.pcm.is_none() => Menu { access: Some(Access { digital: true, ..access }), ..jm },
             _ => jm,
         };
+        // The non-standard category is answered only when it was asked.
+        let jm = Menu { varc: cm.varc.and(self.menu.varc), ..jm };
         self.sent_jm = Some(jm);
         self.chosen = jm.chosen();
         self.agreed = jm.protocol;
@@ -1336,6 +1356,7 @@ impl Modem {
                 protocol: self.agreed,
                 access: None,
                 pcm: None,
+                varc: None,
             },
         )
     }
@@ -1430,6 +1451,40 @@ mod tests {
     }
 
 
+
+    /// V.ARC in the non-standard category: found when both ends have it, and
+    /// the call is otherwise what it would have been.
+    #[test]
+    fn two_ends_that_have_varc_find_it_and_one_alone_does_not() {
+        use v8::bis::varc::Offer;
+        let (qam, levels) = (Offer { modulation: 1, two_wire: false }, Offer { modulation: 2, two_wire: true });
+        for (ours, theirs) in [(Some(qam), Some(levels)), (Some(qam), None), (None, Some(levels)), (None, None)] {
+            let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+            let mut answering = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+            if let Some(offer) = ours {
+                calling = calling.offering_varc(offer);
+            }
+            if let Some(offer) = theirs {
+                answering = answering.offering_varc(offer);
+            }
+            let (mut to_calling, mut to_answering) = (0.0, 0.0);
+            for _ in 0..(14.0 * FS) as usize {
+                let from_calling = calling.step(to_calling);
+                let from_answering = answering.step(to_answering);
+                to_calling = from_answering;
+                to_answering = from_calling;
+            }
+            // The ordinary modulation is agreed as well, to fall back to.
+            assert_eq!(calling.status(), Status::Agreed(Modulation::V32bis), "{ours:?} {theirs:?}");
+            assert_eq!(answering.status(), Status::Agreed(Modulation::V32bis), "{ours:?} {theirs:?}");
+            let both = ours.is_some() && theirs.is_some();
+            // Each end reads what the other said of itself.
+            assert_eq!(calling.varc(), theirs.filter(|_| both), "{ours:?} {theirs:?}");
+            assert_eq!(answering.varc(), ours.filter(|_| both), "{ours:?} {theirs:?}");
+            // A JM carries the block only in answer to one.
+            assert_eq!(answering.joint_menu().and_then(|jm| jm.varc), theirs.filter(|_| both));
+        }
+    }
 
     /// Run the two ends against each other, each saying whether it does LAPM.
     fn negotiate_protocol(ours: bool, theirs: bool, seconds: f64) -> (bool, bool) {
@@ -2008,6 +2063,7 @@ mod tests {
             protocol: Protocol::Unstated,
             access: None,
             pcm: None,
+            varc: None,
         }
     }
 

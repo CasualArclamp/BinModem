@@ -121,8 +121,7 @@ follow it. The session that it carried comes out as text.
 These items are not complete:
 
 - **V.90 between two BinModems through softphones** falls back to V.34.
-- **V.ARC**, our own wideband mode for a sound card, has never run between two
-  machines.
+- **V.ARC**, our own wideband mode, has not run through a telephone network.
 - **V.92** has not carried a call with a real V.92 modem yet.
 - **x2** has not met a real x2 modem yet.
 - **V.17** fax was not tried with a real machine yet.

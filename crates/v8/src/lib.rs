@@ -273,6 +273,11 @@ pub struct Menu {
     /// calling modem wants to offer V.90, and 7.4 has the joint menu carry it
     /// back only when the answering modem wants to take it up.
     pub pcm: Option<Pcm>,
+    /// V.ARC, BinModem's own mode, in a block of the non-standard facilities
+    /// category (Table 8): present when the sender has it. Another BinModem
+    /// reads the block; any other modem steps over the category, as clause
+    /// 5 has it do. See [`bis::varc`] for whose the block is.
+    pub varc: Option<bis::varc::Offer>,
 }
 
 /// The PCM modem availability category (Table 5/V.8).
@@ -376,6 +381,65 @@ mod tag {
     pub const PSTN_ACCESS: u8 = 0b1101;
     /// `b0 b1 b2 b3` = `1 1 1 0`, Table 5.
     pub const PCM: u8 = 0b0111;
+    /// `b0 b1 b2 b3` = `1 1 1 1`, Table 8.
+    pub const NON_STANDARD: u8 = 0b1111;
+}
+
+/// The positions of the five bits an extension octet carries: `b3 b4 b5`
+/// are the `010` that marks it as one.
+const EXTENSION_BITS: [u8; 5] = [0, 1, 2, 6, 7];
+
+/// The octets of a non-standard block as extension octets, five bits in
+/// each, the lower bits of the block first and in the lower positions
+/// (Table 8). The last one is filled out with zeros.
+fn into_extensions(block: &[u8]) -> Vec<u8> {
+    let bits: Vec<bool> = block.iter().flat_map(|o| (0..8).map(move |n| bit(*o, n))).collect();
+    bits.chunks(EXTENSION_BITS.len())
+        .map(|five| {
+            let mut out = 1 << 4;
+            for (b, place) in five.iter().zip(EXTENSION_BITS) {
+                out |= u8::from(*b) << place;
+            }
+            out
+        })
+        .collect()
+}
+
+/// And back: the whole octets that a run of extension octets carries.
+fn from_extensions(extensions: &[u8]) -> Vec<u8> {
+    let bits: Vec<bool> = extensions.iter().flat_map(|o| EXTENSION_BITS.map(|place| bit(*o, place))).collect();
+    bits.as_chunks::<8>().0.iter().map(|eight| eight.iter().enumerate().fold(0u8, |acc, (n, b)| acc | (u8::from(*b) << n))).collect()
+}
+
+/// The V.ARC block of the non-standard facilities category (Table 8): a
+/// length, the T.35 country code, the length of the provider code, the
+/// provider code, and the information.
+fn varc_block(offer: bis::varc::Offer) -> Vec<u8> {
+    let information = offer.information();
+    let mut block = vec![(bis::varc::COUNTRY.len() + 1 + bis::varc::PROVIDER.len() + information.len()) as u8];
+    block.extend(bis::varc::COUNTRY);
+    block.push(bis::varc::PROVIDER.len() as u8);
+    block.extend(bis::varc::PROVIDER);
+    block.extend(information);
+    block
+}
+
+/// Find the V.ARC block among the blocks of a non-standard facilities
+/// category. A block that is another provider's is stepped over by its
+/// length.
+fn varc_in(mut blocks: &[u8]) -> Option<bis::varc::Offer> {
+    while let Some((&length, rest)) = blocks.split_first() {
+        let block = rest.get(..usize::from(length))?;
+        blocks = &rest[usize::from(length)..];
+        // T.35: a first octet of all ones says the code has a second octet.
+        let country = if block.first() == Some(&0xFF) { 2 } else { 1 };
+        let Some(&provider) = block.get(country) else { continue };
+        let Some(code) = block.get(country + 1..country + 1 + usize::from(provider)) else { continue };
+        if block[..country] == bis::varc::COUNTRY && code == bis::varc::PROVIDER {
+            return bis::varc::Offer::from_information(&block[country + 1 + usize::from(provider)..]);
+        }
+    }
+    None
 }
 
 /// Build an octet from its bits, `b0` least significant.
@@ -474,6 +538,12 @@ impl Menu {
         if let Some(pcm) = self.pcm {
             out.push(pcm.octet());
         }
+        // Table 8: the non-standard facilities category "follows the
+        // standard fields", its block in extension octets.
+        if let Some(offer) = self.varc {
+            out.push(octet([true, true, true, true, false, false, false, false]));
+            out.extend(into_extensions(&varc_block(offer)));
+        }
         out
     }
 
@@ -490,6 +560,7 @@ impl Menu {
         let mut protocol = Protocol::Unstated;
         let mut access = None;
         let mut pcm = None;
+        let mut varc = None;
         let mut rest = octets.iter().copied().peekable();
         while let Some(o) = rest.next() {
             // Only category octets carry a tag; an extension octet is
@@ -544,10 +615,22 @@ impl Menu {
                 tag::PCM if !bit(o, 4) => {
                     pcm = Some(Pcm { analogue: bit(o, 5), digital: bit(o, 6), v91: bit(o, 7) });
                 }
+                tag::NON_STANDARD if !bit(o, 4) => {
+                    // Its blocks are in the extension octets that follow.
+                    let mut extensions = Vec::new();
+                    while let Some(&next) = rest.peek() {
+                        if !is_extension(next) {
+                            break;
+                        }
+                        extensions.push(next);
+                        rest.next();
+                    }
+                    varc = varc_in(&from_extensions(&extensions)).or(varc);
+                }
                 _ => {}
             }
         }
-        Some(Self { function: function?, modulations, protocol, access, pcm })
+        Some(Self { function: function?, modulations, protocol, access, pcm, varc })
     }
 
     /// The joint menu: what this end has that the far end also offered.
@@ -576,6 +659,7 @@ impl Menu {
             // which is a thing to say about oneself.
             access: None,
             pcm: None,
+            varc: None,
         }
     }
 
@@ -831,6 +915,7 @@ mod tests {
             protocol: Protocol::Unstated,
             access: None,
             pcm: None,
+            varc: None,
         }
     }
 
@@ -874,6 +959,7 @@ mod tests {
                     protocol: Protocol::Unstated,
                     access: None,
                     pcm: None,
+                    varc: None,
                 };
             assert_eq!(Menu::parse(&menu.octets()).unwrap().function, f);
         }
@@ -977,6 +1063,7 @@ mod tests {
             protocol: Protocol::Lapm,
             access: None,
             pcm: None,
+            varc: None,
         };
         let prot0 = *menu.octets().last().unwrap();
         assert_eq!(tag_of(prot0), tag::PROTOCOL);
@@ -999,6 +1086,7 @@ mod tests {
             protocol: Protocol::Lapm,
             access: None,
             pcm: None,
+            varc: None,
         };
         let octets = menu.octets();
         let prot0 = *octets.last().unwrap();
@@ -1040,6 +1128,7 @@ mod tests {
             protocol: Protocol::Lapm,
             access: None,
             pcm: None,
+            varc: None,
         };
         let ours = Modulations::of(&[Modulation::V32bis]);
         assert!(asked.joint(ours, Protocol::Lapm).lapm(), "both said it");
@@ -1092,6 +1181,62 @@ mod tests {
         let back = Menu::parse(&octets).expect("a menu with an unknown category");
         assert_eq!(back.function, CallFunction::Data);
         assert_eq!(back.modulations, Modulations::of(&[Modulation::V22bis]));
+    }
+
+    #[test]
+    fn the_varc_block_goes_in_the_non_standard_category_and_comes_back() {
+        use crate::bis::varc::Offer;
+        let plain = data_menu(&[Modulation::V34Duplex, Modulation::V22bis]);
+        for offer in [Offer::default(), Offer { modulation: 1, two_wire: false }, Offer { modulation: 2, two_wire: true }] {
+            let menu = Menu { varc: Some(offer), ..plain };
+            let octets = menu.octets();
+            // The category octet, then sixteen extension octets: ten
+            // octets of block, five bits in each.
+            let at = plain.octets().len();
+            assert_eq!(octets[at], 0x0F);
+            assert_eq!(octets.len(), at + 1 + 16);
+            assert!(octets[at + 1..].iter().all(|o| is_extension(*o)), "{octets:02x?}");
+            // Nothing in it that a decoder takes for a synchronisation or
+            // for part of a CJ.
+            assert!(octets.iter().all(|o| *o != SYNC_MENU && *o != 0 && *o != 0x55), "{octets:02x?}");
+            assert_eq!(Menu::parse(&octets), Some(menu));
+            // And through a decoder, as a repeated sequence.
+            let mut decoder = Decoder::new();
+            let mut heard = None;
+            for _ in 0..2 {
+                for octet in sequence(Signal::Cm, &menu) {
+                    heard = decoder.feed(octet).or(heard);
+                }
+            }
+            assert_eq!(heard, Some(Heard::Cm(menu)));
+        }
+        // A menu without the block reads as one without it.
+        assert_eq!(Menu::parse(&plain.octets()).unwrap().varc, None);
+    }
+
+    #[test]
+    fn a_block_that_is_another_providers_is_stepped_over() {
+        use crate::bis::varc::Offer;
+        let plain = data_menu(&[Modulation::V22bis]);
+        // A block with a one-octet country code and a two-octet provider
+        // code, then the V.ARC block: 6.6 lets blocks follow each other.
+        let mut blocks = vec![5, 0xB5, 2, 0x12, 0x34, 0x77];
+        let stranger_only = blocks.clone();
+        blocks.extend(varc_block(Offer { modulation: 1, two_wire: true }));
+        let with = |blocks: &[u8]| {
+            let mut octets = plain.octets();
+            octets.push(0x0F);
+            octets.extend(into_extensions(blocks));
+            Menu::parse(&octets).expect("a menu")
+        };
+        assert_eq!(with(&blocks).varc, Some(Offer { modulation: 1, two_wire: true }));
+        assert_eq!(with(&stranger_only).varc, None);
+        assert_eq!(with(&blocks).modulations, plain.modulations);
+        // A block cut short, and an edition this end has not heard of.
+        assert_eq!(with(&blocks[..blocks.len() - 3]).varc, None);
+        let last = blocks.len() - 2;
+        blocks[last] = 9;
+        assert_eq!(with(&blocks).varc, None);
     }
 
     #[test]
@@ -1341,6 +1486,7 @@ mod pcm_tests {
             protocol: Protocol::Lapm,
             access: None,
             pcm: Some(Pcm::ANALOGUE),
+            varc: None,
         };
         assert_eq!(menu.octets(), CONEXANT_CM.to_vec());
     }
@@ -1386,6 +1532,7 @@ mod pcm_tests {
             protocol: Protocol::Unstated,
             access: None,
             pcm: Some(Pcm::ANALOGUE),
+            varc: None,
         };
         let back = Menu::parse(&menu.octets()).unwrap();
         assert_eq!(back.access, Some(Access::default()));
