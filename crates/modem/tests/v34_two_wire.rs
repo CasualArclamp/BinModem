@@ -129,19 +129,11 @@ impl Pair {
 
     /// Run until both ends are in data mode, then send a line each way.
     fn connect_and_talk(&mut self, what: &str) {
-        let mut seen = Vec::new();
-        for _ in 0..400 {
+        for _ in 0..40 {
             if self.up() {
                 break;
             }
-            self.run(0.1);
-            let now = (self.caller.line_phase(), self.host.line_phase());
-            if seen.last() != Some(&now) {
-                seen.push(now);
-            }
-        }
-        if std::env::var("TW_SEEN").is_ok() {
-            eprintln!("{seen:?}");
+            self.run(1.0);
         }
         assert!(
             self.up(),
@@ -177,7 +169,7 @@ impl Pair {
 /// back as loud as the far end, a crossing later. Neither rate falls.
 #[test]
 fn an_echo_as_loud_as_the_far_end_costs_nothing() {
-    let mut pair = Pair::new(Echo::copy(300, 1.0));
+    let mut pair = Pair::new(Echo::copy(CROSSING, 1.0));
     pair.connect_and_talk("a cable");
     assert_eq!((pair.caller.rate(), pair.host.rate()), (Some(33_600), Some(33_600)));
     for (who, modem) in [("caller", &pair.caller), ("host", &pair.host)] {

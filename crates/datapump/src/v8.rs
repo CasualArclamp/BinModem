@@ -357,6 +357,10 @@ pub struct Modem {
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
     cj: usize,
+    /// Octets of zeros in a row at the end of what has been heard, and how
+    /// long ago the last octet of any kind arrived, in seconds.
+    zeros: usize,
+    since_octet: f64,
     /// CI sequences heard for this end's own call function (7.1).
     ci: u32,
     /// The JM this end answered with, to repeat as it was.
@@ -439,6 +443,8 @@ impl Modem {
             far_menu: None,
             outgoing: Vec::new(),
             cj: 0,
+            zeros: 0,
+            since_octet: 0.0,
             ci: 0,
             sent_jm: None,
             x2: false,
@@ -877,7 +883,10 @@ impl Modem {
             self.framing_errors = self.rx.framing_errors();
             self.torn = true;
         }
+        self.since_octet += dt;
         if let Some(octet) = octet {
+            self.zeros = if octet == 0 { self.zeros + 1 } else { 0 };
+            self.since_octet = 0.0;
             if Self::tracing() {
                 eprintln!("v8[{:?}]: octet {octet:02x} at {:.3}s",
                           self.role, (self.total - 1.0) / self.fs);
@@ -1208,7 +1217,17 @@ impl Modem {
                 // detected and all 3 octets of CJ have been received", and may
                 // be "terminated without any requirement to complete a current
                 // JM sequence".
-                if self.cj >= v8::CJ.len() {
+                //
+                // CJ is three octets, sent once, with the caller's carrier
+                // gone the moment the last one ends. On a two-wire line with
+                // a loud echo this end reads them through its own JM, and
+                // the third did not arrive: this end then sent JM until the
+                // call was over, while the caller, which had its two JMs,
+                // went on to the modulation alone. No menu has two octets of
+                // zeros together. So two of them, and then nothing for two
+                // octets' time where a CM would have gone on, is CJ.
+                let gone = self.zeros >= 2 && self.since_octet >= CJ_SILENCE;
+                if self.cj >= v8::CJ.len() || gone {
                     self.outgoing.clear();
                     self.tx.set_transmitting(false);
                     self.enter(State::Handover);
@@ -1408,6 +1427,10 @@ impl Modem {
 /// rather than about numbers in a computer. This leaves the same headroom the
 /// data pumps are given.
 const ANSAM_LEVEL: f64 = 0.35;
+
+/// How long after two octets of zeros nothing has to arrive, while this end
+/// sends JM, for them to be CJ: the time of two octets at 300 bit/s.
+const CJ_SILENCE: f64 = 0.067;
 
 /// How loudly the V.21 signals of clause 8 (CI, CM, CJ, JM) go out.
 ///
