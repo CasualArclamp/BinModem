@@ -2023,6 +2023,7 @@ impl ScopeApp {
         session.set_fax_colour(self.fax.colour);
         session.set_fax_v34(self.fax.v34);
         session.set_fax_pages(self.fax.pages().to_vec());
+        session.set_fax_pictures(self.fax.pictures());
     }
 
     /// A SIP call ringing here: ring, ask, and do what was chosen.

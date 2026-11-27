@@ -5,8 +5,9 @@ The editions are T.30 (09/2005), T.4 (07/2003), T.42 (07/2003) and T.81 (09/1992
 `tools/fetch_specs.sh` fetches the three T-series texts. T.81 is not on the ITU
 free list. A public copy is at <https://www.w3.org/Graphics/JPEG/itu-t81.pdf>.
 
-The scope of this step is reception only. BinModem answers, offers colour in its
-DIS, and receives a greyscale or colour page.
+BinModem does both directions. When it answers, it offers colour in its DIS and
+receives a greyscale or colour page. When it calls, it sends such a page to a
+far end that offers it.
 
 ## 1. Negotiation: T.30 Table 2 and Annex E
 
@@ -117,9 +118,23 @@ sRGB matrix and curve (IEC 61966-2-1).
 - A PDF reader does not obey DNL. If Y was 0, the saved stream gets the true Y
   in its frame header, and the DNL segment is removed. No other octet changes.
 
-## 6. Not in this step
+## 6. Transmission
 
-- Colour transmission from the window.
+- The DCS has bit 68 only if the DIS has it, and bit 69 only if the DIS has it
+  (Notes 34 and 35). Bit 15 and bit 27 are set with bit 68.
+- A DCS says one time what the pages are. All pages of a call are thus of one
+  kind: all colour, all greyscale, or all ink.
+- A far end with bit 68 and without bit 69 gets the L\* component only.
+- The stream is the one of T.4 E.6.2.1: SOI, APP1 `G3FAX`, DHT, DQT, SOF0, SOS,
+  EOI. The Huffman tables are Tables K.3 to K.6 of T.81. The quantisation tables
+  are Tables K.1 and K.2 with a scale. Chrominance is subsampled 2 x 2.
+- The page is on the grid of a fine page: 1728 pels to 215 mm and 7.7 lines to
+  1 mm. T.4 E.6.5 (Note) makes this equivalent to 200 x 200 pels/25.4 mm.
+- A saved PDF puts a 200 x 200 page on the same sheet as a fine page. A page
+  that is saved and sent again thus stays on its pels.
+
+## 7. Not included
+
 - T.43 (bit 36), T.44 MRC (bits 92 to 94), sYCC (bit 127).
 - 12 bits a component (bit 71), a custom illuminant (bit 74), a custom gamut
   offer (bit 75), resolutions other than 200 x 200.

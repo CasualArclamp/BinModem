@@ -23,7 +23,7 @@ mod decoder;
 mod encoder;
 
 pub use decoder::{Decoder, for_a_file};
-pub use encoder::{Options, encode};
+pub use encoder::{Options, encode, encode_with_lines};
 
 /// Marker codes, the octet after X'FF' (T.81 Table B.1).
 pub mod marker {

@@ -487,6 +487,23 @@ impl FaxCall {
         self
     }
 
+    /// Send the pages of the call as these pictures, in the order of the
+    /// pages, if every page has one, they are all of a kind, and the far end
+    /// reads that kind.
+    #[must_use]
+    pub fn with_pictures(mut self, pictures: Vec<Option<fax::picture::Picture>>) -> Self {
+        self.call.set_pictures(pictures);
+        self
+    }
+
+    /// The same pages as lightness alone, which go in place of colour to a
+    /// far end that reads greyscale and not colour.
+    #[must_use]
+    pub fn with_lightness(mut self, pictures: Vec<Option<fax::picture::Picture>>) -> Self {
+        self.call.set_lightness(pictures);
+        self
+    }
+
     /// The coding the page goes in, once a DCS has settled it.
     pub fn coding(&self) -> Coding {
         self.call.coding()
