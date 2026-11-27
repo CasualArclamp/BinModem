@@ -190,6 +190,22 @@ impl ForwardRx {
     pub fn snr_db(&self) -> f64 {
         self.rx.snr_db()
     }
+
+    /// Whether the receiver is in a training or in data, so that its last
+    /// symbol is worth a scope's time.
+    pub fn making_symbols(&self) -> bool {
+        matches!(self.rx.stage(), v17::Stage::Training | v17::Stage::Telling | v17::Stage::Data)
+    }
+
+    /// The last symbol made, equalised, at the constellation's unit power.
+    pub fn constellation_point(&self) -> (f64, f64) {
+        self.rx.constellation_point()
+    }
+
+    /// How far out the rate's constellation reaches in those units.
+    pub fn constellation_peak(&self) -> f64 {
+        self.rx.constellation_peak()
+    }
 }
 
 #[cfg(test)]
