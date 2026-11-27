@@ -1212,3 +1212,18 @@ fn over_the_voip_line_the_resyncs_e_from_the_source_comes_after_the_recipients()
         finish(&mut link, 40.0);
     }
 }
+
+/// The rate the recipient asks for leaves a page's allowance under the
+/// signal to noise it trained to: the line of 2026-11-27, 32.7 dB at 3429
+/// Bd, is asked for 26 400 bit/s and not the 28 800 that lost one frame in
+/// forty.
+#[test]
+fn the_recipient_asks_for_a_rate_with_a_pages_allowance_in_hand() {
+    assert_eq!(super::rate_by_snr(32.7, 3429.0), 11);
+    // 6 dB would have had 28 800 from 31.3 dB up; it now wants 33.8 dB.
+    assert_eq!(super::rate_by_snr(33.7, 3429.0), 11);
+    assert_eq!(super::rate_by_snr(33.9, 3429.0), 12);
+    // A clean line still gets everything, and a poor one a rate.
+    assert_eq!(super::rate_by_snr(46.0, 3429.0), 14);
+    assert_eq!(super::rate_by_snr(5.0, 2400.0), 1);
+}

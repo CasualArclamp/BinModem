@@ -1604,12 +1604,32 @@ impl Modem {
     }
 }
 
+/// How far below the signal to noise it trained to the recipient puts the
+/// rate it asks for, in decibels.
+///
+/// Duplex's MP and phase 2's projections allow 6 dB (`training.rs`), which
+/// is a line that makes an error now and then, and error control that sends
+/// the frame again. A fax page pays more for the same error: one bad frame
+/// in a partial page is a PPR, the turn to the control channel and back, and
+/// the frame again -- five seconds on a line with half a second each way.
+/// And 6 dB did not hold: on 2026-11-27 a Super G3 fax's pages trained to
+/// 32.7 dB at 3429 Bd, 1.4 dB over the 31.3 dB the rule wants for 28 800
+/// bit/s, and 11, 10 and 5 of 256 frames of three first partial pages were
+/// bad (live-1795761434, live-1795761544, live-1795771884) -- one frame in
+/// forty, where the allowance is drawn for one in thousands.
+///
+/// A rate is 2400 bit/s, 0.7 of a bit a symbol at 3429 Bd, 2.1 dB. Two and a
+/// half decibels more is always the next rate down and sometimes the one
+/// after: that line gets 26 400 bit/s, with 3.5 dB in hand over the old
+/// rule's 29.2 dB for it.
+const PAGE_ALLOWANCE_DB: f64 = 8.5;
+
 /// What this end's receiver could take, as a multiple of 2400, by the
-/// signal to noise it trained to: `training.rs`'s rule for duplex's MP, the
-/// same 6 dB allowance as phase 2's projections.
+/// signal to noise it trained to: `training.rs`'s rule for duplex's MP,
+/// with [`PAGE_ALLOWANCE_DB`] where that has 6 dB.
 fn rate_by_snr(snr_db: f64, baud: f64) -> u8 {
     let snr = 10f64.powf(snr_db.min(60.0) / 10.0);
-    let bits = (1.0 + snr / 10f64.powf(0.6)).log2();
+    let bits = (1.0 + snr / 10f64.powf(PAGE_ALLOWANCE_DB / 10.0)).log2();
     ((bits * baud / 2400.0).floor() as u8).clamp(1, 14)
 }
 
