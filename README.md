@@ -105,6 +105,7 @@ follow it. The session that it carried comes out as text.
 | [docs/manual/network.md](docs/manual/network.md) | PPP, web pages through the proxy, the dial-in server and our own TCP |
 | [docs/manual/window-and-sip.md](docs/manual/window-and-sip.md) | The window and its scopes, the SIP caller and the dialler |
 | [docs/manual/review.md](docs/manual/review.md) | How to read a recording of a call between other parties |
+| [docs/manual/constellations.md](docs/manual/constellations.md) | The received constellation of every mode, over a line with noise |
 | [docs/manual/roadmap.md](docs/manual/roadmap.md) | Work in progress (V.ARC and others) and next steps (V.33, V.92) |
 | [docs/manual/linux.md](docs/manual/linux.md) | Build on Linux |
 | [docs/design/architecture.md](docs/design/architecture.md) | The design and the milestone ladder |
