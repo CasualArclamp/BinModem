@@ -195,10 +195,17 @@ pub struct Transmitter {
     sender: Sender,
     rate: Rate,
     bits: VecDeque<bool>,
+    /// Whether [`Segment::Data`] with no bits to send idles on HDLC flags
+    /// rather than ones, and how far into a flag it is.
+    idle_flags: bool,
+    flag_at: usize,
     sent: VecDeque<Sent>,
     now: u64,
     symbols: u64,
 }
+
+/// An HDLC flag, 0x7E, in the order it goes to the line.
+const FLAG: [bool; 8] = [false, true, true, true, true, true, true, false];
 
 impl Transmitter {
     /// The transmitter of the call or the answer modem, at `fs` samples a
@@ -255,6 +262,8 @@ impl Transmitter {
             sender: Sender::new(scrambler_of(side)),
             rate: Rate::R1200,
             bits: VecDeque::new(),
+            idle_flags: false,
+            flag_at: 0,
             sent: VecDeque::new(),
             now: 0,
             symbols: 0,
@@ -293,6 +302,20 @@ impl Transmitter {
     /// frame would have ones put between them.
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.bits.extend(bits.iter().copied());
+    }
+
+    /// What [`Segment::Data`] sends while it has no bits: HDLC flags, or
+    /// ones (the default: an idle line is marking).
+    ///
+    /// T.30 Annex F gives consecutive ones a meaning on this channel: the
+    /// source sends them to turn the line round, and the recipient goes
+    /// silent on forty of them (F.3.2.2, F.3.2.3). So a fax that has sent its
+    /// E and has no frame to send yet idles on flags: F.3.1.4 has each end
+    /// send flags once the channel is started, and Figures F.5-2 to F.5-7
+    /// draw "E | Flags". A flag begun is always finished, and the
+    /// user's bits wait for its end, so the flags stay whole.
+    pub fn set_idle_flags(&mut self, on: bool) {
+        self.idle_flags = on;
     }
 
     /// The user's bits not sent yet.
@@ -448,6 +471,9 @@ impl Transmitter {
             // loses one symbol of ALT (`plan.md` 8.4).
             self.sender.restart();
         }
+        // A flag cut short by whatever ended the last data is not carried
+        // into the next.
+        self.flag_at = 0;
         Current { segment, done: 0, position: 0 }
     }
 
@@ -494,10 +520,20 @@ impl Transmitter {
                 self.differential(&ones, self.rate.size())
             }
             Segment::Data => {
-                let bits: Vec<bool> = (0..self.rate.bits()).map(|_| self.bits.pop_front().unwrap_or(true)).collect();
+                let bits: Vec<bool> = (0..self.rate.bits()).map(|_| self.data_bit()).collect();
                 self.differential(&bits, self.rate.size())
             }
         }
+    }
+
+    /// The next bit of [`Segment::Data`]: the user's, or the idle pattern.
+    fn data_bit(&mut self) -> bool {
+        if self.flag_at != 0 || (self.idle_flags && self.bits.is_empty()) {
+            let bit = FLAG[self.flag_at];
+            self.flag_at = (self.flag_at + 1) % FLAG.len();
+            return bit;
+        }
+        self.bits.pop_front().unwrap_or(true)
     }
 
     /// 10.2.4's mapping: I1 and I2 turn point `2 Q2 + Q1` of Figure 5
@@ -606,6 +642,37 @@ mod tests {
             // From a scrambler at zero and Z = 0, the first dibit 0 then 1
             // turns point 0 clockwise by two quarters.
             assert_eq!(grid(got[3].0), clockwise((1, 1), 2));
+        }
+    }
+
+    #[test]
+    fn data_with_nothing_to_send_idles_on_whole_flags_when_asked() {
+        for side in [Side::Call, Side::Answer] {
+            let mut tx = Transmitter::new(side, FS);
+            let mode = match side {
+                Side::Call => Mode::Call,
+                Side::Answer => Mode::Answer,
+            };
+            tx.queue(Segment::Alt { at_least: 16 });
+            tx.queue(Segment::E);
+            tx.queue(Segment::Data);
+            tx.set_idle_flags(true);
+            // Eleven symbols of idling: two flags and three quarters of a
+            // third. Then the user's bits, which wait for that flag's end.
+            let mut got = symbols(&mut tx, 16 + E_SYMBOLS + 11);
+            let user = [true, false, true, true, false, false, true, false];
+            tx.send_bits(&user);
+            tx.set_idle_flags(false);
+            got.extend(symbols(&mut tx, 9));
+            let mut reader = Reader::new(mode);
+            let bits: Vec<bool> = got.iter().flat_map(|(z, _)| reader.differential(grid(*z), Size::Four)).collect();
+            let data = &bits[32 + 20..];
+            for (i, b) in data[..24].iter().enumerate() {
+                assert_eq!(*b, FLAG[i % 8], "{side:?} flag bit {i}");
+            }
+            assert_eq!(&data[24..32], &user, "{side:?}: the bits did not follow the third flag whole");
+            // And ones again once the flags are off and the bits are gone.
+            assert!(data[32..].iter().all(|b| *b), "{side:?}: {:?}", &data[32..]);
         }
     }
 

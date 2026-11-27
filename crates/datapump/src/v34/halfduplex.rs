@@ -1266,6 +1266,18 @@ impl Modem {
     fn queue_e(&mut self, from_mph: bool) {
         self.control.transmitter.queue(Segment::E);
         self.control.transmitter.queue(Segment::Data);
+        // Between this end's E and the far end's, nothing of T.30's can be
+        // sent yet, and what fills the time must not be ones: on this
+        // channel consecutive ones are the source's signal to turn the line
+        // round (T.30 F.3.2.2, F.3.2.3). A recipient's E in a
+        // resynchronisation goes a round trip ahead of the source's
+        // (12.6.2.2), and over a line with half a second each way that was
+        // 1.2 s of ones in front of the first flag. A Super G3 fax that had
+        // just sent a partial page again stopped sending 70 ms after its own
+        // E, with those ones coming in, and never sent its PPS
+        // (live-1795761434, live-1795761544). T.30 has flags straight after
+        // E (F.3.1.4, Figures F.5-2 to F.5-7).
+        self.control.transmitter.set_idle_flags(true);
         self.stage = Stage::AwaitE;
         if from_mph {
             self.wait(THREE_SECONDS);
@@ -1278,6 +1290,9 @@ impl Modem {
     /// The control channel is up.
     fn up(&mut self) {
         self.stage = Stage::Control;
+        // T.30 has the channel now, and says what goes on it: flags, frames,
+        // and the source's ones when it is time for them.
+        self.control.transmitter.set_idle_flags(false);
         self.deadline = None;
         self.far_e = false;
         self.renegotiate = false;
