@@ -104,6 +104,28 @@ const E_WAIT: f64 = 2.0;
 /// seconds 12.6.1.6 gives.
 const RESYNC_E_WAIT: f64 = 0.5;
 
+/// How long after this end's E has gone the far end's E must come for this
+/// end to send E a second time, in answer to it.
+///
+/// It is the start-up's lost E again ([`E_WAIT`]), from the other end. The
+/// recipient's E in a resynchronisation follows 16T of ALT after its own
+/// reversal (12.6.2.2), and the source's follows 16T to 120T after it has
+/// heard that reversal (12.6.1.4): on a short line the two cross, and on a
+/// long one the recipient's is there first. On 2026-11-27 (live-1795769529)
+/// a Super G3 fax sent its E 170 ms after this end's E had reached it, then
+/// sent flags for three seconds, waiting for an E that had come and gone, and
+/// retrained the channel (12.6.1.6) -- by which time T.30 here had given the
+/// page up. In two calls before it, when this end still filled the time
+/// after its E with ones, the same machine took those for the E and sent its
+/// PPS at once (live-1795761434). A receiver that looks for the far E only
+/// once its own has gone finds twenty ones whenever it looks.
+///
+/// So an E that comes after this end's has gone is answered with E again:
+/// twenty ones more, which to a receiver that read the first E is the line
+/// idling between two flags, and too few to be T.30's forty (F.3.2.2). Not
+/// when the two E's nearly cross: an E straight behind an E is forty ones.
+const E_AGAIN_AFTER: f64 = 0.05;
+
 /// 12.8.1 gives no time for an AC that is never answered (`spec-v34-hdx.md`
 /// F-V34 #12). It gets the same three seconds as everything else, this many
 /// times over, and then the call is given up: a far end that has gone should
@@ -349,6 +371,8 @@ pub struct Modem {
     page_ending: bool,
     /// The far end's E has come in this start-up or resynchronisation.
     far_e: bool,
+    /// When this end's E had all gone to the line, in it.
+    e_gone: Option<u64>,
     /// Since when the far end's control carrier has been gone.
     far_off_since: Option<u64>,
     /// The far end's control carrier as loud as it has lately been on the
@@ -438,6 +462,7 @@ impl Modem {
             renegotiate: false,
             page_ending: false,
             far_e: false,
+            e_gone: None,
             far_off_since: None,
             far_level: 0.0,
             far_level_keep: (-1.0 / (FAR_LEVEL_SECONDS * fs)).exp(),
@@ -938,6 +963,16 @@ impl Modem {
     fn on_far_e(&mut self) {
         self.far_e = true;
         if self.stage == Stage::AwaitE {
+            // This end's E went a while ago: once more, for a far end that
+            // has only now begun to look for it (E_AGAIN_AFTER).
+            // As the first of the data, ahead of anything of T.30's, since
+            // data with bits to send does not give way to a signal queued
+            // behind it; and data's ones are E only at E's own rate
+            // (10.2.4.3).
+            let late = self.e_gone.is_some_and(|at| self.now >= at + self.seconds(E_AGAIN_AFTER));
+            if late && self.control.transmitter.rate() == control::Rate::R1200 {
+                self.control.transmitter.send_bits(&[true; control::E_BITS]);
+            }
             self.up();
         } else {
             self.maybe_e();
@@ -948,6 +983,9 @@ impl Modem {
     fn sent(&mut self) {
         while let Some(sent) = self.control.transmitter.sent() {
             let Sent::Ended { kind, .. } = sent else { continue };
+            if kind == Kind::E {
+                self.e_gone = Some(self.now);
+            }
             match (kind, self.stage) {
                 (Kind::Ones, Stage::TurningOff) => self.begin_page(),
                 // 12.6.1.5, 12.6.1.6, 12.6.2.5: three seconds "after sending
@@ -1266,6 +1304,7 @@ impl Modem {
     fn queue_e(&mut self, from_mph: bool) {
         self.control.transmitter.queue(Segment::E);
         self.control.transmitter.queue(Segment::Data);
+        self.e_gone = None;
         // Between this end's E and the far end's, nothing of T.30's can be
         // sent yet, and what fills the time must not be ones: on this
         // channel consecutive ones are the source's signal to turn the line
@@ -1276,7 +1315,8 @@ impl Modem {
         // just sent a partial page again stopped sending 70 ms after its own
         // E, with those ones coming in, and never sent its PPS
         // (live-1795761434, live-1795761544). T.30 has flags straight after
-        // E (F.3.1.4, Figures F.5-2 to F.5-7).
+        // E (F.3.1.4, Figures F.5-2 to F.5-7). The ones did one thing the
+        // flags do not, which E_AGAIN_AFTER is for.
         self.control.transmitter.set_idle_flags(true);
         self.stage = Stage::AwaitE;
         if from_mph {
