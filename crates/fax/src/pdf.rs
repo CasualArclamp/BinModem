@@ -404,7 +404,8 @@ mod tests {
         let table = &table[..table.find('>').unwrap()];
         assert_eq!(table.len(), 256 * 6);
         assert!(table.ends_with("FF8080"), "{}", &table[table.len() - 12..]);
-        assert!(!dict.contains("/Decode"), "{dict}");
+        // The table does the decoding, so there is no Decode array.
+        assert!(!dict.contains("/Decode ["), "{dict}");
         let length = number(&dict, "/Length ") as usize;
         let data = find(&pdf, b"stream\n", body).unwrap() + 7;
         let mut decoder = crate::jpeg::Decoder::new(WIDTH);
