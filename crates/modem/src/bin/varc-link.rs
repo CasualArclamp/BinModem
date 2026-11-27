@@ -160,9 +160,11 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
         "dmt" => "VARC",
         "qam" => "VARCQ",
         "pcm" => "VARCP",
-        "2w" => "VARC2W",
-        "qam2w" => "VARCQ2W",
-        "pcm2w" => "VARCP2W",
+        // The call finds out for itself whether it is on one pair of
+        // wires. These said so, and are kept for scripts that use them.
+        "2w" => "VARC",
+        "qam2w" => "VARCQ",
+        "pcm2w" => "VARCP",
         _ => return usage(),
     };
     println!(

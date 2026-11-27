@@ -509,9 +509,9 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
         // A delay below nought is a canceller that is there and has found
         // nothing yet, which is not the same as there being none.
         let why = if delay_ms < 0.0 {
-            "one pair of wires:\nlooking for this end's echo"
+            "looking for this end's echo"
         } else {
-            "a wire each way:\nno echo to cancel"
+            "no echo of this end:\na wire each way"
         };
         painter.text(rect.center(), Align2::CENTER_CENTER, why, FontId::monospace(10.0), LABEL);
     }

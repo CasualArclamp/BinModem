@@ -346,19 +346,20 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         ));
     }
 
-    // Two-wire if either end was told so, and only if both can cancel an
-    // echo, which wants one sound card: hearing and sending at one rate.
-    let asked = mine.two_wire || theirs.two_wire;
+    // Every call on a sound card looks for an echo: each end has the line
+    // to itself for a moment, and an end that hears itself keeps a
+    // canceller. Nobody has to say what the line is. It was a choice, and a
+    // line with a wire each way that was told it was one pair lost half its
+    // rate to a canceller with nothing to cancel; now that end drops it.
+    // The bit in the message that asked for this is not looked at.
+    //
+    // Only if both ends can cancel an echo, which wants one sound card:
+    // hearing and sending at one rate.
     let able = mine.hears_hz == mine.sends_hz && theirs.hears_hz == theirs.sends_hz;
     // A call made of packets has a path each way and no echo to cancel.
     let packets = mine.line != Line::Sound && theirs.line != Line::Sound;
-    if asked && packets {
-        notes.push("two-wire was asked for, and a SIP call has a path each way: running as a wire each way".to_owned());
-    } else if asked && !able {
-        notes.push(
-            "two-wire was asked for, and an end hears and sends on different sound cards, which cannot cancel an echo: running as a wire each way"
-                .to_owned(),
-        );
+    if !packets && !able {
+        notes.push("an end hears and sends on different sound cards, which cannot cancel an echo: no echo is looked for".to_owned());
     }
 
     let wanted = if mine.wanted != theirs.wanted {
@@ -375,7 +376,7 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         wanted,
         send_fit: fit(theirs.fit),
         hear_fit: fit(mine.fit),
-        two_wire: asked && able && !packets,
+        two_wire: able && !packets,
         direct: mine.line != Line::Sound
             && mine.line == theirs.line
             && send_times == 1
@@ -1652,12 +1653,12 @@ mod tests {
         assert_eq!(host.theirs().map(|c| (c.hears_hz, c.sends_hz)), Some((48_000, 192_000)));
         assert_eq!((caller.stage(), host.stage()), ("V.ARC: MS received, ACK sent", "V.ARC: ACK received"));
         let (ours, theirs) = (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap());
-        // A wire each way after all, each direction at its own rate.
+        // No echo is looked for, and each direction is at its own rate.
         assert!(!ours.two_wire && !theirs.two_wire);
         assert_eq!((ours.send_hz, ours.hear_hz), (192_000.0, 48_000.0));
         assert_eq!((theirs.send_hz, theirs.hear_hz), (48_000.0, 192_000.0));
         assert_eq!((ours.send_times, ours.hear_times), (1, 1));
-        assert!(ours.notes.iter().any(|n| n.contains("two-wire was asked for")), "{:?}", ours.notes);
+        assert!(ours.notes.iter().any(|n| n.contains("cannot cancel an echo")), "{:?}", ours.notes);
     }
 
     /// Two ends at 48 kHz, a sample at a time, with a line each way that
@@ -1758,7 +1759,7 @@ mod tests {
         let on = |line: Line| Caps { line, two_wire: true, ..caps(8_000, 8_000) };
         let agreed = agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap();
         assert!(!agreed.two_wire);
-        assert!(agreed.notes.iter().any(|note| note.contains("a SIP call has a path each way")), "{:?}", agreed.notes);
+        assert!(agreed.notes.is_empty(), "{:?}", agreed.notes);
         // One end on a sound card can still have an echo to cancel.
         assert!(agree(&on(Line::Sound), &on(Line::MuLaw)).unwrap().two_wire);
     }

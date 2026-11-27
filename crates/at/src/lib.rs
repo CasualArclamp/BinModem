@@ -407,9 +407,12 @@ impl Interpreter {
             // HST96 is the first of them, the 1986 Courier HST: 9600 one
             // way and 300 back, and nothing else.
             //
-            // The last three are no Recommendation's: V.ARC, this modem's
+            // The last six are no Recommendation's: V.ARC, this modem's
             // own mode for a sound card wired to another one, as its
-            // multicarrier, QAM and baseband modulations.
+            // multicarrier, QAM and baseband modulations. The three that
+            // end in 2W said the line was one pair of wires. Every V.ARC
+            // call finds that out for itself now, and they are the first
+            // three under names that old settings still use.
             modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "HST", "HST96", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
                 .iter()
                 .map(|s| (*s).to_owned())

@@ -57,7 +57,7 @@ modem that is set to V.ARC puts one block in that category of its menu:
 | `FF FF` | the T.35 country code |
 | `04` `42 69 6E 4D` | the length of the provider code, and the code "BinM" |
 | `01` | the edition of this block |
-| flags | bits 1 and 2: multicarrier, QAM or baseband levels; bit 3: one pair of wires |
+| flags | bits 1 and 2: multicarrier, QAM or baseband levels; bit 3: not used (it asked for one pair of wires) |
 
 - The block is the same block that V.8 bis carries. See
   [V.8 bis](#v8-bis). The codes are not registered.
@@ -102,7 +102,7 @@ The capabilities of an end are:
 - the rates at which this end hears and sends
 - the number of channels
 - the modulation that this end was set to
-- whether this end was told that the line is one pair of wires
+- a bit that is not used (it asked for one pair of wires)
 - what the line of this end is made of: a sound card, a SIP call in linear
   samples, a SIP call in A-law, or a SIP call in mu-law
 - the fit that the band of this end passes (see [The line probe](#the-line-probe))
@@ -123,8 +123,9 @@ call the handshake runs at the rate of the call. For G.711 that is 8 kHz.
 - The two direct modes (V.ARC/L16, V.ARC/G.711) are a trial. If nothing is
   heard in 4 s, or the ends have no connection in 10 s, the call continues
   as the multicarrier modulation. The handshake does not run again.
-- `VARC2W` on a SIP call runs as `VARC`. A SIP call has a path for each
-  direction and no echo. The transcript says so.
+- A call on a sound card looks for an echo before the modulation starts.
+  See [One pair of wires](#one-pair-of-wires-the-echo-canceller). A SIP
+  call has a path for each direction and no echo, and does not look.
 - If the two ends were set to different modulations, the multicarrier
   modulation runs.
 
@@ -601,7 +602,7 @@ Both ends then work out the same answer from the same two messages
 | Question | Answer |
 |---|---|
 | What rate does each direction run at? | The slower of the two cards on it. The end with the faster card converts, by a whole number of times (`Faster`, `Slower`). Cards that no whole number relates, 44.1 and 48 kHz, are told so. |
-| One pair of wires? | If either end was told so, and both hear and send on one card at one rate, and the line is not a SIP call. Otherwise a wire each way, with a note. |
+| Does each end look for its echo? | Yes, if both ends hear and send on one card at one rate, and the line is not a SIP call. An end that hears no echo uses no canceller. |
 | Are the numbers of the call the data? | Only if both ends are on a SIP call of the same coding at one rate. See [The start of a call](#the-start-of-a-call). |
 | Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
 
@@ -618,8 +619,7 @@ there is nobody else. Each other call has it, a SIP call included.
 Run for real: a V.ARC/QAM call in G.711 mu-law between two `modem-sip` on
 one machine (37 000 bit/s each way). The sound card rigs are tested in
 simulation only with this handshake: two cards at different rates, a fast
-card that calls a slow one, one pair of wires, and two ends told two-wire
-that cannot be.
+card that calls a slow one, and one pair of wires.
 
 Two things it turned up in the receiver, both now fixed:
 
@@ -644,7 +644,7 @@ define (8.5). The modem puts a block in that field beside its usual list:
 | `FF FF` | country code |
 | `04` `42 69 6E 4D` | provider code, "BinM", and its length |
 | `01` | edition of this block |
-| flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: one pair of wires |
+| flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: not used (it asked for one pair of wires) |
 
 "Non-standard field" is set in the identification field (Table 5-1) and
 "non-standard capabilities" is set below the data mode (Table 6-3a).
@@ -665,7 +665,7 @@ The transaction is then as it was (CRe, CRd, CL, MS, ACK):
 
 `+VARCBIS=<mode>,<wires>` sets what a modem lists when `+MS` names an
 ordinary mode. Mode 0 is off (the default), 1 is multicarrier, 2 is QAM, 3
-is PCM. Wires 1 is one pair of wires. With `+MS=VARC` or one of the other
+is PCM. The modem accepts `<wires>` and does not use it. With `+MS=VARC` or one of the other
 V.ARC modes, the modem lists that mode and `+VARCBIS` is not necessary.
 In the window, the setting is below the V.8 bis switch.
 
@@ -847,9 +847,73 @@ is needed.
 
 ## One pair of wires: the echo canceller
 
-Everything above supposes a wire each way. `AT+MS=VARC2W` is the multicarrier
-mode on a line where both ends send into the same pair, and each hears the
-other with its own signal on top (`echo.rs`).
+Everything above supposes a wire each way. On one pair of wires both ends
+send into the same pair, and each hears the other with its own signal on top
+(`echo.rs`).
+
+### The call finds the type of line
+
+There is one way to run a V.ARC call. The modes `VARC2W`, `VARCQ2W` and
+`VARCP2W` told the modem that the line was one pair of wires. They are now
+other names for `VARC`, `VARCQ` and `VARCP`.
+
+- Each call on a sound card starts with the turns that are given below.
+  Each end has the line to itself for 2 s.
+- An end that hears its own signal come back keeps its canceller.
+- An end that hears nothing come back has no echo. When the turns are
+  complete, it starts again with no canceller and at its full level.
+- An end also drops a canceller that did not learn the echo, if the echo
+  is 20 dB or more below the sound of the handshake.
+- The turns add approximately 4 s to the start of a call.
+- A SIP call does not look for an echo. A call where an end hears and
+  sends on two sound cards does not look, because two cards cannot cancel
+  an echo.
+
+A canceller with no echo to learn is not harmless. It learns the far end as
+if the far end were an echo, and that adds noise. The table shows a line
+with a wire each way in simulation at 48 kHz, after 50 s.
+
+| Mode | Told one pair of wires, before | A wire each way | Now |
+|---|---|---|---|
+| Multicarrier | 337 kbit/s, and it started at 153 | 437 kbit/s | 437 kbit/s |
+| QAM | 160 kbit/s | 338 and 356 kbit/s | 338 and 356 kbit/s |
+| PCM | 90 kbit/s | 306 and 333 kbit/s | 306 and 333 kbit/s |
+
+Two `varc-link` ends on one machine, V.ARC/QAM, with nothing set for the
+type of line:
+
+| Line | What the call found | After 40 s to 60 s |
+|---|---|---|
+| VB-Cable A one way and VB-Cable B the other way | no echo at each end | 369 and 372 kbit/s, 0 octets incorrect |
+| VB-Cable A, shared | an echo 151 ms round the line, 28 dB down after the turn | 181 and 187 kbit/s, 0 octets incorrect |
+
+### A different carrier in each direction does not help
+
+Does QAM on one pair of wires get a better result if the two directions
+have different carriers? The measurement says no.
+
+- The canceller subtracts a filtered copy of the samples that this end
+  sent. It does not use the carrier.
+- The two directions already use different sync words, thus a receiver
+  does not lock to its own echo.
+- A small difference keeps the two bands on top of each other. A large
+  difference pushes one band against the edge of the line.
+
+In simulation the carrier of one direction was moved. The echo was 6 dB
+louder than the far end. The table shows the two directions after 50 s.
+
+| Carrier difference | Echo of four samples | Echo with a tail of 2 ms |
+|---|---|---|
+| 0 Hz | 177.5 and 191 kbit/s | 175.5 and 164 kbit/s |
+| 500 Hz | 181.5 and 189 kbit/s | 179.5 and 158 kbit/s |
+| 1000 Hz | 156 and 177.5 kbit/s | 171.5 and 160 kbit/s |
+| 2000 Hz | 126 and 131 kbit/s | 138.5 and 137 kbit/s |
+
+The limit for QAM on one pair of wires is the canceller. It leaves the
+signal approximately 41 dB above the echo. The multicarrier mode has a
+second stage that goes to 70 dB and more. QAM does not have that stage.
+
+### The canceller
 
 - **Where the echo is.** A sound card puts tens of milliseconds between a
   sample written and the same sample heard. The delay is found by laying a
@@ -869,8 +933,8 @@ other with its own signal on top (`echo.rs`).
 It needs one sound card, input and output at the same rate, since it lays
 what was sent against what was heard sample for sample.
 
-`AT+MS=VARCQ2W` and `AT+MS=VARCP2W` are the single-carrier modes on one pair
-of wires. The canceller in front knows nothing of the modulation and serves
+The single-carrier modes run on one pair of wires also. The canceller in
+front knows nothing of the modulation and serves
 them as it is; the second stage below is the multicarrier receiver's and
 they do not have it, so they settle where the first stage leaves them. On
 the shared virtual cable, learning while the far end talked: QAM 85 to
@@ -1254,8 +1318,7 @@ and CABLE-B at 48 kHz, 2.14 Mbit/s one way and 0.80 the other.
 
 Before this a V.ARC call on two such devices ended at once in `NO CARRIER`,
 with the reason only in the transcript. A call the line cannot run now says
-why in red on the line's row of the window: a two-wire call on two devices,
-for one, which is still refused.
+why in red on the line's row of the window.
 
 During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a
