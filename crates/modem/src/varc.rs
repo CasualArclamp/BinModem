@@ -870,7 +870,6 @@ impl Call {
                         channels: input.len() as u8,
                         wanted,
                         two_wire,
-                        heard: false,
                         asks_baud,
                         line,
                         fit: 0,
@@ -1131,7 +1130,7 @@ impl Call {
 
     pub fn phase(&self) -> &'static str {
         if let Some(hello) = self.hello.as_ref() {
-            return if hello.theirs().is_some() { "V.ARC: agreeing with the far end" } else { "V.ARC: calling the far end" };
+            return hello.stage();
         }
         match self.turn {
             Turn::Quiet { .. } => return "V.ARC: waiting for the line to go quiet",
@@ -1235,13 +1234,16 @@ impl Call {
             Some(caps) => {
                 rows.push(("V.ARC hello", said(&caps)));
                 rows.push(("asked for", asked(&caps)));
-                if self.hello.is_some() {
-                    rows.push(("far end", if caps.heard { "has heard this end" } else { "has not heard this end yet" }.to_owned()));
+                if let Some(hello) = self.hello.as_ref() {
+                    rows.push(("transaction", hello.stage().trim_start_matches("V.ARC: ").to_owned()));
                 }
             }
             None if self.hello.is_some() => {
-                let (ours, theirs) = if self.calling { ("1000 and 1400", "2000 and 2400") } else { ("2000 and 2400", "1000 and 1400") };
-                rows.push(("V.ARC hello", format!("calling on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
+                let (ours, theirs) = if self.calling { (1200, 2400) } else { (2400, 1200) };
+                rows.push(("V.ARC hello", format!("carrier on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
+                if let Some(hello) = self.hello.as_ref() {
+                    rows.push(("transaction", hello.stage().trim_start_matches("V.ARC: ").to_owned()));
+                }
             }
             None => {}
         }
@@ -1278,8 +1280,8 @@ impl Call {
         self.hello.is_some()
     }
 
-    /// The handshake's tones as heard since this was last asked: which of
-    /// the far end's two is arriving, between minus one and one.
+    /// The handshake's bits as heard since this was last asked: one for a
+    /// carrier that stayed as it was, minus one for one that turned over.
     pub fn take_symbols(&mut self) -> Vec<f64> {
         std::mem::take(&mut self.symbols)
     }
