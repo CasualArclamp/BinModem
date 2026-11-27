@@ -48,29 +48,6 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
-      - name: Find SHGetKnownFolderPath Callers
-        shell: pwsh
-        run: |
-          Write-Host "=== Repo search for folder/known-folder APIs ==="
-          Select-String -Path "crates/**/*.rs", "crates/**/Cargo.toml", "Cargo.toml" `
-            -Pattern "SHGetKnownFolderPath|KnownFolder|dirs|directories|APPDATA|LOCALAPPDATA|storage|persistence" `
-            -CaseSensitive:$false | ForEach-Object {
-              "{0}:{1}: {2}" -f $_.Path, $_.LineNumber, $_.Line.Trim()
-            }
-
-          foreach ($name in "binmodem", "dialsnoop") {
-            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
-            Write-Host "=== Binary string check: $name.exe ==="
-            $bytes = [IO.File]::ReadAllBytes($exe)
-            $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-            $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
-            if ($ascii -match "SHGetKnownFolderPath" -or $utf16 -match "SHGetKnownFolderPath") {
-              Write-Host "Found SHGetKnownFolderPath string inside $exe"
-            } else {
-              Write-Host "SHGetKnownFolderPath string not found as plain ASCII/UTF-16 in $exe"
-            }
-          }
-
       - name: Audit Windows XP Imports
         shell: pwsh
         run: |
