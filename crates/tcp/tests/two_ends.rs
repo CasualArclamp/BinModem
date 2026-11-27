@@ -257,6 +257,35 @@ fn a_page_crosses_a_line_that_loses_segments() {
     assert_eq!(pair.from_b, page, "it arrived changed");
 }
 
+/// The same line, with the sender paced by the line and a large window at
+/// the reader: what the proxy runs. Pacing changes when new data goes and
+/// nothing about how a loss is put right.
+#[test]
+fn a_paced_page_crosses_a_line_that_loses_segments() {
+    let page: Vec<u8> = a_page().repeat(8);
+    let mut pair = Pair::new(Line { lose_one_in: 7, delay_ms: 400, ..Line::default() });
+    pair.connect();
+    pair.b.tune_receive(744_000);
+
+    let mut at = 0;
+    for _ in 0..600_000 {
+        if at < page.len() {
+            at += pair.a.send(&page[at..]);
+        }
+        // Two segments a step: a line faster than the sender's window.
+        pair.a.grant(1_100);
+        pair.step();
+        if pair.from_b.len() >= page.len() {
+            break;
+        }
+    }
+    assert!(pair.lost > 20, "the line did not lose anything: {}", pair.lost);
+    assert_eq!(pair.from_b.len(), page.len(), "only part of it arrived");
+    assert_eq!(pair.from_b, page, "it arrived changed");
+    println!("  {} octets in {} s, {} segments lost", page.len(), pair.clock / 1000, pair.lost);
+    assert!(pair.clock < 400_000, "it took {} s", pair.clock / 1000);
+}
+
 /// And over one that delivers every fifth segment behind the one after it.
 #[test]
 fn a_page_crosses_a_line_that_reorders_segments() {

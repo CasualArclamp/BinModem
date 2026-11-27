@@ -67,6 +67,16 @@ pub struct Stack {
     /// carry in one segment.
     receive_mss: u16,
     send_limit: u16,
+    /// Whether the line below says when data goes (see [`Stack::pace`]).
+    paced: bool,
+    /// The bit rate the line delivers to this end, once somebody has said.
+    receive_rate: Option<u32>,
+    /// The connection the line served last, so the next round starts after
+    /// it.
+    served: Handle,
+    /// The longest round trip a connection here has measured lately, in
+    /// milliseconds, for the next connection to start from. Zero is none.
+    round_trip_ms: u32,
 }
 
 impl Stack {
@@ -84,7 +94,66 @@ impl Stack {
             arrived: Vec::new(),
             receive_mss: 1460,
             send_limit: u16::MAX,
+            paced: false,
+            receive_rate: None,
+            served: Handle(0),
+            round_trip_ms: 0,
         }
+    }
+
+    /// Let the line decide when new data goes: `room` octets of it now.
+    ///
+    /// Call this every round with what the queue for the line has room for.
+    /// From the first call on, no connection sends new data at any other
+    /// time, so the queue holds what the line needs and no more, and the
+    /// line never waits a round trip for an acknowledgement before it gets
+    /// the next segment (see [`Connection::grant`]).
+    ///
+    /// The room goes round the connections a segment at a time, so one
+    /// download does not take all of it.
+    pub fn pace(&mut self, room: usize) {
+        self.paced = true;
+        let mut order: Vec<Handle> = self.connections.keys().copied().collect();
+        order.sort();
+        let start = order.partition_point(|h| *h <= self.served);
+        order.rotate_left(start);
+
+        let mut room = room.min(u32::MAX as usize) as u32;
+        // A connection that sent nothing has nothing more to send this
+        // round.
+        let mut hungry = order;
+        for handle in &hungry {
+            if let Some(c) = self.connections.get_mut(handle)
+                && !c.paced()
+            {
+                c.grant(0);
+            }
+        }
+        while room > 0 && !hungry.is_empty() {
+            let mut still = Vec::with_capacity(hungry.len());
+            for handle in hungry {
+                let Some(c) = self.connections.get_mut(&handle) else { continue };
+                if room == 0 || !c.wants_the_line() {
+                    continue;
+                }
+                // One segment a turn.
+                let used = c.grant(1);
+                if used > 0 {
+                    room = room.saturating_sub(used);
+                    self.served = handle;
+                    still.push(handle);
+                }
+            }
+            hungry = still;
+        }
+        self.collect();
+    }
+
+    /// Say what bit rate the line delivers to this end, so every connection
+    /// offers a window that holds a round trip of it (see
+    /// [`Connection::tune_receive`]).
+    pub fn set_receive_rate(&mut self, bits_per_second: u32) {
+        self.receive_rate = Some(bits_per_second);
     }
 
     /// Size new connections for the link under them.
@@ -146,8 +215,9 @@ impl Stack {
         }
         let port = self.free_port()?;
         let local = Endpoint::new(self.address, port);
-        let connection =
+        let mut connection =
             Connection::connect_sized(local, to, self.initial_sequence(), self.receive_mss, self.send_limit);
+        connection.expect_round_trip(self.round_trip_ms);
         Some(self.keep(connection))
     }
 
@@ -180,7 +250,15 @@ impl Stack {
     pub fn tick(&mut self, ms: u32) {
         self.clock += u64::from(ms);
         for connection in self.connections.values_mut() {
+            if let Some(rate) = self.receive_rate {
+                connection.tune_receive(rate);
+            }
             connection.tick(ms);
+        }
+        // Every connection crosses the same line, so the longest of them is
+        // what the next one should expect.
+        if let Some(longest) = self.connections.values().map(Connection::round_trip_ms).filter(|ms| *ms > 0).max() {
+            self.round_trip_ms = longest;
         }
         self.collect();
     }
@@ -221,6 +299,7 @@ impl Stack {
             connection.set_receive_mss(self.receive_mss);
             connection.set_send_limit(self.send_limit);
             connection.receive(from, &segment);
+            connection.expect_round_trip(self.round_trip_ms);
             let handle = self.keep(connection);
             self.arrived.push(handle);
             self.collect();
@@ -286,7 +365,11 @@ impl Stack {
             .map(|(handle, _)| *handle)
     }
 
-    fn keep(&mut self, connection: Connection) -> Handle {
+    fn keep(&mut self, mut connection: Connection) -> Handle {
+        if self.paced {
+            // Nothing goes until the line says so.
+            connection.grant(0);
+        }
         let handle = Handle(self.next_handle);
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
         self.connections.insert(handle, connection);
@@ -479,5 +562,140 @@ mod tests {
         stack.connect(Endpoint::new(B, 80)).unwrap();
         assert!(!stack.set_address(B), "it moved with a connection open");
         assert_eq!(stack.address(), A);
+    }
+
+    /// Two connected stacks, the host listening on 80, and the handle of
+    /// each end of `n` connections.
+    fn connected(n: usize) -> (Stack, Stack, Vec<Handle>, Vec<Handle>) {
+        let mut caller = Stack::new(A, 1);
+        let mut host = Stack::new(B, 2);
+        host.listen(80);
+        let calling: Vec<Handle> = (0..n).map(|_| caller.connect(Endpoint::new(B, 80)).unwrap()).collect();
+        run(&mut caller, &mut host, 500);
+        let mut hosting = host.take_arrived();
+        hosting.sort();
+        assert_eq!(hosting.len(), n);
+        (caller, host, calling, hosting)
+    }
+
+    /// Both ends offer a window scale, so a window can be more than sixteen
+    /// bits once the line is known to be fast.
+    #[test]
+    fn a_fast_line_gets_a_window_past_sixteen_bits() {
+        let (mut caller, mut host, calling, hosting) = connected(1);
+        // 744 kbit/s: ninety-three thousand octets a second.
+        caller.set_receive_rate(744_000);
+        run(&mut caller, &mut host, 500);
+        let offered = caller.get(calling[0]).unwrap().status().rcv_wnd;
+        assert!(offered > 100_000, "the window stayed at {offered}");
+
+        // The host sends until the window stops it, with nothing read.
+        let data = vec![7u8; 4096];
+        for _ in 0..200 {
+            host.get_mut(hosting[0]).unwrap().send(&data);
+            run(&mut caller, &mut host, 20);
+        }
+        let held = caller.get(calling[0]).unwrap().available();
+        assert!(held > 100_000, "only {held} octets crossed");
+        assert!(held <= offered as usize, "{held} octets crossed a window of {offered}");
+    }
+
+    /// A slow line keeps a small window: what a sender may put in a
+    /// provider's queue is a few seconds of line, not a megabyte.
+    #[test]
+    fn a_slow_line_keeps_a_small_window() {
+        let (mut caller, mut host, calling, _) = connected(1);
+        caller.set_receive_rate(33_600);
+        run(&mut caller, &mut host, 500);
+        let offered = caller.get(calling[0]).unwrap().status().rcv_wnd;
+        assert!((16_384..=20_000).contains(&offered), "the window is {offered}");
+    }
+
+    /// A paced stack sends new data when the line has room and at no other
+    /// time, and shares the room between its connections.
+    #[test]
+    fn the_line_says_when_data_goes_and_connections_share_it() {
+        let (mut caller, mut host, calling, hosting) = connected(2);
+        host.pace(0);
+        let data = vec![7u8; 8000];
+        for h in &hosting {
+            assert_eq!(host.get_mut(*h).unwrap().send(&data), data.len());
+        }
+        run(&mut caller, &mut host, 500);
+        for h in &calling {
+            assert_eq!(caller.get(*h).unwrap().available(), 0, "data went with no room on the line");
+        }
+
+        // Room for two segments: one from each, not two from one.
+        host.pace(2 * 1500);
+        run(&mut caller, &mut host, 500);
+        let got: Vec<usize> = calling.iter().map(|h| caller.get(*h).unwrap().available()).collect();
+        assert_eq!(got, [1460, 1460]);
+
+        // And with room every round, all of it crosses.
+        for _ in 0..50 {
+            host.pace(3000);
+            run(&mut caller, &mut host, 20);
+        }
+        for h in &calling {
+            assert_eq!(caller.get(*h).unwrap().available(), data.len());
+        }
+    }
+
+    /// The second connection on a line starts from the round trip the first
+    /// one measured, so a line slower than a second does not send every SYN
+    /// twice.
+    #[test]
+    fn a_new_connection_expects_the_round_trip_the_line_has_shown() {
+        let mut caller = Stack::new(A, 1);
+        let mut host = Stack::new(B, 2);
+        host.listen(80);
+        // 800 ms each way, kept by hand.
+        let mut flying: std::collections::VecDeque<(u32, bool, Outgoing)> = Default::default();
+        let mut step = |caller: &mut Stack, host: &mut Stack, now: u32| {
+            for out in caller.take_outgoing() {
+                flying.push_back((now + 800, true, out));
+            }
+            for out in host.take_outgoing() {
+                flying.push_back((now + 800, false, out));
+            }
+            while flying.front().is_some_and(|(at, ..)| *at <= now) {
+                let (_, to_host, out) = flying.pop_front().unwrap();
+                if to_host {
+                    host.deliver(A, out.to, &out.payload);
+                } else {
+                    caller.deliver(B, out.to, &out.payload);
+                }
+            }
+            caller.tick(10);
+            host.tick(10);
+        };
+        let first = caller.connect(Endpoint::new(B, 80)).unwrap();
+        for now in (0..3_000).step_by(10) {
+            step(&mut caller, &mut host, now);
+        }
+        let status = caller.get(first).unwrap().status();
+        assert_eq!(status.state, State::Established);
+        assert!(status.resent >= 1, "a first SYN on an unknown line waits a second and no more");
+        // A SYN sent twice measures nothing (Karn's rule). The request
+        // after it does, and the answer does for the host.
+        caller.get_mut(first).unwrap().send(b"a request");
+        let answering = host.take_arrived()[0];
+        host.get_mut(answering).unwrap().send(b"and an answer");
+        for now in (3_000..6_000).step_by(10) {
+            step(&mut caller, &mut host, now);
+        }
+        assert!(caller.get(first).unwrap().round_trip_ms() >= 1_600);
+
+        let second = caller.connect(Endpoint::new(B, 80)).unwrap();
+        for now in (6_000..12_000).step_by(10) {
+            step(&mut caller, &mut host, now);
+        }
+        let status = caller.get(second).unwrap().status();
+        assert_eq!(status.state, State::Established);
+        assert_eq!(status.resent, 0, "the second SYN was sent twice");
+        // And the host's end of it did not send its answer twice either.
+        let hosts: Vec<u32> = host.connections().map(|(_, c)| c.status().resent).collect();
+        assert_eq!(hosts.iter().filter(|r| **r == 0).count(), 1, "resent: {hosts:?}");
     }
 }

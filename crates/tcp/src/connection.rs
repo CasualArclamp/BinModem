@@ -28,9 +28,15 @@
 //!   doubled six times finally goes off. Without it, one loss in seven turned
 //!   a page into a stall.
 //!
-//! Not here: window scaling and timestamps (RFC 7323), selective
-//! acknowledgement, and urgent data -- none of which is any use at these
-//! speeds. Urgent data is read on arrival (RCV.UP is kept) and never
+//! * RFC 7323's window scale. A line with a long round trip holds more than
+//!   sixteen bits of window can name: 744 kbit/s and two seconds there and
+//!   back is 186 000 octets in flight.
+//!
+//! * A sender that follows the line and a receiver that follows the round
+//!   trip. See [`Connection::grant`] and [`Connection::tune_receive`].
+//!
+//! Not here: timestamps (RFC 7323), selective acknowledgement, and urgent
+//! data. Urgent data is read on arrival (RCV.UP is kept) and never
 //! generated: RFC 6093 found the mechanism too inconsistently implemented to
 //! rely on.
 
@@ -126,6 +132,22 @@ impl Endpoint {
 /// telephone call.
 pub const RECEIVE_BUFFER: usize = 8192;
 
+/// The shift this end asks for on the windows it sends (RFC 7323 2.2).
+/// Sixteen bits shifted four is a megabyte, which is ten seconds of the
+/// fastest line there is.
+const WINDOW_SHIFT: u8 = 4;
+/// RFC 7323 2.3: "the shift count MUST be limited to 14".
+const MOST_SHIFT: u8 = 14;
+/// The largest window this end ever offers.
+const MOST_WINDOW: u32 = (u16::MAX as u32) << WINDOW_SHIFT;
+/// And the smallest [`Connection::tune_receive`] settles on: eleven full
+/// segments, so a slow line still has room for a burst.
+const LEAST_TUNED_WINDOW: u32 = 16_384;
+/// What a segment costs the line besides its data, for [`Connection::grant`].
+/// Forty octets of headers, which RFC 1144 often makes five; the larger
+/// figure only makes the pump a little shy.
+const LINE_OVERHEAD: u32 = 40;
+
 /// RFC 6298 (2.1): "the sender SHOULD set RTO <- 1 second" until there is a
 /// measurement, and (2.4) nothing computed later may be rounded below it.
 const INITIAL_RTO_MS: u32 = 1_000;
@@ -165,6 +187,9 @@ const DUPLICATES_BEFORE_RESENDING: u32 = 3;
 /// high (e.g., to the size of the largest possible advertised window)", which
 /// without window scaling is what sixteen bits will hold.
 const INITIAL_SSTHRESH: u32 = u16::MAX as u32;
+/// The most the congestion window grows to: the largest window a far end
+/// can offer with a scale.
+const MOST_CWND: u32 = MOST_WINDOW;
 
 /// What 3.10.6's STATUS call gives back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +243,24 @@ pub struct Connection {
     rcv_wnd: u32,
     rcv_up: Seq,
     irs: Seq,
+    /// RFC 7323 2.2's Snd.Wind.Shift and Rcv.Wind.Shift: the shift on the
+    /// windows the far end sends, and on the ones this end does. Both zero
+    /// unless both SYNs carried the option.
+    snd_scale: u8,
+    rcv_scale: u8,
+    /// Whether the far end's SYN carried a window scale, which decides
+    /// whether this end's SYN,ACK may.
+    scale_offered: bool,
+    /// How much this end holds for a reader that has not read: RCV.BUFF.
+    /// [`RECEIVE_BUFFER`] until [`Connection::tune_receive`] says otherwise.
+    receive_limit: u32,
+    /// What the line below will take now, when something tells this end
+    /// (see [`Connection::grant`]). `None` is a connection nobody paces,
+    /// which sends by RFC 5681's window alone.
+    line_room: Option<u32>,
+    /// The round trip other connections on this line measured, until this
+    /// one has a measurement of its own. Zero is none.
+    expected_round_trip_ms: u32,
 
     /// 3.7.1: what the far end said it can receive, or the default if it said
     /// nothing (MUST-15).
@@ -258,6 +301,13 @@ pub struct Connection {
     /// Whether 3.2's fast recovery is running, during which cwnd is inflated
     /// by what has left the network and is deflated again at the end.
     recovering: bool,
+    /// RFC 6582 3.2's `recover`: SND.NXT when the loss was found. Until an
+    /// acknowledgement reaches it, each one that moves SND.UNA says the
+    /// segment now at the front is lost as well.
+    recover: Seq,
+    /// Whether the loss being repaired was found by the timer, after which
+    /// the window grows from one segment and is not set from ssthresh.
+    timed_out: bool,
 
     // RFC 6298's estimator.
     rto_ms: u32,
@@ -311,14 +361,133 @@ impl Connection {
         c.set_send_limit(send_limit);
         // <SEQ=ISS><CTL=SYN>, and 3.7.1 SHLD-5 puts the size on it.
         c.snd_nxt = c.iss + 1;
-        let mss = c.recv_mss;
-        c.transmit(Segment {
-            sequence: c.iss.0,
-            flags: flag::SYN,
-            mss: Some(mss),
-            ..c.blank()
-        });
+        let syn = c.syn(flag::SYN);
+        c.transmit(syn);
         c
+    }
+
+    /// A SYN or a SYN,ACK: the two segments that carry options.
+    ///
+    /// RFC 7323 2.2: the option goes on a SYN, and on a SYN,ACK "only if a
+    /// Window Scale option was received in the initial SYN". 2.2 also has
+    /// "the window field in a segment where the SYN bit is set ... MUST NOT
+    /// be scaled".
+    fn syn(&self, flags: u8) -> Segment {
+        let answering = flags & flag::ACK != 0;
+        Segment {
+            sequence: self.iss.0,
+            acknowledgment: if answering { self.rcv_nxt.0 } else { 0 },
+            flags,
+            mss: Some(self.recv_mss),
+            window_scale: (!answering || self.scale_offered).then_some(WINDOW_SHIFT),
+            window: self.rcv_wnd.min(u32::from(u16::MAX)) as u16,
+            ..self.blank()
+        }
+    }
+
+    /// Take the far end's SYN options: its MSS and its window scale. The
+    /// scale is in use only when both SYNs carried one (RFC 7323 2.2), and
+    /// this end's always does when the far end's did.
+    fn take_syn_options(&mut self, segment: &Segment) {
+        self.send_mss = self.effective_mss(segment.mss);
+        self.scale_offered = segment.window_scale.is_some();
+        match segment.window_scale {
+            Some(shift) => {
+                self.snd_scale = shift.min(MOST_SHIFT);
+                self.rcv_scale = WINDOW_SHIFT;
+            }
+            None => {
+                self.snd_scale = 0;
+                self.rcv_scale = 0;
+            }
+        }
+    }
+
+    /// The most this end may hold: its buffer, within what the window field
+    /// can say.
+    fn receive_most(&self) -> u32 {
+        self.receive_limit.min(u32::from(u16::MAX) << self.rcv_scale)
+    }
+
+    /// Let the line below decide when new data goes.
+    ///
+    /// `octets` is what the line will take now. This end sends new data
+    /// until that is used, a whole segment at a time, so the last segment
+    /// may go past it. No more goes until the next grant. Gives back what it
+    /// cost the line.
+    ///
+    /// The reason is the round trip. RFC 5681 lets new data go when an
+    /// acknowledgement comes back, so a sender is a round trip behind the
+    /// line: it sends a window, waits, and sends again. On a call the
+    /// slowest hop is the modem under this end, and its queue is in plain
+    /// view. So the queue is the clock: data goes when the queue has room,
+    /// and the congestion window does not hold it back. The far end's window
+    /// still does.
+    pub fn grant(&mut self, octets: u32) -> u32 {
+        self.line_room = Some(octets);
+        let before = self.snd_nxt;
+        self.emit();
+        self.line_room = Some(0);
+        let sent = before.distance_to(self.snd_nxt);
+        if sent == 0 { 0 } else { sent + LINE_OVERHEAD }
+    }
+
+    /// Say what round trip to expect, from other connections on the same
+    /// line.
+    ///
+    /// RFC 6298 2.1 starts the timer at a second, for a sender that knows
+    /// nothing. A call with a round trip longer than that then sends every
+    /// SYN twice, and 5.7 answers the second one with a timer of three
+    /// seconds and a window of one segment. This end does know: the line is
+    /// the same one the last connection used. The second is still the least.
+    pub fn expect_round_trip(&mut self, ms: u32) {
+        if self.srtt_ms != 0 || ms == 0 {
+            return;
+        }
+        self.expected_round_trip_ms = ms;
+        // As (2.2) has it for a first measurement: SRTT + 4 * (SRTT / 2).
+        self.rto_ms = ms.saturating_mul(3).clamp(MIN_RTO_MS, MAX_RTO_MS);
+        if self.retransmits == 0 && self.retransmit_at.is_some() {
+            self.retransmit_at = Some(self.clock + u64::from(self.rto_ms));
+        }
+    }
+
+    /// The round trip this connection has measured, in milliseconds: zero
+    /// until it has one.
+    pub fn round_trip_ms(&self) -> u32 {
+        self.srtt_ms
+    }
+
+    /// Whether the line paces this connection.
+    pub fn paced(&self) -> bool {
+        self.line_room.is_some()
+    }
+
+    /// Whether there is data that a grant would let go.
+    pub fn wants_the_line(&self) -> bool {
+        let in_flight = self.snd_una.distance_to(self.snd_nxt) as usize;
+        self.state.synchronized() && self.outgoing.len() > in_flight.min(self.outgoing.len())
+    }
+
+    /// Size the receive window for a line of `bits_per_second` and the round
+    /// trip this connection has measured.
+    ///
+    /// A sender fills the line only if the window holds a round trip of it.
+    /// Twice that and half a second, so one late acknowledgement does not
+    /// stop the sender. Not more: on a call to a provider the window is the
+    /// only limit on the queue in the provider's modem, and everything else
+    /// on the call waits behind that queue.
+    pub fn tune_receive(&mut self, bits_per_second: u32) {
+        // Before the first measurement, what the line's other connections
+        // found, or a second: a modem call over a network is seldom less.
+        let round_trip = match (self.srtt_ms, self.expected_round_trip_ms) {
+            (0, 0) => 1_000,
+            (0, expected) => u64::from(expected),
+            (measured, _) => u64::from(measured),
+        };
+        let want = u64::from(bits_per_second / 8) * (2 * round_trip + 500) / 1_000;
+        self.receive_limit = want.clamp(u64::from(LEAST_TUNED_WINDOW), u64::from(MOST_WINDOW)) as u32;
+        self.advertise();
     }
 
     fn new(local: Endpoint, remote: Endpoint, iss: Seq, state: State, passive: bool) -> Self {
@@ -336,11 +505,19 @@ impl Connection {
             rcv_wnd: RECEIVE_BUFFER as u32,
             rcv_up: Seq(0),
             irs: Seq(0),
+            snd_scale: 0,
+            rcv_scale: 0,
+            scale_offered: false,
+            receive_limit: RECEIVE_BUFFER as u32,
+            line_room: None,
+            expected_round_trip_ms: 0,
             send_mss: DEFAULT_MSS,
             cwnd: u32::from(DEFAULT_MSS),
             ssthresh: INITIAL_SSTHRESH,
             duplicates: 0,
             recovering: false,
+            recover: iss,
+            timed_out: false,
             // What this end can take in one piece. A PPP link with a 1500
             // octet MRU leaves this after the two headers, and 3.7.1 has the
             // option carry "the effective MTU minus the fixed IP and TCP
@@ -464,10 +641,12 @@ impl Connection {
         if !self.state.can_send() {
             return 0;
         }
-        // Twice the receive buffer, which is enough to keep a modem busy for
-        // several seconds and small enough that a caller which ignores the
-        // return value cannot fill memory with it.
-        let room = (2 * RECEIVE_BUFFER).saturating_sub(self.outgoing.len());
+        // Twice the receive buffer past what is in flight, which is enough
+        // to keep a modem busy for several seconds and small enough that a
+        // caller which ignores the return value cannot fill memory with it.
+        // What is in flight is the far end's window at most.
+        let in_flight = self.snd_una.distance_to(self.snd_nxt) as usize;
+        let room = (in_flight + 2 * RECEIVE_BUFFER).saturating_sub(self.outgoing.len());
         let take = data.len().min(room);
         self.outgoing.extend(&data[..take]);
         self.emit();
@@ -611,17 +790,11 @@ impl Connection {
         self.snd_nxt = self.iss + 1;
         self.snd_wnd = u32::from(segment.window);
         self.snd_wl1 = Seq(segment.sequence);
-        self.send_mss = self.effective_mss(segment.mss);
+        self.take_syn_options(segment);
         self.state = State::SynReceived;
         // <SEQ=ISS><ACK=RCV.NXT><CTL=SYN,ACK>
-        let (iss, rcv_nxt, mss) = (self.iss, self.rcv_nxt, self.recv_mss);
-        self.transmit(Segment {
-            sequence: iss.0,
-            acknowledgment: rcv_nxt.0,
-            flags: flag::SYN | flag::ACK,
-            mss: Some(mss),
-            ..self.blank()
-        });
+        let answer = self.syn(flag::SYN | flag::ACK);
+        self.transmit(answer);
     }
 
     /// Give a listening connection the sequence number it will open with.
@@ -679,11 +852,17 @@ impl Connection {
         }
         self.irs = Seq(segment.sequence);
         self.rcv_nxt = Seq(segment.sequence) + 1;
-        self.send_mss = self.effective_mss(segment.mss);
+        self.take_syn_options(segment);
         if segment.ack() {
             // Only the SYN can have been acknowledged here, and a SYN takes a
             // place in the sequence space and no room in the queue.
             self.snd_una = Seq(segment.acknowledgment);
+            // The timer follows the queue (3.10.8), and the SYN has left it.
+            // Left running, it went off a second later with nothing to
+            // send, and doubled the timeout of every connection this end
+            // opened.
+            self.measure(self.snd_una);
+            self.arm_retransmit();
         }
         self.snd_wnd = u32::from(segment.window);
         self.snd_wl1 = Seq(segment.sequence);
@@ -706,14 +885,8 @@ impl Connection {
             // A simultaneous open: both ends sent a SYN and neither has been
             // acknowledged yet (3.5's Figure 7).
             self.state = State::SynReceived;
-            let (iss, rcv_nxt, mss) = (self.iss, self.rcv_nxt, self.recv_mss);
-            self.transmit(Segment {
-                sequence: iss.0,
-                acknowledgment: rcv_nxt.0,
-                flags: flag::SYN | flag::ACK,
-                mss: Some(mss),
-                ..self.blank()
-            });
+            let answer = self.syn(flag::SYN | flag::ACK);
+            self.transmit(answer);
         }
     }
 
@@ -837,6 +1010,14 @@ impl Connection {
             let advanced = self.snd_una.distance_to(ack) as usize;
             self.snd_una = ack;
             self.drop_acknowledged(advanced);
+            if self.retransmits > 0 && self.srtt_ms != 0 {
+                // The far end is there again, so the doubling is over. RFC
+                // 6298 5 leaves the doubled value until the next
+                // measurement, and Karn's rule can keep that away for as
+                // long as there are holes to fill: a line that lost a few
+                // segments then waited a minute for each of the rest.
+                self.rto_ms = self.computed_rto();
+            }
             self.retransmits = 0;
             self.grow_window(advanced as u32);
             // RFC 6298 (5.3): "When an ACK is received that acknowledges new
@@ -853,7 +1034,10 @@ impl Connection {
         // window."
         let seq = Seq(segment.sequence);
         if self.snd_wl1.before(seq) || (self.snd_wl1 == seq && self.snd_wl2.before_or_at(ack)) {
-            self.snd_wnd = u32::from(segment.window);
+            // RFC 7323 2.3: "SND.WND = SEG.WND << Snd.Wind.Shift", except on
+            // a SYN, whose window is never scaled.
+            let shift = if segment.syn() { 0 } else { self.snd_scale };
+            self.snd_wnd = u32::from(segment.window) << shift;
             self.snd_wl1 = seq;
             self.snd_wl2 = ack;
         }
@@ -956,26 +1140,28 @@ impl Connection {
     /// Take data that begins exactly at RCV.NXT, and whatever was held behind
     /// it. Says whether anything went in.
     fn deliver(&mut self, data: &[u8]) -> bool {
-        let room = RECEIVE_BUFFER.saturating_sub(self.incoming.len());
-        let take = data.len().min(room);
+        // What was offered is what is taken: RCV.NXT moves and the edge of
+        // the window stays where it was.
+        let take = data.len().min(self.rcv_wnd as usize);
         if take == 0 {
             return false;
         }
         self.incoming.extend(&data[..take]);
         self.rcv_nxt += take as u32;
+        self.rcv_wnd -= take as u32;
         // Anything held that now begins where the stream does.
         while let Some(at) = self.held.iter().position(|(seq, bytes)| {
             seq.before_or_at(self.rcv_nxt) && (*seq + bytes.len() as u32).after(self.rcv_nxt)
         }) {
             let (seq, bytes) = self.held.remove(at);
             let already = seq.distance_to(self.rcv_nxt) as usize;
-            let room = RECEIVE_BUFFER.saturating_sub(self.incoming.len());
-            let take = (bytes.len() - already).min(room);
+            let take = (bytes.len() - already).min(self.rcv_wnd as usize);
             if take == 0 {
                 break;
             }
             self.incoming.extend(&bytes[already..already + take]);
             self.rcv_nxt += take as u32;
+            self.rcv_wnd -= take as u32;
         }
         // Anything wholly behind the stream now is a duplicate.
         let rcv_nxt = self.rcv_nxt;
@@ -987,10 +1173,10 @@ impl Connection {
 
     /// Keep a segment that arrived early.
     fn hold(&mut self, seq: Seq, data: &[u8]) {
-        // A handful is all a link with one hop under it can produce, and a
-        // list that could grow without bound is a way to be run out of memory
-        // by a far end that only ever sends the second segment.
-        const MOST: usize = 16;
+        // A window's worth is all a far end can produce, and a list that
+        // could grow without bound is a way to be run out of memory by a far
+        // end that only ever sends the second segment.
+        const MOST: usize = 2048;
         if self.held.iter().any(|(at, _)| *at == seq) {
             return;
         }
@@ -1005,9 +1191,13 @@ impl Connection {
     /// already announced -- "The total of RCV.NXT and RCV.WND should not be
     /// reduced."
     fn advertise(&mut self) {
-        let free = RECEIVE_BUFFER.saturating_sub(self.incoming.len()) as u32;
-        let worth = u32::from(self.recv_mss).min(RECEIVE_BUFFER as u32 / 2);
-        if free >= self.rcv_wnd || free >= worth {
+        let most = self.receive_most();
+        let free = most.saturating_sub(self.incoming.len() as u32);
+        let worth = u32::from(self.recv_mss).min(most / 2);
+        // "the suggested SWS avoidance algorithm for the receiver is to keep
+        // RCV.NXT+RCV.WND fixed until the reduction satisfies: RCV.BUFF -
+        // RCV.USER - RCV.WND >= min( Fr * RCV.BUFF, Eff.snd.MSS )".
+        if free >= self.rcv_wnd.saturating_add(worth) || (free > self.rcv_wnd && self.incoming.is_empty()) {
             self.rcv_wnd = free;
         }
     }
@@ -1024,11 +1214,14 @@ impl Connection {
             // "SND.WND is an offset from SND.UNA", and RFC 5681 3.1 has
             // "the minimum of cwnd and rwnd" govern what may be sent.
             let in_flight = self.snd_una.distance_to(self.snd_nxt);
-            let window = self.snd_wnd.min(self.cwnd).saturating_sub(in_flight);
+            // A connection the line paces is held by the line and by the far
+            // end's window, and not by a window of its own (see `grant`).
+            let allowed = if self.line_room.is_some() { self.snd_wnd } else { self.snd_wnd.min(self.cwnd) };
+            let window = allowed.saturating_sub(in_flight);
             let waiting = self.outgoing.len() as u32 - in_flight.min(self.outgoing.len() as u32);
             let size = u32::from(self.send_mss).min(window).min(waiting);
 
-            if size == 0 {
+            if size == 0 || self.line_room == Some(0) {
                 break;
             }
             // 3.7.4: "If there is unacknowledged data... then the sending TCP
@@ -1052,6 +1245,11 @@ impl Connection {
                 .collect();
             let sequence = self.snd_nxt.0;
             self.snd_nxt += size;
+            if let Some(room) = self.line_room.as_mut() {
+                // A whole segment goes or none does, so the last one may
+                // take a little more than there was.
+                *room = room.saturating_sub(size + LINE_OVERHEAD);
+            }
             // 3.9.1.2's push: the far end is told to hand this up rather than
             // wait for more, which is what every last segment of a request is.
             let more_waiting = waiting > size;
@@ -1143,7 +1341,8 @@ impl Connection {
         Segment {
             source_port: self.local.port,
             destination_port: self.remote.port,
-            window: self.rcv_wnd.min(u32::from(u16::MAX)) as u16,
+            // RFC 7323 2.3: "SEG.WND = RCV.WND >> Rcv.Wind.Shift".
+            window: (self.rcv_wnd >> self.rcv_scale).min(u32::from(u16::MAX)) as u16,
             ..Segment::default()
         }
     }
@@ -1185,21 +1384,40 @@ impl Connection {
             self.rto_ms = self.rto_ms.max(3_000);
         }
         self.retransmits = 0;
+        // The window may now be said with its scale.
+        self.advertise();
     }
 
     /// An acknowledgement that moved SND.UNA: 3.1's slow start below the
     /// threshold and congestion avoidance above it.
     fn grow_window(&mut self, acked: u32) {
         self.duplicates = 0;
-        if self.recovering {
-            // 3.2 step 6: "When the next ACK arrives that acknowledges
-            // previously unacknowledged data, a TCP MUST set cwnd to
-            // ssthresh... This is termed 'deflating' the window."
-            self.recovering = false;
-            self.cwnd = self.ssthresh;
-            return;
-        }
         let smss = u32::from(self.send_mss);
+        if self.recovering {
+            if self.snd_una.before(self.recover) {
+                // RFC 6582 3.2, a partial acknowledgement: "retransmit the
+                // first unacknowledged segment". The far end holds what
+                // came after the hole and acknowledges all of it at once,
+                // so an acknowledgement that stops short has found the next
+                // hole. Without this each hole waited for the timer, and a
+                // window of two hundred segments has many holes.
+                self.resend_front();
+                if self.timed_out {
+                    self.cwnd = self.cwnd.saturating_add(acked.min(smss)).min(MOST_CWND);
+                }
+                return;
+            }
+            self.recovering = false;
+            if !self.timed_out {
+                // RFC 5681 3.2 step 6: "When the next ACK arrives that
+                // acknowledges previously unacknowledged data, a TCP MUST
+                // set cwnd to ssthresh... This is termed 'deflating' the
+                // window."
+                self.cwnd = self.ssthresh;
+                return;
+            }
+            self.timed_out = false;
+        }
         if self.cwnd < self.ssthresh {
             // "cwnd += min (N, SMSS)" (2), where N is what was acknowledged.
             self.cwnd = self.cwnd.saturating_add(acked.min(smss));
@@ -1209,7 +1427,7 @@ impl Connection {
                 .cwnd
                 .saturating_add((smss * smss / self.cwnd.max(1)).max(1));
         }
-        self.cwnd = self.cwnd.min(INITIAL_SSTHRESH);
+        self.cwnd = self.cwnd.min(MOST_CWND);
     }
 
     /// 3.2's fast retransmit and fast recovery.
@@ -1228,13 +1446,15 @@ impl Connection {
                 let in_flight = self.snd_una.distance_to(self.snd_nxt);
                 self.ssthresh = (in_flight / 2).max(2 * smss);
                 self.recovering = true;
+                self.timed_out = false;
+                self.recover = self.snd_nxt;
                 self.resend_front();
                 self.cwnd = self.ssthresh.saturating_add(3 * smss);
             }
             std::cmp::Ordering::Greater => {
                 // Step 4: "For each additional duplicate ACK received (after
                 // the third), cwnd MUST be incremented by SMSS."
-                self.cwnd = self.cwnd.saturating_add(smss).min(INITIAL_SSTHRESH);
+                self.cwnd = self.cwnd.saturating_add(smss).min(MOST_CWND);
             }
         }
     }
@@ -1279,10 +1499,15 @@ impl Connection {
         }
         // "RTO <- SRTT + max (G, K*RTTVAR)", then (2.4)'s floor and (2.5)'s
         // ceiling. G, the clock granularity, is a millisecond here.
-        self.rto_ms = self
-            .srtt_ms
+        self.rto_ms = self.computed_rto();
+    }
+
+    /// "RTO <- SRTT + max (G, K*RTTVAR)", within (2.4)'s floor and (2.5)'s
+    /// ceiling.
+    fn computed_rto(&self) -> u32 {
+        self.srtt_ms
             .saturating_add((K * self.rttvar_ms).max(1))
-            .clamp(MIN_RTO_MS, MAX_RTO_MS);
+            .clamp(MIN_RTO_MS, MAX_RTO_MS)
     }
 
     /// 3.10.8: "send the segment at the front of the retransmission queue
@@ -1310,11 +1535,22 @@ impl Connection {
         // equals 1 full-sized segment".
         let smss = u32::from(self.send_mss);
         let in_flight = self.snd_una.distance_to(self.snd_nxt);
-        if in_flight > 0 {
+        // Not for a SYN. A SYN that was answered late says the round trip
+        // is long, not that the path is full, and 3.1 gives its own rule for
+        // it: an initial window of one segment (see `open_window`). A
+        // threshold of two segments from here made every connection on a
+        // line with a round trip over a second grow a segment at a time.
+        if in_flight > 0 && self.state.synchronized() && self.state != State::SynReceived {
             self.ssthresh = (in_flight / 2).max(2 * smss);
             self.cwnd = smss;
+            // Everything sent so far is in doubt, and what follows the
+            // front is resent as the acknowledgements show it is missing.
+            self.recovering = true;
+            self.timed_out = true;
+            self.recover = self.snd_nxt;
+        } else {
+            self.recovering = false;
         }
-        self.recovering = false;
         self.duplicates = 0;
         self.resend_front();
     }
@@ -1359,17 +1595,7 @@ impl Connection {
             } else {
                 flag::SYN | flag::ACK
             };
-            let (iss, rcv_nxt, mss) = (self.iss, self.rcv_nxt, self.recv_mss);
-            let mut again = Segment {
-                sequence: iss.0,
-                acknowledgment: rcv_nxt.0,
-                flags,
-                mss: Some(mss),
-                ..self.blank()
-            };
-            if self.state == State::SynSent {
-                again.acknowledgment = 0;
-            }
+            let again = self.syn(flags);
             self.out.push(again);
             self.arm_retransmit();
             return;
@@ -1430,6 +1656,10 @@ impl Connection {
         self.ack_at = None;
         self.snd_una = self.iss;
         self.snd_nxt = self.iss;
+        self.snd_scale = 0;
+        self.rcv_scale = 0;
+        self.scale_offered = false;
+        self.rcv_wnd = self.receive_most();
     }
 
     fn give_up(&mut self, why: Report) {

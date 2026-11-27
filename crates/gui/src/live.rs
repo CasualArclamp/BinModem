@@ -1624,8 +1624,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // (see `ppp::fair`); in the modem's queue it could not, and
             // handed everything at once that queue grew to seconds. 256
             // octets at least, so a slow line still takes a whole packet.
-            let ahead = (modem.transmit_rate().unwrap_or(2400) as usize / 32).max(256);
+            let sends = modem.transmit_rate().unwrap_or(2400);
+            let ahead = (sends as usize / 32).max(256);
             let room = ahead.saturating_sub(modem.queued());
+            // And the link holds a tenth of a second more, which the proxy's
+            // connections keep topped up: the line does not wait a round
+            // trip for an acknowledgement to bring the next segment.
+            link.set_rates(sends, modem.rate().unwrap_or(sends));
             for b in link.step(ms, room, &tx) {
                 modem.feed_dte(b);
             }

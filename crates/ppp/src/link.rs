@@ -368,6 +368,22 @@ impl Link {
         self.waiting.octets()
     }
 
+    /// How many more octets of datagrams this link wants now, for a line
+    /// that sends `bits_per_second`.
+    ///
+    /// A tenth of a second of line, and one full frame at least. The modem
+    /// below holds a quarter of a second more. Together that is enough for
+    /// the line never to run dry between two rounds, and little enough that
+    /// a new datagram does not wait long. Whatever makes the datagrams keeps
+    /// the rest, and makes it into datagrams only when there is room: that
+    /// is what keeps the line full without a round trip of waiting (see
+    /// `tcp::Stack::pace`).
+    pub fn room_for(&self, bits_per_second: u32) -> usize {
+        let frame = usize::from(self.lcp.protocol.agreed.mru);
+        let want = (bits_per_second as usize / 80).max(frame);
+        want.saturating_sub(self.waiting.octets())
+    }
+
     /// Echoes that have arrived.
     pub fn take_arrived(&mut self) -> Vec<ip::Arrived> {
         std::mem::take(&mut self.arrived)

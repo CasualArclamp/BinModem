@@ -215,6 +215,8 @@ pub struct Networking {
     settings: LinkSettings,
     /// Whether the proxy has been sized for what LCP agreed.
     sized: bool,
+    /// The bit rates the modem sends and hears at, once the window has said.
+    rates: Option<(u32, u32)>,
 }
 
 impl Networking {
@@ -284,7 +286,19 @@ impl Networking {
             ended_reported: false,
             settings,
             sized: false,
+            rates: None,
         }
+    }
+
+    /// Say what bit rates the modem sends and hears at.
+    ///
+    /// With these the proxy's connections follow the line: new data goes
+    /// when the queue for the modem has room, not when an acknowledgement
+    /// comes back a round trip later, and the window each offers holds a
+    /// round trip of the line. Without them a connection is an ordinary TCP,
+    /// which on a long round trip sends a burst and then waits.
+    pub fn set_rates(&mut self, sends: u32, hears: u32) {
+        self.rates = Some((sends, hears));
     }
 
     /// Whether the link has come to an end: given up on, refused, or put down
@@ -369,12 +383,17 @@ impl Networking {
             }
             self.sized = matches!(self.proxy, Some(Proxy::Serving(_) | Proxy::Using(_)));
         }
+        // What the queue for the line has room for, after what is in it.
+        let pace = self.rates.map(|(sends, hears)| (self.link.room_for(sends), hears));
         match self.proxy.as_mut() {
             Some(Proxy::Serving(server)) => {
                 for datagram in carried {
                     if datagram.protocol == ppp::ip::PROTOCOL_TCP {
                         server.deliver(datagram.from, datagram.to, &datagram.payload);
                     }
+                }
+                if let Some((room, hears)) = pace {
+                    server.pace(room, hears);
                 }
                 server.tick(ms);
                 outgoing = server.take_outgoing();
@@ -388,6 +407,9 @@ impl Networking {
                 }
                 for problem in &problems {
                     client.unreachable(problem.about, problem.describe());
+                }
+                if let Some((room, hears)) = pace {
+                    client.pace(room, hears);
                 }
                 client.tick(ms);
                 outgoing = client.take_outgoing();

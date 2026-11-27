@@ -160,6 +160,17 @@ impl Client {
         self.stack.size_for_link(largest_in, largest_out);
     }
 
+    /// Let the line say when data goes, and how large a window to offer
+    /// (see [`tcp::Stack::pace`] and [`tcp::Stack::set_receive_rate`]).
+    ///
+    /// `room` is what the queue for the line will take now, and `hears` the
+    /// bit rate the line delivers to this end. Call it every round, before
+    /// [`Self::tick`].
+    pub fn pace(&mut self, room: usize, hears: u32) {
+        self.stack.set_receive_rate(hears);
+        self.stack.pace(room);
+    }
+
     /// Whether the route has been settled as straight to the internet.
     pub fn direct(&self) -> bool {
         self.decided == Decided::Direct
