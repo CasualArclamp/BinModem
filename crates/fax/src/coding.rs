@@ -6,7 +6,8 @@
 //! needs to know the answer.
 
 use crate::page::{Page, Resolution};
-use crate::{ecm, jbig, mmr, mr, t4};
+use crate::picture::Picture;
+use crate::{ecm, jbig, jpeg, mmr, mr, t4};
 
 /// How a page is coded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,6 +26,11 @@ pub enum Coding {
     /// correction mode. DIS and DCS bit 78, and 79 for stripes of other than
     /// 128 lines.
     Jbig,
+    /// T.81's baseline JPEG, as T.4 Annex E profiles it: eight bits a
+    /// component of CIELAB, one component for a greyscale page and three for
+    /// a colour one. Only under error correction mode. DIS and DCS bit 68,
+    /// and 69 for colour.
+    Jpeg,
 }
 
 impl Coding {
@@ -34,6 +40,7 @@ impl Coding {
             Self::ModifiedRead => "MR",
             Self::Mmr => "MMR",
             Self::Jbig => "JBIG",
+            Self::Jpeg => "JPEG",
         }
     }
 
@@ -42,8 +49,12 @@ impl Coding {
     /// JBIG for the same reason as MMR and more so: "the use of error free
     /// transmission is mandatory" (T.85 clause 3), since a wrong bit throws
     /// every estimate after it off as well as every line.
+    ///
+    /// And JPEG: "under the error correction mode of transmission" is the
+    /// only way T.4 Annex E has a page go (E.1), and T.30 Table 2 Note 25
+    /// makes bit 27 mandatory beside bit 68.
     pub fn needs_error_correction(self) -> bool {
-        matches!(self, Self::Mmr | Self::Jbig)
+        matches!(self, Self::Mmr | Self::Jbig | Self::Jpeg)
     }
 
     /// Code a page.
@@ -59,7 +70,35 @@ impl Coding {
             Self::ModifiedRead => mr::encode(lines, mr::k_for(resolution), min_bits).to_bits(),
             Self::Mmr => mmr::encode(lines).to_bits(),
             Self::Jbig => jbig_bits(lines, jbig::Options::FAX),
+            // JPEG has tone and these lines have none: the page goes as a
+            // greyscale picture of black and white. A picture with tone in
+            // it goes through [`jpeg_bits`].
+            Self::Jpeg => {
+                let width = lines.first().map_or(0, Vec::len);
+                let picture = Picture {
+                    width,
+                    height: lines.len(),
+                    components: 1,
+                    samples: lines.iter().flatten().map(|ink| if *ink { 0 } else { 255 }).collect(),
+                    // The basic resolution of colour facsimile (T.30 Table 2
+                    // Note 25).
+                    pels_per_inch: 200,
+                    ..Picture::default()
+                };
+                jpeg_bits(&picture)
+            }
         }
+    }
+}
+
+/// A greyscale or colour page as the bits that go on the line: the JPEG data
+/// stream, each octet least significant bit first (T.4 E.6.9). The stream the
+/// picture came with if it has one, and one made for it if not.
+pub fn jpeg_bits(picture: &Picture) -> Vec<bool> {
+    if picture.jpeg.is_empty() {
+        ecm::unpack(&jpeg::encode(picture, jpeg::Options::default()))
+    } else {
+        ecm::unpack(&picture.jpeg)
     }
 }
 
@@ -114,6 +153,7 @@ pub enum Decoder {
     T4(t4::Decoder),
     Mmr(mmr::Decoder),
     Jbig(Box<jbig::Decoder>),
+    Jpeg(Box<jpeg::Decoder>),
 }
 
 impl Default for Decoder {
@@ -138,6 +178,7 @@ impl Decoder {
             }
             Coding::Mmr => Self::Mmr(mmr::Decoder::new(width)),
             Coding::Jbig => Self::Jbig(Box::new(jbig::Decoder::new(width))),
+            Coding::Jpeg => Self::Jpeg(Box::new(jpeg::Decoder::new(width))),
         }
     }
 
@@ -147,6 +188,7 @@ impl Decoder {
             Self::T4(_) => Coding::ModifiedHuffman,
             Self::Mmr(_) => Coding::Mmr,
             Self::Jbig(_) => Coding::Jbig,
+            Self::Jpeg(_) => Coding::Jpeg,
         }
     }
 
@@ -155,25 +197,48 @@ impl Decoder {
             Self::T4(d) => d.feed_bits(bits),
             Self::Mmr(d) => d.feed_bits(bits),
             Self::Jbig(d) => d.feed_bits(bits),
+            Self::Jpeg(d) => d.feed_bits(bits),
         }
     }
 
-    /// The lines decoded so far.
+    /// The lines decoded so far. For a JPEG page, which has tone, these are
+    /// its lightness as a pattern of ink; the page itself is
+    /// [`picture`](Self::picture).
     pub fn lines(&self) -> &[Vec<bool>] {
         match self {
             Self::T4(d) => d.lines(),
             Self::Mmr(d) => d.lines(),
             Self::Jbig(d) => d.lines(),
+            Self::Jpeg(d) => d.lines(),
+        }
+    }
+
+    /// The page as a greyscale or colour picture, if it is in a coding that
+    /// has tone.
+    pub fn picture(&self) -> Option<Picture> {
+        match self {
+            Self::Jpeg(d) => d.picture(),
+            _ => None,
+        }
+    }
+
+    /// Lines `from..to` of a page with tone, as far as they have arrived.
+    pub fn picture_part(&self, from: usize, to: usize) -> Option<Picture> {
+        match self {
+            Self::Jpeg(d) => d.part(from, to),
+            _ => None,
         }
     }
 
     /// Whether the page has ended: RTC for the T.4 codings, EOFB for MMR, and
-    /// for JBIG every line its header -- or a NEWLEN -- says it has.
+    /// for JBIG every line its header -- or a NEWLEN -- says it has, and for
+    /// JPEG the EOI marker.
     pub fn is_done(&self) -> bool {
         match self {
             Self::T4(d) => d.is_done(),
             Self::Mmr(d) => d.is_done(),
             Self::Jbig(d) => d.is_done(),
+            Self::Jpeg(d) => d.is_done(),
         }
     }
 
@@ -185,6 +250,7 @@ impl Decoder {
             Self::T4(d) => d.damaged(),
             Self::Mmr(d) => d.damaged(),
             Self::Jbig(d) => d.damaged(),
+            Self::Jpeg(d) => d.damaged(),
         }
     }
 
@@ -202,6 +268,7 @@ impl Decoder {
             Self::T4(d) => d.width(),
             Self::Mmr(d) => d.width(),
             Self::Jbig(d) => d.width(),
+            Self::Jpeg(d) => d.width(),
         };
         *self = Self::with_width(width, coding);
     }
