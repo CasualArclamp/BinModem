@@ -783,8 +783,14 @@ each page to its own picture with the page number after the name: `fax-1.png`,
 `fax-2.png` and so on. A fax that was saved as a PDF loads back into
 **Browse** as the same pages, to send on.
 
-The modem stays in fax class after a call, as V.250 asks. Thus `AT+FCLASS=0`
-makes it a modem again before you dial a board.
+The modem stays in fax class after a call, as V.250 asks. The **Modem** and
+**Fax** switch at the right of the call keys shows the class and changes it.
+
+- **Fax** types `AT+FCLASS=1` and opens the Fax tab.
+- **Modem** types `AT+FCLASS=0`. Press it before you dial a board.
+- In fax class the call keys have an amber edge. **Originate** and **Answer**
+  become **Send fax** and **Wait for a fax**.
+- The switch is locked while a call is up.
 
 ## Two of them on a network
 

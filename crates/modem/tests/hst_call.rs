@@ -165,3 +165,53 @@ fn a_1986_hst_and_a_later_one_meet_at_9600() {
     let p = connect("HST96", "HST");
     assert!(Pair::saw(&p.at_host).contains("CONNECT 9600/ARQ/HST"), "{:?}", Pair::saw(&p.at_host));
 }
+
+/// The symbol scope had nothing to draw on an HST call: neither channel's
+/// receiver handed up its points. The end that listens to the forward channel
+/// must give the trellis-coded points, and the end that listens to the back
+/// channel the eight phase steps on the unit circle.
+#[test]
+fn both_ends_of_an_hst_call_give_the_scope_points() {
+    let mut p = connect("HST", "HST");
+    let text: Vec<u8> = (0..3000).map(|i| b"the host sends a screenful. "[i % 28]).collect();
+    for &b in &text {
+        p.host.feed_dte(b);
+    }
+    let (mut forward, mut back) = (Vec::new(), Vec::new());
+    for _ in 0..(2.0 * FS) as usize {
+        let (a, b) = (p.from_caller, p.from_host);
+        p.from_caller = p.caller.step(0.5 * b);
+        p.from_host = p.host.step(0.5 * a);
+        p.caller.take_dte();
+        p.host.take_dte();
+        if let Some(z) = p.caller.constellation_point()
+            && forward.last() != Some(&z)
+        {
+            forward.push(z);
+        }
+        if let Some(z) = p.host.constellation_point()
+            && back.last() != Some(&z)
+        {
+            back.push(z);
+        }
+    }
+    // The host holds the forward channel at 14 400, so the caller reads it.
+    assert_eq!(p.caller.shape(), "128TCM");
+    assert_eq!(p.caller.states(), 128);
+    assert_eq!(p.host.shape(), "8DPSK");
+    assert_eq!(p.host.states(), 8);
+
+    assert!(forward.len() > 3000, "only {} forward points in two seconds", forward.len());
+    let peak = f64::from(p.caller.constellation_peak());
+    assert!(forward.iter().all(|&(x, y)| x.hypot(y) < 1.3 * peak), "forward points outside the box");
+
+    assert!(back.len() > 200, "only {} back points in two seconds", back.len());
+    let near = back
+        .iter()
+        .filter(|&&(x, y)| {
+            let a = y.atan2(x) / std::f64::consts::FRAC_PI_4;
+            (a - a.round()).abs() < 0.2 && (x.hypot(y) - 1.0).abs() < 0.4
+        })
+        .count();
+    assert!(near * 10 >= back.len() * 9, "{near} of {} back points sit on the eight phases", back.len());
+}

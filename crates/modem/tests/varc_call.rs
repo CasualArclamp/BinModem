@@ -160,12 +160,18 @@ fn a_call_is_placed_answered_used_and_put_down() {
     // V.8, then the handshake of V.ARC, then the mode: at both ends.
     for who in ["caller", "host"] {
         let own: Vec<String> = pair.notes.iter().filter(|note| note.starts_with(who)).cloned().collect();
+        // The caller's CL, the answerer's MS, and the caller's ACK.
+        let (first, second) = if who == "caller" {
+            ("V.ARC: CL sent, waiting for the MS", "V.ARC: MS received, ACK sent")
+        } else {
+            ("V.ARC: waiting for the CL", "V.ARC: CL received, MS sent, waiting for the ACK")
+        };
         in_order(
             &own,
             &[
                 "V.8: both ends have V.ARC",
-                "V.ARC: calling the far end",
-                "V.ARC: agreeing with the far end",
+                first,
+                second,
                 "V.ARC: agreed on 48000 Hz out and 48000 Hz back",
                 // Each end had the line to itself and heard nothing back.
                 "V.ARC: no echo of this end on the line",
@@ -518,7 +524,8 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
             assert!(call.told.contains("CONNECT ") && call.told.contains("/VARC"), "{what}: {}", call.told);
             for who in ["caller", "host"] {
                 let own: Vec<String> = call.notes.iter().filter(|note| note.starts_with(who)).cloned().collect();
-                in_order(&own, &["V.8: both ends have V.ARC", "V.ARC: agreeing with the far end", "V.ARC: agreed on 8000 Hz out and 8000 Hz back", "V.ARC: loaded"]);
+                let sent = if who == "caller" { "V.ARC: CL sent, waiting for the MS" } else { "V.ARC: CL received, MS sent, waiting for the ACK" };
+                in_order(&own, &["V.8: both ends have V.ARC", sent, "V.ARC: agreed on 8000 Hz out and 8000 Hz back", "V.ARC: loaded"]);
             }
             let rate = call.caller.rate().unwrap_or(0);
             assert!(rate >= least, "{what}: {rate} bit/s");

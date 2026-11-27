@@ -1618,6 +1618,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.constellation_point();
         }
+        if self.hst.is_some() {
+            return self.hst_session().and_then(hst::Session::constellation_point);
+        }
         self.pump.as_ref().and_then(Pump::constellation_point)
     }
 
@@ -1643,6 +1646,10 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.residual_error();
         }
+        if self.hst.is_some() {
+            // As a distance, the way the scope's reading expects it.
+            return self.hst_session().map(|s| 10f64.powf(-s.snr_db() / 20.0));
+        }
         self.pump.as_ref().and_then(Pump::residual_error)
     }
 
@@ -1663,6 +1670,9 @@ impl Modem {
         if let Some(call) = self.varc.as_ref() {
             return if call.greeting() { 2 } else { 1usize << self.varc_bits.min(24) };
         }
+        if self.hst.is_some() {
+            return self.hst_session().map_or(2, hst::Session::points);
+        }
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
@@ -1676,6 +1686,9 @@ impl Modem {
     pub fn constellation_peak(&self) -> f32 {
         if let Some(fax) = self.fax.as_ref() {
             return fax.constellation_peak() as f32;
+        }
+        if self.hst.is_some() {
+            return self.hst_session().map_or(1.0, |s| s.constellation_peak() as f32);
         }
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => match m.status() {
@@ -1705,9 +1718,9 @@ impl Modem {
             return fax.shape();
         }
         if let Some(call) = self.varc.as_ref() {
-            // The handshake is two tones a direction.
+            // The handshake is a carrier a direction, turned over or not.
             if call.greeting() {
-                return "2FSK";
+                return "DBPSK";
             }
             return match (self.varc_bits, call.mode) {
                 (0, _) => "-",
@@ -1716,6 +1729,20 @@ impl Modem {
                 (_, VarcMode::G711) => "G.711",
                 (_, VarcMode::Pcm) => "PCM",
                 _ => "QAM",
+            };
+        }
+        if self.hst.is_some() {
+            return match self.hst_session() {
+                None => "-",
+                // The back channel: eight phase steps, read differentially.
+                Some(s) if s.holding() == hst::Holding::Forward => "8DPSK",
+                // The forward channel is V.32bis's trellis code.
+                Some(s) => match s.points() {
+                    128 => "128TCM",
+                    64 => "64TCM",
+                    32 => "32TCM",
+                    _ => "16TCM",
+                },
             };
         }
         self.pump.as_ref().map_or("-", Pump::shape)
@@ -2510,9 +2537,10 @@ impl Modem {
         self.call_refused.take()
     }
 
-    /// A V.ARC call's handshake as it is heard: which of the far end's two
-    /// tones is arriving, between minus one and one, eight to a bit, since
-    /// this was last asked. Empty once the handshake is over.
+    /// A V.ARC call's handshake as it is heard: each bit of the far end's,
+    /// one for a carrier that stayed as it was and minus one for a carrier
+    /// that turned over, eight to a bit, since this was last asked. Empty
+    /// once the handshake is over.
     pub fn varc_symbols(&mut self) -> Vec<f64> {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
