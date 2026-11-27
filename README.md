@@ -110,6 +110,7 @@ follow it. The session that it carried comes out as text.
 | [docs/manual/linux.md](docs/manual/linux.md) | Build on Linux |
 | [docs/design/architecture.md](docs/design/architecture.md) | The design and the milestone ladder |
 | [docs/design/v-arc.md](docs/design/v-arc.md) | The design of V.ARC |
+| [docs/design/v34-echo.md](docs/design/v34-echo.md) | The echo canceller of V.34 |
 | [docs/design/v92](docs/design/v92) | The notes and the plan for V.92 |
 
 ## Security notes
