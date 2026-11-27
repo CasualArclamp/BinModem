@@ -2593,6 +2593,7 @@ name = "proxy"
 version = "5.6.0"
 dependencies = [
  "http",
+ "ppp",
  "tcp",
 ]
 

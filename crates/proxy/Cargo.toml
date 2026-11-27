@@ -10,3 +10,6 @@ tcp   = { path = "../tcp" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ppp   = { path = "../ppp" }

@@ -29,6 +29,8 @@ pub mod option {
     pub const NOP: u8 = 1;
     /// Maximum Segment Size, four octets including these two.
     pub const MSS: u8 = 2;
+    /// Window Scale (RFC 7323 2.2), three octets including these two.
+    pub const WINDOW_SCALE: u8 = 3;
 }
 
 /// RFC 790's protocol number for TCP, which the pseudo-header carries.
@@ -64,6 +66,10 @@ pub struct Segment {
     /// The Maximum Segment Size option, if the segment carried one. MUST-65:
     /// it "MUST NOT be sent in other segments" than a SYN.
     pub mss: Option<u16>,
+    /// The Window Scale option (RFC 7323 2.2), if the segment carried one:
+    /// the count of bits this end shifts the windows it sends. Only a SYN
+    /// carries it.
+    pub window_scale: Option<u8>,
     pub payload: Vec<u8>,
 }
 
@@ -103,9 +109,9 @@ impl Segment {
     /// How long the header will be, options included: 3.1's Data Offset in
     /// octets rather than in words.
     fn header_len(&self) -> usize {
-        // Only the MSS option is ever sent, and it is four octets, which is
-        // already a whole word.
-        HEADER_LEN + if self.mss.is_some() { 4 } else { 0 }
+        // The MSS option is four octets, a whole word. The window scale is
+        // three, and one no-operation before it makes a word of it.
+        HEADER_LEN + if self.mss.is_some() { 4 } else { 0 } + if self.window_scale.is_some() { 4 } else { 0 }
     }
 
     /// Write the segment out, with the checksum over it and the two addresses.
@@ -127,6 +133,9 @@ impl Segment {
             out.push(option::MSS);
             out.push(4);
             out.extend_from_slice(&mss.to_be_bytes());
+        }
+        if let Some(shift) = self.window_scale {
+            out.extend_from_slice(&[option::NOP, option::WINDOW_SCALE, 3, shift]);
         }
         debug_assert_eq!(out.len(), header, "the header is not the length it said");
         out.extend_from_slice(&self.payload);
@@ -152,6 +161,7 @@ impl Segment {
         if checksum(from, to, bytes) != 0 {
             return None;
         }
+        let (mss, window_scale) = read_options(&bytes[HEADER_LEN..header]);
         Some(Self {
             source_port: u16::from_be_bytes([bytes[0], bytes[1]]),
             destination_port: u16::from_be_bytes([bytes[2], bytes[3]]),
@@ -160,13 +170,14 @@ impl Segment {
             flags: bytes[13],
             window: u16::from_be_bytes([bytes[14], bytes[15]]),
             urgent: u16::from_be_bytes([bytes[18], bytes[19]]),
-            mss: read_mss(&bytes[HEADER_LEN..header]),
+            mss,
+            window_scale,
             payload: bytes[header..].to_vec(),
         })
     }
 }
 
-/// Walk the options for a Maximum Segment Size.
+/// Walk the options for a Maximum Segment Size and a Window Scale.
 ///
 /// MUST-6: "ignore without error any TCP Option it does not implement,
 /// assuming that the option has a length field". MUST-7 asks for an illegal
@@ -174,27 +185,31 @@ impl Segment {
 /// stops, which leaves the segment readable and any option after the bad one
 /// unread -- and an option list that cannot be walked is not one worth
 /// believing the rest of.
-fn read_mss(mut options: &[u8]) -> Option<u16> {
+fn read_options(mut options: &[u8]) -> (Option<u16>, Option<u8>) {
+    let (mut mss, mut scale) = (None, None);
     while let Some((&kind, rest)) = options.split_first() {
         match kind {
             // "This is used at the end of all options" (3.2).
-            option::END => return None,
+            option::END => break,
             // Alignment, and the only other option with no length octet.
             option::NOP => options = rest,
             _ => {
-                let &length = rest.first()?;
+                let Some(&length) = rest.first() else { break };
                 let length = usize::from(length);
                 if length < 2 || length > options.len() {
-                    return None;
+                    break;
                 }
                 if kind == option::MSS && length == 4 {
-                    return Some(u16::from_be_bytes([options[2], options[3]]));
+                    mss = Some(u16::from_be_bytes([options[2], options[3]]));
+                }
+                if kind == option::WINDOW_SCALE && length == 3 {
+                    scale = Some(options[2]);
                 }
                 options = &options[length..];
             }
         }
     }
-    None
+    (mss, scale)
 }
 
 /// 3.1's checksum: the ones' complement of the ones' complement sum over the
@@ -254,6 +269,7 @@ mod tests {
             window: 4096,
             urgent: 0,
             mss: None,
+            window_scale: None,
             payload: b"GET / HTTP/1.0\r\n\r\n".to_vec(),
         };
         assert_eq!(round_trip(&segment), segment);
@@ -373,18 +389,18 @@ mod tests {
     fn an_unknown_option_is_ignored_and_the_next_one_is_still_read() {
         // A window scale (kind 3, length 3), a no-operation for alignment,
         // then the size. All three are legal and only the last is understood.
-        assert_eq!(read_mss(&[3, 3, 7, option::NOP, option::MSS, 4, 0x05, 0xb4]), Some(1460));
-        assert_eq!(read_mss(&[option::NOP, option::NOP, option::END]), None);
-        assert_eq!(read_mss(&[]), None);
+        assert_eq!(read_options(&[3, 3, 7, option::NOP, option::MSS, 4, 0x05, 0xb4]).0, Some(1460));
+        assert_eq!(read_options(&[option::NOP, option::NOP, option::END]).0, None);
+        assert_eq!(read_options(&[]).0, None);
     }
 
     /// An option list that cannot be walked stops the walk rather than
     /// running off the end of it (MUST-7).
     #[test]
     fn an_illegal_option_length_is_survived() {
-        assert_eq!(read_mss(&[3, 0, 0, 0]), None, "a zero length looped");
-        assert_eq!(read_mss(&[3, 99]), None, "a length past the end was believed");
-        assert_eq!(read_mss(&[option::MSS]), None, "a truncated option was read");
+        assert_eq!(read_options(&[3, 0, 0, 0]).0, None, "a zero length looped");
+        assert_eq!(read_options(&[3, 99]).0, None, "a length past the end was believed");
+        assert_eq!(read_options(&[option::MSS]).0, None, "a truncated option was read");
     }
 
     /// A header shorter than the fixed part, or one whose data offset points
