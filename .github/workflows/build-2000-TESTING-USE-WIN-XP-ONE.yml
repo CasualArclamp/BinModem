@@ -1,4 +1,4 @@
-name: Release (Windows 2000 32-bit {TESTING})
+name: Release (Windows 2000 32-bit {TESTING - PLEASE USE WIN XP BUILDER})
 
 on:
   push:
