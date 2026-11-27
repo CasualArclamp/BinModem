@@ -11,6 +11,52 @@ dialsnoop.exe                 the same reader, as a program of its own
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.7.0
+
+### Fax: greyscale and colour pages
+
+- **Receive:** the answering end offers JPEG and full colour in its DIS (T.30 Annex E, T.4 Annex E). The page shows in colour as it arrives. Save writes a PNG or a PDF.
+- **Send:** the document panel has a `tone` row (ink, greyscale, colour) and a `quality` row (small, normal, best). A far end with no colour gets the lightness. A far end with no JPEG gets the pages of ink.
+- A `Colour` tick box sets the offer.
+- **Not proven:** all colour calls were loopback calls between two BinModem ends. No real colour fax machine sent or received a page.
+
+### Fax: a real Super G3 machine on a line with a long delay
+
+- **Flags after E:** in a resync, BinModem now sends HDLC flags from its E until the far E. It sent idle ones before, and the machine stopped.
+- **E again:** when the far E comes 50 ms or more after the E of BinModem, BinModem sends E again.
+- **Page speed:** the recipient now asks for a rate 8.5 dB under the signal to noise it trained to. It was 6 dB. A line that trained to 32.7 dB at 3429 Bd now gets 26 400 bit/s.
+- **Result:** with these changes, a call from the machine gave two partial pages with no bad frame, MCF, MCF and DCN in 49 s.
+
+### A Modem or Fax switch
+
+- A two-part **Modem** / **Fax** switch is at the right of the call keys. It types `AT+FCLASS=0` or `AT+FCLASS=1`.
+- In fax class the call keys have an amber edge, and they become **Send fax** and **Wait for a fax**.
+- The switch follows the class from the Fax tab and from the terminal. It is locked while a call is up.
+
+### V.ARC
+
+- **QAM on G.711: 37 000 bit/s.** It was 23 250 bit/s. The baud is fitted to the call (3700, 3429 or 3000), a line probe selects the fit, and a trellis code and a shell mapper add 1.375 bits to each symbol.
+- **PCM on G.711: a level of the codec in each sample.** In simulation an exact line carries 53 312 bit/s. A real PCMU call between two `modem-sip` on one machine gave `CONNECT 41024/VARC`. A line that is not a sample for a sample steps down to the waveform.
+- **A new handshake.** After V.8 the two ends make a CL, MS and ACK transaction in HDLC frames at 300 bit/s DBPSK. On a clean line in simulation it takes 1.5 s. It took 4.3 s.
+- **No two-wire modes.** Each call on a sound card finds if the line has an echo. `VARC2W`, `VARCQ2W` and `VARCP2W` are gone from the window. In `+MS` they are other names for `VARC`, `VARCQ` and `VARCP`. This adds approximately 4 s to the start of a call on a sound card.
+
+**Not compatible with earlier builds.** A V.ARC call needs 5.7.0 at both ends.
+
+**Not tried:** a gateway, a real robbed bit and a call through the air. The new handshake did not run on a real sound card.
+
+### TCP over the call
+
+- On a call with a long round trip, data crossed in bursts with a gap of one round trip between them. The sender of the proxy now follows the queue for the modem, and the receiver offers a larger window.
+- A V.ARC call on L16/48000 between two windows on one machine: 89 571 octets/s. It was 7 263 octets/s.
+- The full gain needs 5.7.0 at both ends.
+- **Not tried:** a call between two machines with a long round trip, and a call to a provider.
+
+### Smaller changes
+
+- **HST:** the symbol scope now shows points on an HST call. This was tested between two BinModems in simulation only.
+- **V.92 quick connect:** the call log now says what became of the QC1a: JM and a full start-up, or QCA1d and a short Phase 1. Quick connect with a real server is not proven.
+- **Documentation:** [docs/manual/constellations.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/manual/constellations.md) shows the received constellation of every mode on a simulated line.
+
 ## What's new in 5.6.0
 
 ### V.ARC: a negotiation on every call, and every mode on every SIP coding
