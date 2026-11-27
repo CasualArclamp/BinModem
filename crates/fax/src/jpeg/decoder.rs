@@ -602,7 +602,7 @@ impl Decoder {
             return false;
         }
         let mut components = Vec::with_capacity(count);
-        for c in body[6..6 + 3 * count].chunks_exact(3) {
+        for c in body[6..6 + 3 * count].as_chunks::<3>().0 {
             let (h, v) = (usize::from(c[1] >> 4), usize::from(c[1] & 15));
             if !(1..=4).contains(&h) || !(1..=4).contains(&v) || c[2] > 3 {
                 return false;
@@ -641,7 +641,7 @@ impl Decoder {
         if body.len() < 1 + 2 * count + 3 || usize::from(body[0]) != count {
             return false;
         }
-        for (component, selector) in frame.components.iter_mut().zip(body[1..].chunks_exact(2)) {
+        for (component, selector) in frame.components.iter_mut().zip(body[1..].as_chunks::<2>().0) {
             if selector[0] != component.id {
                 return false;
             }
@@ -763,7 +763,7 @@ impl Decoder {
                         dct::inverse(&blocks[block], &mut samples);
                         block += 1;
                         let left = (mcu * component.h + bx) * 8;
-                        for (y, line) in samples.chunks_exact(8).enumerate() {
+                        for (y, line) in samples.as_chunks::<8>().0.iter().enumerate() {
                             let at = starts[index] + (by * 8 + y) * across + left;
                             self.planes[index][at..at + 8].copy_from_slice(line);
                         }

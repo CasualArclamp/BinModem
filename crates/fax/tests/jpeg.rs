@@ -37,7 +37,7 @@ fn rgb_test_card(width: usize, height: usize) -> Vec<u8> {
 /// The same card as CIELAB codes.
 fn lab_test_card(width: usize, height: usize) -> Picture {
     let samples = rgb_test_card(width, height)
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .flat_map(|p| lab_of_rgb([p[0], p[1], p[2]]))
         .collect();
     Picture { width, height, components: 3, samples, pels_per_inch: 200, gamut: Gamut::DEFAULT, jpeg: Vec::new() }
@@ -102,7 +102,7 @@ fn a_colour_stream_from_their_encoder_decodes_to_the_components_they_put_in() {
         // the quantisation and the chroma subsampling cost...
         let (mean, _) = mean_and_worst(
             picture.samples.iter().map(|s| f32::from(*s)),
-            rgb.chunks_exact(3).flat_map(|p| ycbcr_of_rgb([p[0], p[1], p[2]])),
+            rgb.as_chunks::<3>().0.iter().flat_map(|p| ycbcr_of_rgb([p[0], p[1], p[2]])),
         );
         assert!(mean < 4.0, "{width} x {height}: components differ from the source by {mean} on average");
         // ...and against their own decoder's RGB, which had the same
@@ -110,7 +110,7 @@ fn a_colour_stream_from_their_encoder_decodes_to_the_components_they_put_in() {
         // is repeated, so edges of colour differ and flat areas do not.
         let (_, _, theirs) = their_decoding(&stream);
         let (mean, _) = mean_and_worst(
-            picture.samples.chunks_exact(3).flat_map(|c| rgb_of_ycbcr([c[0], c[1], c[2]])),
+            picture.samples.as_chunks::<3>().0.iter().flat_map(|c| rgb_of_ycbcr([c[0], c[1], c[2]])),
             theirs.iter().map(|s| f32::from(*s)),
         );
         assert!(mean < 3.0, "{width} x {height}: differs from their decoding by {mean} on average");
@@ -151,9 +151,9 @@ fn their_decoder_reads_our_streams_as_the_components_we_put_in() {
         // RGB cannot hold every YCbCr triple, and CIELAB codes read as YCbCr
         // go outside it in places, where their decoder clips: those pels are
         // left out of the comparison.
-        let kept: Vec<(&[u8], &[u8])> = theirs
-            .chunks_exact(3)
-            .zip(picture.samples.chunks_exact(3))
+        let kept: Vec<(&[u8; 3], &[u8; 3])> = theirs
+            .as_chunks::<3>().0.iter()
+            .zip(picture.samples.as_chunks::<3>().0)
             .filter(|(rgb, _)| rgb.iter().all(|v| (1..255).contains(v)))
             .collect();
         assert!(kept.len() > 120 * 90 / 4, "{options:?}: only {} pels were not clipped", kept.len());

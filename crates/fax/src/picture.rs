@@ -89,7 +89,7 @@ impl Picture {
         for y in from..to {
             let line = &self.samples[y * row..(y + 1) * row];
             if self.components == 3 {
-                for pel in line.chunks_exact(3) {
+                for pel in line.as_chunks::<3>().0 {
                     out.extend_from_slice(&converter.rgb([pel[0], pel[1], pel[2]]));
                 }
             } else {
@@ -122,7 +122,7 @@ pub const WHITE_D50: [f32; 3] = [0.964_22, 1.0, 0.825_21];
 /// The combined matrix is the one Bruce Lindbloom publishes for sRGB with a
 /// D50 reference white (brucelindbloom.com, "RGB/XYZ Matrices").
 const XYZ_D50_TO_SRGB: [[f32; 3]; 3] = [
-    [3.133_856_1, -1.616_866_7, -0.490_614_6],
+    [3.133_856, -1.616_866_7, -0.490_614_6],
     [-0.978_768_4, 1.916_141_5, 0.033_454_0],
     [0.071_945_3, -0.228_991_4, 1.405_242_7],
 ];

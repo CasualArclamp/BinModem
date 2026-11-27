@@ -56,3 +56,20 @@ half of the Modified Huffman that every machine reads.
 
 BinModem draws a page one row at a time as it arrives, as slow-scan television
 does.
+
+## Colour and greyscale
+
+BinModem receives a greyscale or colour page. When it answers, its DIS has
+bit 68 (JPEG coding) and bit 69 (full colour mode) of T.30 Table 2. A machine
+with a colour scanner can then send the page as T.4 Annex E gives it: a
+baseline JPEG data stream with CIELAB components, in error correction mode.
+
+- The **Colour** tick box in the Fax window sets the offer. It needs **ECM**.
+- The page shows in colour as it arrives, with a **JPEG colour** or
+  **JPEG grey** badge.
+- **Save** writes a PNG in sRGB, or a PDF that contains the JPEG stream as it
+  arrived.
+
+BinModem does not send colour from the window yet. Colour reception is tested
+between two BinModem ends in loopback, not with a real colour fax machine.
+[The colour fax specification](../design/colour-fax/spec.md) lists the clauses.

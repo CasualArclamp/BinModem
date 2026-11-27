@@ -108,6 +108,11 @@ sRGB matrix and curve (IEC 61966-2-1).
 ## 5. The file: PDF
 
 - ISO 32000-1 7.4.8: `DCTDecode` takes the JPEG stream as it arrived.
+- ISO 32000-1 7.4.8, Table 13: `ColorTransform` must be 0. The default for three
+  components is 1, and a reader then changes the components from YCbCr to RGB.
+  The components are CIELAB, and white paper then shows as orange.
+- ISO 32000-1 8.6.6.3: a greyscale page uses an `Indexed` space on `Lab`,
+  because `Lab` has three components and the page has one.
 - ISO 32000-1 8.6.5.4: the `Lab` colour space with `WhitePoint` and `Range`.
 - A PDF reader does not obey DNL. If Y was 0, the saved stream gets the true Y
   in its frame header, and the DNL segment is removed. No other octet changes.

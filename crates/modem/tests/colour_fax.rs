@@ -278,7 +278,7 @@ fn a_colour_page_of_several_blocks_arrives_whole() {
     let mut picture = a_picture(480, 3);
     // Grain in the lightness, so that the page is as big as a scan of paper.
     let mut seed = 0x9e37_79b9u32;
-    for pel in picture.samples.chunks_exact_mut(3) {
+    for pel in picture.samples.as_chunks_mut::<3>().0 {
         seed ^= seed << 13;
         seed ^= seed >> 17;
         seed ^= seed << 5;

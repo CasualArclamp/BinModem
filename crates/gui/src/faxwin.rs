@@ -10,6 +10,7 @@ use eframe::egui;
 use egui::{Color32, RichText};
 use fax::coding::Coding;
 use fax::page::{Grey, Halftone, Page, Resolution};
+use fax::picture::{Converter, Picture};
 use fax::call::Exchanged;
 use fax::t30::{self, Frame};
 use std::sync::Arc;
@@ -71,6 +72,9 @@ pub struct Fax {
     pub error_correction: bool,
     /// Whether this end offers JBIG, which goes only with error correction.
     pub jbig: bool,
+    /// Whether this end offers JPEG, for greyscale and colour pages, which
+    /// goes only with error correction too.
+    pub colour: bool,
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
     /// The field it was read from, as it arrived: a DIS when this end is
@@ -119,11 +123,15 @@ pub struct Fax {
     carried: Option<Carried>,
     /// A page that arrived: the one `scan` is a picture of.
     incoming: Option<Page>,
+    /// That page as a picture, if it came with tone.
+    incoming_picture: Option<Arc<Picture>>,
     /// The page arriving, or the last one that did, drawn as it came in.
     scan: Option<Scan>,
     /// The pages of the same call that arrived before that one, with their
     /// numbers in it.
     earlier: Vec<(usize, Page)>,
+    /// And the pictures of those that came with tone, by the same numbers.
+    earlier_pictures: Vec<(usize, Arc<Picture>)>,
     /// One of those being looked at instead, by its place in `earlier`, and
     /// its picture.
     looking: Option<(usize, Scan)>,
@@ -193,11 +201,16 @@ const FAIR: Color32 = Color32::from_rgb(240, 160, 80);
 const POOR: Color32 = Color32::from_rgb(225, 120, 90);
 /// The ink on a badge's coloured ground.
 const BADGE_INK: Color32 = Color32::from_rgb(18, 20, 24);
+/// The ground of the badge on a page that came with tone, greyscale or
+/// colour: not on the scale from green to red, because JPEG is not a smaller
+/// or a larger coding of the same page but a coding of another kind of page.
+const TONE: Color32 = Color32::from_rgb(190, 150, 235);
 
 /// A page coding's colour, by how small it makes a page: T.85's JBIG, then
 /// T.6's MMR, then T.4's MR and MH.
 fn coding_colour(coding: &str) -> Color32 {
     match coding {
+        "JPEG" => TONE,
         "JBIG" => BEST,
         "MMR" => GOOD,
         "MR" => FAIR,
@@ -215,6 +228,10 @@ fn modulation_colour(modulation: &str) -> Color32 {
         _ => POOR,
     }
 }
+
+/// What the badge on a page with tone says when pointed at.
+const TONE_TIP: &str = "This page came as JPEG (T.4 Annex E): greyscale or colour in CIELAB, \
+                        eight bits a component. It is shown as sRGB";
 
 /// A word on a coloured ground, big enough to read from across the room.
 fn badge(ui: &mut egui::Ui, text: &str, ground: Color32, tip: &str) {
@@ -290,6 +307,50 @@ fn block_row(lines: &[Vec<bool>], ppl: usize, n: usize, row: usize, out: &mut Ve
         let count = ((y1 - y0) * (x1 - x0)).max(1);
         let v = (255 - ink * 255 / count) as u8;
         out.push(Color32::from_rgb(v, v, v));
+    }
+}
+
+/// What a page with tone is called on its badge.
+fn tone_said(picture: &Picture) -> &'static str {
+    if picture.is_colour() { "JPEG colour" } else { "JPEG grey" }
+}
+
+/// Row `row` of a page with tone drawn `n` pels to a texel, onto `out`: as
+/// [`block_row`], with each texel the mean of the CIELAB codes under it,
+/// turned to sRGB. Past the edge of a picture narrower than the paper is
+/// paper.
+fn tone_row(picture: &Picture, converter: &Converter, ppl: usize, n: usize, row: usize, out: &mut Vec<Color32>) {
+    let width = SCAN_WIDTH.div_ceil(n);
+    let tall = picture.height * ppl;
+    let (y0, y1) = (row * n, ((row + 1) * n).min(tall));
+    let paper = picture.gamut.code(0, 100.0);
+    let across = picture.width * picture.components;
+    for tx in 0..width {
+        let (x0, x1) = (tx * n, ((tx + 1) * n).min(SCAN_WIDTH));
+        let mut sum = [0usize; 3];
+        for sy in y0..y1 {
+            let line = &picture.samples[(sy / ppl) * across..(sy / ppl + 1) * across];
+            for x in x0..x1 {
+                if x >= picture.width {
+                    sum[0] += usize::from(paper);
+                    sum[1] += 128;
+                    sum[2] += 128;
+                    continue;
+                }
+                let at = x * picture.components;
+                for (c, total) in sum.iter_mut().enumerate().take(picture.components) {
+                    *total += usize::from(line[at + c]);
+                }
+            }
+        }
+        let count = ((y1 - y0) * (x1 - x0)).max(1);
+        let mean = |total: usize| ((total + count / 2) / count) as u8;
+        let [r, g, b] = if picture.is_colour() && x0 < picture.width {
+            converter.rgb([mean(sum[0]), mean(sum[1]), mean(sum[2])])
+        } else {
+            converter.grey(mean(sum[0]))
+        };
+        out.push(Color32::from_rgb(r, g, b));
     }
 }
 
@@ -425,6 +486,10 @@ struct Scan {
     sheet: usize,
     resolution: Resolution,
     lines: Vec<Vec<bool>>,
+    /// The same lines as a picture, if the page has tone, and what turns its
+    /// codes into the colours of a screen. A page with one is drawn from it,
+    /// and `lines` is then its lightness as ink, kept for what wants that.
+    tone: Option<(Picture, Converter)>,
     /// The rows finished so far, SCAN_WIDTH texels to a row.
     pixels: Vec<Color32>,
     rows: usize,
@@ -439,10 +504,23 @@ struct Scan {
 }
 
 impl Scan {
-    /// The picture of a page that is already whole.
-    fn of(sheet: usize, page: &Page) -> Self {
+    /// The picture of a page that is already whole, in its tone if it came
+    /// with any.
+    fn of_tone(sheet: usize, page: &Page, picture: Option<&Picture>) -> Self {
         let mut scan = Self::new(u64::MAX, sheet, page.resolution);
-        scan.extend(0, page.lines.clone());
+        match picture {
+            // As many lines of each as there are of both: they are the same
+            // page, and one that was cut short is cut short in both.
+            Some(picture) => {
+                let lines = page.lines.len().min(picture.height);
+                let mut part = picture.clone();
+                part.jpeg = Vec::new();
+                part.height = lines;
+                part.samples.truncate(lines * picture.width * picture.components);
+                scan.extend_in_tone(0, page.lines[..lines].to_vec(), Some(part));
+            }
+            None => scan.extend(0, page.lines.clone()),
+        }
         scan
     }
 
@@ -452,6 +530,7 @@ impl Scan {
             sheet,
             resolution,
             lines: Vec::new(),
+            tone: None,
             pixels: Vec::new(),
             rows: 0,
             last_line: f64::NEG_INFINITY,
@@ -475,11 +554,7 @@ impl Scan {
             return;
         }
         self.scale = n;
-        self.pixels.clear();
-        self.rows = 0;
-        self.texture = None;
-        self.capacity = 0;
-        self.uploaded = 0;
+        self.redraw();
         self.finish_rows();
     }
 
@@ -509,17 +584,72 @@ impl Scan {
     /// page it continues needs. A batch that starts past the end leaves a gap
     /// that nothing can fill, and is left out.
     fn extend(&mut self, from: usize, lines: Vec<Vec<bool>>) {
+        self.extend_in_tone(from, lines, None);
+    }
+
+    /// Lines starting at line `from`, and the same lines as a picture if the
+    /// page has tone.
+    ///
+    /// A page is drawn in tone from its first line or not at all: a picture
+    /// that starts part way down a page drawn as ink so far is left out, and
+    /// so is one that stops matching the picture there is.
+    fn extend_in_tone(&mut self, from: usize, lines: Vec<Vec<bool>>, tone: Option<Picture>) {
         let have = self.lines.len();
         if from > have {
             return;
         }
-        self.lines.extend(lines.into_iter().skip(have - from));
+        let skip = have - from;
+        let fresh = lines.len().saturating_sub(skip);
+        match (self.tone.as_mut(), tone) {
+            (None, Some(mut picture)) if have == 0 && picture.height == lines.len() => {
+                picture.jpeg = Vec::new();
+                let converter = Converter::new(picture.gamut);
+                self.tone = Some((picture, converter));
+            }
+            (Some((picture, _)), Some(more))
+                if more.width == picture.width
+                    && more.components == picture.components
+                    && more.height == lines.len() =>
+            {
+                let across = more.width * more.components;
+                picture.samples.extend_from_slice(&more.samples[skip.min(more.height) * across..]);
+                picture.height += fresh;
+            }
+            (Some(_), _) if fresh > 0 => {
+                // Lines with no picture to go with them: the page goes on
+                // as ink, which is at least all of it.
+                self.tone = None;
+                self.redraw();
+            }
+            _ => {}
+        }
+        self.lines.extend(lines.into_iter().skip(skip));
         self.finish_rows();
+    }
+
+    /// Every row again, from the lines kept.
+    fn redraw(&mut self) {
+        self.pixels.clear();
+        self.rows = 0;
+        self.texture = None;
+        self.capacity = 0;
+        self.uploaded = 0;
+    }
+
+    /// The page as a picture, if it has tone, as far as it has come.
+    fn picture(&self) -> Option<&Picture> {
+        self.tone.as_ref().map(|(picture, _)| picture)
     }
 
     /// The next row, from the lines under it.
     fn finish_row(&mut self) {
-        block_row(&self.lines, pixels_per_line(self.resolution), self.scale, self.rows, &mut self.pixels);
+        let ppl = pixels_per_line(self.resolution);
+        match self.tone.as_ref() {
+            Some((picture, converter)) => {
+                tone_row(picture, converter, ppl, self.scale, self.rows, &mut self.pixels);
+            }
+            None => block_row(&self.lines, ppl, self.scale, self.rows, &mut self.pixels),
+        }
         self.rows += 1;
     }
 
@@ -593,9 +723,45 @@ fn write_page(lines: &[Vec<bool>], resolution: Resolution, path: &std::path::Pat
     image.save(path).map_err(|e| format!("{e}"))
 }
 
-/// Write pages out as one PDF, each on a sheet the size it was scanned at.
-fn write_pdf(pages: &[fax::pdf::Sheet<'_>], path: &std::path::Path) -> Result<(), String> {
-    std::fs::write(path, fax::pdf::document(pages)).map_err(|e| format!("{e}"))
+/// Write a page with tone out as a picture: its CIELAB codes as sRGB, a pel
+/// to a pixel, since at 200 pels to 25.4 mm both ways its pels are square.
+fn write_tone(picture: &Picture, path: &std::path::Path) -> Result<(), String> {
+    let (width, height) = (picture.width as u32, picture.height as u32);
+    let rgb = picture.rgb();
+    let unshaped = || "the page did not come out rectangular".to_owned();
+    if picture.is_colour() {
+        let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(unshaped)?;
+        image.save(path).map_err(|e| format!("{e}"))
+    } else {
+        let grey = rgb.as_chunks::<3>().0.iter().map(|pel| pel[0]).collect();
+        let image = image::GrayImage::from_raw(width, height, grey).ok_or_else(unshaped)?;
+        image.save(path).map_err(|e| format!("{e}"))
+    }
+}
+
+/// A page to save: its number in its call, its lines of ink, how finely they
+/// were scanned, and the page as a picture if it came with tone.
+type Kept<'a> = (usize, &'a [Vec<bool>], Resolution, Option<&'a Picture>);
+
+/// Write a page out as a picture, in its tone if it has any.
+fn write_kept((_, lines, resolution, tone): &Kept<'_>, path: &std::path::Path) -> Result<(), String> {
+    match tone {
+        Some(picture) => write_tone(picture, path),
+        None => write_page(lines, *resolution, path),
+    }
+}
+
+/// Write pages out as one PDF, each on a sheet the size it was scanned at: a
+/// page of ink in T.6, and a page with tone as the JPEG it arrived in.
+fn write_pdf(pages: &[Kept<'_>], path: &std::path::Path) -> Result<(), String> {
+    let leaves: Vec<fax::pdf::Leaf<'_>> = pages
+        .iter()
+        .map(|(_, lines, resolution, tone)| match tone {
+            Some(picture) => fax::pdf::Leaf::Tone(picture),
+            None => fax::pdf::Leaf::Ink(lines, *resolution),
+        })
+        .collect();
+    std::fs::write(path, fax::pdf::document_of(&leaves)).map_err(|e| format!("{e}"))
 }
 
 /// Whether a name chosen to save to asks for a PDF.
@@ -637,6 +803,8 @@ pub struct CallRecord {
     pub stopped_here: bool,
     /// The pages that arrived, with their numbers in the call.
     pub received: Vec<(usize, Page)>,
+    /// The pictures of those that came with tone, by the same numbers.
+    pub pictures: Vec<(usize, Arc<Picture>)>,
 }
 
 /// How a call came out, as far as T.30 says.
@@ -667,6 +835,7 @@ impl CallRecord {
             carried: None,
             stopped_here: false,
             received: Vec::new(),
+            pictures: Vec::new(),
         }
     }
 
@@ -942,17 +1111,16 @@ pub fn agreed(row: &RateRow, carried: Option<Carried>) -> bool {
 /// Write pages out: one PDF if the name ends in `.pdf`, and otherwise a PNG
 /// each, `fax.png` becoming `fax-1.png` and so on by the page's number.
 /// Returns what to say about it.
-fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Path) -> String {
+fn save_pages(pages: &[Kept<'_>], path: &std::path::Path) -> String {
     if names_pdf(path) {
-        let sheets: Vec<fax::pdf::Sheet<'_>> = pages.iter().map(|(_, lines, r)| (*lines, *r)).collect();
-        return match write_pdf(&sheets, path) {
-            Ok(()) if sheets.len() == 1 => format!("saved to {}", path.display()),
-            Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
+        return match write_pdf(pages, path) {
+            Ok(()) if pages.len() == 1 => format!("saved to {}", path.display()),
+            Ok(()) => format!("{} pages saved to {}", pages.len(), path.display()),
             Err(e) => e,
         };
     }
-    if let [(_, lines, resolution)] = pages {
-        return match write_page(lines, *resolution, path) {
+    if let [page] = pages {
+        return match write_kept(page, path) {
             Ok(()) => format!("saved to {}", path.display()),
             Err(e) => e,
         };
@@ -961,8 +1129,8 @@ fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Pat
     let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
     let mut written = 0;
     let mut trouble = None;
-    for (sheet, lines, resolution) in pages {
-        match write_page(lines, *resolution, &named(*sheet)) {
+    for page in pages {
+        match write_kept(page, &named(page.0)) {
             Ok(()) => written += 1,
             Err(e) => trouble = Some(e),
         }
@@ -989,6 +1157,9 @@ impl Fax {
             v34: true,
             error_correction: true,
             jbig: true,
+            // Offered: bits 68 and 69 in the DIS, so that a machine with a
+            // colour scanner may send what it scanned.
+            colour: true,
             ..Self::default()
         }
     }
@@ -1246,11 +1417,20 @@ impl Fax {
     /// window did not get every line of it -- or got the page before the last
     /// few, which the two threads are free to do -- the picture is made again
     /// from the page itself.
+    #[cfg(test)]
     pub fn arrived(&mut self, sheet: usize, page: Page) {
+        self.arrived_in_tone(sheet, page, None);
+    }
+
+    /// A page has arrived, and with it the page as a picture if it came with
+    /// tone: greyscale or colour.
+    pub fn arrived_in_tone(&mut self, sheet: usize, page: Page, picture: Option<Arc<Picture>>) {
         let same = self.scan.as_ref().is_some_and(|scan| scan.sheet == sheet);
         let drawn = same
             && self.scan.as_ref().is_some_and(|scan| {
-                scan.lines.len() == page.lines.len() && scan.resolution == page.resolution
+                scan.lines.len() == page.lines.len()
+                    && scan.resolution == page.resolution
+                    && scan.tone.is_some() == picture.is_some()
             });
         if !same {
             self.next_sheet(sheet);
@@ -1258,7 +1438,7 @@ impl Fax {
         if !drawn {
             // Keep the number of the page being drawn, so the lines of it
             // still on their way are known for what they are.
-            let mut scan = Scan::of(sheet, &page);
+            let mut scan = Scan::of_tone(sheet, &page, picture.as_deref());
             scan.page = self.scan.as_ref().map_or(u64::MAX, |scan| scan.page);
             self.scan = Some(scan);
         }
@@ -1267,8 +1447,13 @@ impl Fax {
                 Some(kept) => kept.1 = page.clone(),
                 None => call.received.push((sheet, page.clone())),
             }
+            call.pictures.retain(|(s, _)| *s != sheet);
+            if let Some(picture) = picture.as_ref() {
+                call.pictures.push((sheet, picture.clone()));
+            }
         }
         self.incoming = Some(page);
+        self.incoming_picture = picture;
         self.saved = None;
     }
 
@@ -1279,9 +1464,14 @@ impl Fax {
         if let Some(page) = self.incoming.take() {
             let before = self.scan.as_ref().map_or(0, |scan| scan.sheet);
             self.earlier.push((before, page));
+            if let Some(picture) = self.incoming_picture.take() {
+                self.earlier_pictures.push((before, picture));
+            }
         }
+        self.incoming_picture = None;
         if sheet <= 1 {
             self.earlier.clear();
+            self.earlier_pictures.clear();
         }
         self.looking = None;
         self.saved = None;
@@ -1295,10 +1485,10 @@ impl Fax {
         let Some(to) = at.checked_add_signed(step).filter(|to| *to < last) else {
             return;
         };
-        self.looking = self
-            .earlier
-            .get(to)
-            .map(|(sheet, page)| (to, Scan::of(*sheet, page)));
+        self.looking = self.earlier.get(to).map(|(sheet, page)| {
+            let picture = self.earlier_pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+            (to, Scan::of_tone(*sheet, page, picture))
+        });
         self.saved = None;
     }
 
@@ -1319,7 +1509,7 @@ impl Fax {
         if let Some(scan) = self.scan.as_mut() {
             scan.page = arriving.page;
             scan.sheet = arriving.sheet;
-            scan.extend(arriving.from, arriving.lines);
+            scan.extend_in_tone(arriving.from, arriving.lines, arriving.tone);
             scan.last_line = now;
         }
         fresh
@@ -1338,13 +1528,13 @@ impl Fax {
     ///
     /// A page still arriving saves as far as it has got, which is also what
     /// is left of a call that ended part way down the page.
+    ///
+    /// A page that came with tone, greyscale or colour, saves in it: the PNG
+    /// as sRGB, and the PDF with the JPEG stream as it arrived.
     pub fn save(&mut self, path: &std::path::Path) {
-        let Some((_, lines, resolution)) = self.in_view() else { return };
-        let written = if names_pdf(path) {
-            write_pdf(&[(lines, resolution)], path)
-        } else {
-            write_page(lines, resolution, path)
-        };
+        let Some((sheet, lines, resolution)) = self.in_view() else { return };
+        let kept: Kept<'_> = (sheet, lines, resolution, self.picture_in_view());
+        let written = if names_pdf(path) { write_pdf(&[kept], path) } else { write_kept(&kept, path) };
         self.saved = Some(match written {
             Ok(()) => format!("saved to {}", path.display()),
             Err(e) => e,
@@ -1369,37 +1559,66 @@ impl Fax {
         }
     }
 
+    /// The page in view as a picture, if it came with tone: the whole of one
+    /// that has arrived, with its stream, and as much as has come of one
+    /// still arriving, without.
+    fn picture_in_view(&self) -> Option<&Picture> {
+        if let Some((i, _)) = &self.looking {
+            let (sheet, _) = self.earlier.get(*i)?;
+            return self.earlier_pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+        }
+        match self.incoming.as_ref() {
+            Some(_) => self.incoming_picture.as_deref(),
+            None => self.scan.as_ref().and_then(Scan::picture),
+        }
+    }
+
+    /// What the page in view is called on its badge, if it came with tone.
+    fn tone_in_view(&self) -> Option<&'static str> {
+        if let Some((call, at, _)) = &self.opened {
+            let call = self.calls.get(*call)?;
+            let (sheet, _) = call.received.get(*at)?;
+            return call.pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| tone_said(p));
+        }
+        self.picture_in_view().map(tone_said)
+    }
+
     /// Every page of the call: in one PDF if the name ends in `.pdf`, a page
     /// to a sheet, and otherwise each to its own picture -- `fax.png` becomes
     /// `fax-1.png`, `fax-2.png` and so on, by the page's number in the call.
     pub fn save_all(&mut self, path: &std::path::Path) {
         let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
         let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
-        let mut pages: Vec<(usize, &[Vec<bool>], Resolution)> = self
+        let mut pages: Vec<Kept<'_>> = self
             .earlier
             .iter()
-            .map(|(sheet, page)| (*sheet, page.lines.as_slice(), page.resolution))
+            .map(|(sheet, page)| {
+                let picture = self.earlier_pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+                (*sheet, page.lines.as_slice(), page.resolution, picture)
+            })
             .collect();
         if let Some(scan) = self.scan.as_ref() {
             match self.incoming.as_ref() {
-                Some(page) => pages.push((scan.sheet, &page.lines, page.resolution)),
-                None if !scan.lines.is_empty() => pages.push((scan.sheet, &scan.lines, scan.resolution)),
+                Some(page) => {
+                    pages.push((scan.sheet, &page.lines, page.resolution, self.incoming_picture.as_deref()));
+                }
+                None if !scan.lines.is_empty() => {
+                    pages.push((scan.sheet, &scan.lines, scan.resolution, scan.picture()));
+                }
                 None => {}
             }
         }
         if names_pdf(path) {
-            let sheets: Vec<fax::pdf::Sheet<'_>> =
-                pages.iter().map(|(_, lines, resolution)| (*lines, *resolution)).collect();
-            self.saved = Some(match write_pdf(&sheets, path) {
-                Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
+            self.saved = Some(match write_pdf(&pages, path) {
+                Ok(()) => format!("{} pages saved to {}", pages.len(), path.display()),
                 Err(e) => e,
             });
             return;
         }
         let mut written = 0;
         let mut trouble = None;
-        for (sheet, lines, resolution) in pages {
-            match write_page(lines, resolution, &named(sheet)) {
+        for page in &pages {
+            match write_kept(page, &named(page.0)) {
                 Ok(()) => written += 1,
                 Err(e) => trouble = Some(e),
             }
@@ -1673,6 +1892,9 @@ impl Fax {
                         step = 1;
                     }
                 }
+                if let Some(said) = self.tone_in_view() {
+                    badge(ui, said, TONE, TONE_TIP);
+                }
                 close = ui.button("Back to the call").clicked();
             });
             if close {
@@ -1702,6 +1924,9 @@ impl Fax {
                 (Some(scan), false) => format!("page {} received: {} lines", scan.sheet.max(1), scan.lines.len()),
             };
             ui.label(RichText::new(heading).color(dim));
+            if let Some(said) = self.tone_in_view() {
+                badge(ui, said, TONE, TONE_TIP);
+            }
             if pages > 1 {
                 if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
                     step = -1;
@@ -1716,7 +1941,9 @@ impl Fax {
                     .button("Save")
                     .on_hover_text(
                         "This page, as a PDF or a PNG, whichever the name ends in -- as far as \
-                         it has got, if it is still arriving or the call ended part way down it",
+                         it has got, if it is still arriving or the call ended part way down it. \
+                         A greyscale or colour page saves in its tone, and its PDF holds the \
+                         JPEG as it arrived",
                     )
                     .clicked();
             }
@@ -1783,10 +2010,14 @@ impl Fax {
 
     /// Open page `at` of an earlier call's received pages.
     fn open(&mut self, call: usize, at: usize) {
-        let Some((sheet, page)) = self.calls.get(call).and_then(|c| c.received.get(at)) else {
+        let Some(record) = self.calls.get(call) else {
             return;
         };
-        self.opened = Some((call, at, Scan::of(*sheet, page)));
+        let Some((sheet, page)) = record.received.get(at) else {
+            return;
+        };
+        let picture = record.pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+        self.opened = Some((call, at, Scan::of_tone(*sheet, page, picture)));
         self.view = View::Received;
     }
 
@@ -2102,6 +2333,12 @@ impl Fax {
                             "T.85's JBIG: a good deal smaller than MMR on a picture. Only with \
                              ECM, and only when the far end offers it too",
                         );
+                    ui.add_enabled(self.error_correction, egui::Checkbox::new(&mut self.colour, "Colour"))
+                        .on_hover_text(
+                            "Greyscale and colour pages, as JPEG (T.30 Annex E): answering, this \
+                             end says it reads them, and a machine with a colour scanner may \
+                             send one. Only with ECM. This end does not send colour yet",
+                        );
                 });
                 if again {
                     self.render();
@@ -2187,7 +2424,22 @@ impl Fax {
                 ui.label(RichText::new(short).monospace().size(12.0).strong().color(colour))
                     .on_hover_text(call.headline().0);
                 let pages = if call.sending { call.confirmed_pages() } else { call.received.len() };
-                ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(dim));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(dim));
+                    // A page with tone among them: the same badge as on the
+                    // page, small.
+                    let colour = call.pictures.iter().any(|(_, p)| p.is_colour());
+                    if !call.pictures.is_empty() {
+                        ui.label(
+                            RichText::new(if colour { " colour " } else { " grey " })
+                                .monospace()
+                                .size(11.0)
+                                .color(BADGE_INK)
+                                .background_color(TONE),
+                        )
+                        .on_hover_text(TONE_TIP);
+                    }
+                });
                 ui.horizontal(|ui| {
                     if !call.received.is_empty() {
                         if ui.small_button("open").clicked() {
@@ -2212,10 +2464,13 @@ impl Fax {
                 .save_file()
             && let Some(call) = self.calls.get(i)
         {
-            let pages: Vec<(usize, &[Vec<bool>], Resolution)> = call
+            let pages: Vec<Kept<'_>> = call
                 .received
                 .iter()
-                .map(|(sheet, page)| (*sheet, page.lines.as_slice(), page.resolution))
+                .map(|(sheet, page)| {
+                    let picture = call.pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+                    (*sheet, page.lines.as_slice(), page.resolution, picture)
+                })
                 .collect();
             self.saved = Some(save_pages(&pages, &chosen));
         }
@@ -2393,6 +2648,7 @@ mod tests {
             resolution: Resolution::Standard,
             from,
             lines: page.lines[from..to].to_vec(),
+            tone: None,
         };
         let mut fax = Fax::new();
         assert!(fax.arriving(batch(0, 30), 1.0), "the top of a page is a new page");
@@ -2414,6 +2670,7 @@ mod tests {
             resolution: Resolution::Fine,
             from: 0,
             lines: page.lines[..5].to_vec(),
+            tone: None,
         };
         assert!(fax.arriving(next, 3.0));
         assert!(fax.incoming.is_none(), "the last page is still there");
@@ -2432,6 +2689,7 @@ mod tests {
                 resolution: Resolution::Standard,
                 from: 0,
                 lines: page_of(25).lines,
+                tone: None,
             },
             0.0,
         );
@@ -2518,6 +2776,7 @@ mod tests {
                     resolution: Resolution::Standard,
                     from: had,
                     lines: page.lines[had..lines].to_vec(),
+                    tone: None,
                 },
                 0.0,
             );
@@ -2611,6 +2870,7 @@ mod tests {
                 resolution: Resolution::Standard,
                 from: 0,
                 lines: page.lines[..4].to_vec(),
+                tone: None,
             };
             assert!(fax.arriving(arriving, n as f64), "page {sheet} is not a new page");
             fax.arrived(sheet, page.clone());
@@ -2649,6 +2909,7 @@ mod tests {
             resolution: Resolution::Standard,
             from: 0,
             lines: pages[0].lines[..2].to_vec(),
+            tone: None,
         };
         assert!(fax.arriving(arriving, 9.0));
         assert!(fax.earlier.is_empty(), "the last call's pages are still there");
@@ -3043,11 +3304,170 @@ mod tests {
         assert_eq!(fax.shown_view(), View::Received);
     }
 
+    /// A colour picture the width of the paper: bands of colour down a page
+    /// of `rows` lines, with the stream it would have arrived in.
+    fn colour_picture(rows: usize) -> Picture {
+        let width = fax::page::WIDTH;
+        let mut samples = Vec::with_capacity(width * rows * 3);
+        for _ in 0..rows {
+            for x in 0..width {
+                let rgb = match x * 3 / width {
+                    0 => [200, 60, 50],
+                    1 => [250, 250, 245],
+                    _ => [50, 80, 160],
+                };
+                samples.extend_from_slice(&fax::picture::lab_of_rgb(rgb));
+            }
+        }
+        let mut picture =
+            Picture { width, height: rows, components: 3, samples, pels_per_inch: 200, ..Picture::default() };
+        picture.jpeg = fax::jpeg::encode(&picture, fax::jpeg::Options::default());
+        picture
+    }
+
+    /// What the line thread makes of a picture: the page of ink that comes
+    /// with it, and the picture as the decoder gives it.
+    fn decoded(picture: &Picture) -> (Page, Picture) {
+        let mut decoder = fax::jpeg::Decoder::new(fax::page::WIDTH);
+        decoder.feed(&picture.jpeg);
+        let page = Page { lines: decoder.lines().to_vec(), resolution: Resolution::Fine };
+        (page, decoder.picture().expect("the stream does not decode"))
+    }
+
+    fn close_to(got: Color32, want: [u8; 3]) -> bool {
+        got.r().abs_diff(want[0]) <= 12 && got.g().abs_diff(want[1]) <= 12 && got.b().abs_diff(want[2]) <= 12
+    }
+
+    #[test]
+    fn a_colour_page_is_drawn_in_its_colours_as_it_arrives() {
+        let (page, picture) = decoded(&colour_picture(64));
+        let part = |from: usize, to: usize| {
+            let across = picture.width * 3;
+            Picture {
+                height: to - from,
+                samples: picture.samples[from * across..to * across].to_vec(),
+                jpeg: Vec::new(),
+                ..picture.clone()
+            }
+        };
+        let batch = |from: usize, to: usize| Arriving {
+            page: 7,
+            sheet: 1,
+            resolution: Resolution::Fine,
+            from,
+            lines: page.lines[from..to].to_vec(),
+            tone: Some(part(from, to)),
+        };
+        let mut fax = Fax::new();
+        assert!(fax.arriving(batch(0, 16), 0.0));
+        // Lines that overlap what is there are taken once, as ink's are.
+        assert!(!fax.arriving(batch(8, 48), 0.1));
+        let scan = fax.scan.as_mut().unwrap();
+        scan.set_scale(4);
+        assert_eq!(scan.lines.len(), 48);
+        assert_eq!(scan.picture().map(|p| p.height), Some(48));
+        assert_eq!(scan.rows, 12);
+        // Red on the left, paper in the middle, blue on the right.
+        let width = scan.width();
+        for row in [0, 11] {
+            let at = |tx: usize| scan.pixels[row * width + tx];
+            assert!(close_to(at(20), [200, 60, 50]), "row {row}: {:?}", at(20));
+            assert!(close_to(at(width / 2), [250, 250, 245]), "row {row}: {:?}", at(width / 2));
+            assert!(close_to(at(width - 20), [50, 80, 160]), "row {row}: {:?}", at(width - 20));
+        }
+        assert_eq!(fax.tone_in_view(), Some("JPEG colour"));
+
+        // The page itself, when it comes, is the one already drawn.
+        fax.arriving(batch(48, 64), 0.2);
+        let drawn = fax.scan.as_ref().unwrap().rows;
+        fax.arrived_in_tone(1, page.clone(), Some(Arc::new(picture.clone())));
+        assert_eq!(fax.scan.as_ref().unwrap().rows, drawn);
+        assert_eq!(fax.scan.as_ref().unwrap().page, 7, "the page was drawn again from scratch");
+        assert_eq!(fax.picture_in_view().map(|p| p.jpeg.len()), Some(picture.jpeg.len()));
+
+        // A page of ink after it has no badge, and the colour one is kept.
+        fax.arrived(2, page_of(10));
+        assert_eq!(fax.tone_in_view(), None);
+        fax.look(-1);
+        assert_eq!(fax.tone_in_view(), Some("JPEG colour"));
+        let (_, looked) = fax.looking.as_ref().unwrap();
+        assert!(close_to(looked.pixels[20], [200, 60, 50]), "{:?}", looked.pixels[20]);
+    }
+
+    #[test]
+    fn a_colour_page_saves_in_colour_and_its_pdf_holds_the_stream_that_arrived() {
+        let sent = colour_picture(40);
+        let (page, picture) = decoded(&sent);
+        let mut fax = Fax::new();
+        fax.arrived_in_tone(1, page, Some(Arc::new(picture.clone())));
+
+        let png = scratch("colour.png");
+        fax.save(&png);
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("saved to")), "{:?}", fax.saved);
+        let image = image::open(&png).unwrap().to_rgb8();
+        // A pel to a pixel: 200 pels to 25.4 mm both ways is square.
+        assert_eq!((image.width() as usize, image.height() as usize), (fax::page::WIDTH, 40));
+        let at = |x: u32| image.get_pixel(x, 20).0;
+        assert!(at(100)[0].abs_diff(200) <= 12 && at(100)[2].abs_diff(50) <= 12, "{:?}", at(100));
+        assert!(at(1600)[2].abs_diff(160) <= 12 && at(1600)[0].abs_diff(50) <= 12, "{:?}", at(1600));
+        let _ = std::fs::remove_file(&png);
+
+        let pdf = scratch("colour.pdf");
+        fax.save(&pdf);
+        let bytes = std::fs::read(&pdf).unwrap();
+        let _ = std::fs::remove_file(&pdf);
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"/Filter /DCTDecode") && has(b"/ColorSpace [/Lab"), "not a JPEG in CIELAB");
+        assert!(has(&sent.jpeg), "the stream in the file is not the one that arrived");
+
+        // A greyscale page is a grey picture.
+        let mut grey = Picture {
+            components: 1,
+            samples: sent.samples.iter().step_by(3).copied().collect(),
+            jpeg: Vec::new(),
+            ..sent
+        };
+        grey.jpeg = fax::jpeg::encode(&grey, fax::jpeg::Options::default());
+        let (page, picture) = decoded(&grey);
+        fax.arrived_in_tone(1, page, Some(Arc::new(picture)));
+        assert_eq!(fax.tone_in_view(), Some("JPEG grey"));
+        fax.save(&png);
+        assert_eq!(image::open(&png).unwrap().color(), image::ColorType::L8);
+        let _ = std::fs::remove_file(&png);
+    }
+
+    #[test]
+    fn a_call_keeps_its_colour_pages_and_saves_them_with_its_others() {
+        let (page, picture) = decoded(&colour_picture(24));
+        let mut fax = Fax::new();
+        fax.calls.push(CallRecord::new(false, 0.0, "61399990000"));
+        fax.arrived(1, page_of(30));
+        fax.arrived_in_tone(2, page, Some(Arc::new(picture.clone())));
+        assert_eq!(fax.calls[0].received.len(), 2);
+        assert_eq!(fax.calls[0].pictures.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [2]);
+
+        // Both pages in one PDF: the first in T.6 and the second as JPEG.
+        let pdf = scratch("mixed.pdf");
+        fax.save_all(&pdf);
+        let bytes = std::fs::read(&pdf).unwrap();
+        let _ = std::fs::remove_file(&pdf);
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"/Count 2") && has(b"/Filter /CCITTFaxDecode") && has(b"/Filter /DCTDecode"));
+
+        // Opened from the list of calls, it is drawn in its colours again.
+        fax.open(0, 1);
+        assert_eq!(fax.tone_in_view(), Some("JPEG colour"));
+        let (_, _, scan) = fax.opened.as_ref().unwrap();
+        assert!(close_to(scan.pixels[20], [200, 60, 50]), "{:?}", scan.pixels[20]);
+        fax.open(0, 0);
+        assert_eq!(fax.tone_in_view(), None);
+    }
+
     #[test]
     fn a_call_record_saves_every_page_as_one_pdf_or_a_png_each() {
         let pages = [page_of(20), page_of(30)];
-        let refs: Vec<(usize, &[Vec<bool>], Resolution)> =
-            pages.iter().enumerate().map(|(i, p)| (i + 1, p.lines.as_slice(), p.resolution)).collect();
+        let refs: Vec<Kept<'_>> =
+            pages.iter().enumerate().map(|(i, p)| (i + 1, p.lines.as_slice(), p.resolution, None)).collect();
         let pdf = scratch("record.pdf");
         assert!(save_pages(&refs, &pdf).starts_with("2 pages saved"));
         assert!(std::fs::metadata(&pdf).is_ok());
