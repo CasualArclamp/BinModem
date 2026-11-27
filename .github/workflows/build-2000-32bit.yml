@@ -1,0 +1,183 @@
+name: Release (Windows 2000 32-bit)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x86:
+    name: binmodem-x86.exe and dialsnoop-x86.exe (Win2K)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target i686-pc-windows-msvc
+          rustup default stable
+          rustc --version
+
+      - name: Download YY-Thunks (x86 Win2K)
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod "https://api.github.com/repos/Chuyu-Team/YY-Thunks/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*Objs.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            throw "Could not find YY-Thunks-Objs.zip in latest release."
+          }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "yy-thunks.zip"
+          Expand-Archive -Path "yy-thunks.zip" -DestinationPath "yy-thunks" -Force
+          $obj = Get-ChildItem -Path "yy-thunks" -Recurse -File |
+            Where-Object {
+              $_.FullName -match "[\\/](x86)[\\/]" -and
+              $_.Name -match "^YY_Thunks_for_Win(2K|2000).*\.obj$"
+            } |
+            Select-Object -First 1
+          if (-not $obj) {
+            throw "Windows 2000 YY-Thunks .obj for x86 not found in archive."
+          }
+          "YY_THUNKS_OBJ=$($obj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Using YY-Thunks object: $($obj.FullName)"
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.00"
+        run: cargo build --release -p gui --target i686-pc-windows-msvc
+
+      - name: Audit Windows 2000 Imports
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "Hostx64\\x86" } |
+            Select-Object -First 1
+          if (-not $dumpbin) {
+            throw "dumpbin.exe not found; cannot verify Windows 2000 DLL imports."
+          }
+
+          $blockedDlls = @(
+            "combase.dll",
+            "mmdevapi.dll",
+            "audioses.dll",
+            "shcore.dll",
+            "dwmapi.dll",
+            "dcomp.dll",
+            "dxgi.dll",
+            "d3d11.dll",
+            "bcryptprimitives.dll",
+            "wlanapi.dll",
+            "uxtheme.dll"
+          )
+
+          $blockedFunctions = @(
+            "SHGetKnownFolderPath",
+            "GetSystemTimePreciseAsFileTime",
+            "InitializeConditionVariable",
+            "SleepConditionVariableCS",
+            "WakeAllConditionVariable",
+            "WakeConditionVariable",
+            "AcquireSRWLockExclusive",
+            "AcquireSRWLockShared",
+            "ReleaseSRWLockExclusive",
+            "ReleaseSRWLockShared",
+            "TryAcquireSRWLockExclusive",
+            "TryAcquireSRWLockShared",
+            "InitOnceExecuteOnce",
+            "GetNativeSystemInfo",
+            "GetModuleHandleExW",
+            "GetModuleHandleExA",
+            "IsWow64Process",
+            "DecodePointer",
+            "EncodePointer",
+            "GetProcessId"
+          )
+          $funcPattern = ($blockedFunctions | ForEach-Object { [regex]::Escape($_) }) -join "|"
+
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            Write-Host "=== Imports for $name.exe ==="
+            $imports = & $dumpbin.FullName /imports $exe
+            $imports | Write-Host
+
+            $foundBlockedDlls = $imports |
+              ForEach-Object { if ($_ -match "^\s+([A-Za-z0-9_\-\.]+\.dll)\s*$") { $matches[1].ToLower() } } |
+              Where-Object { $blockedDlls -contains $_ -or $_ -like "api-ms-win-*" } |
+              Sort-Object -Unique
+
+            $foundBlockedFuncs = $imports |
+              Select-String -Pattern $funcPattern |
+              ForEach-Object { $_.Line.Trim() } |
+              Sort-Object -Unique
+
+            if ($foundBlockedDlls) {
+              Write-Host "::error::$name.exe has non-Win2K or API-set DLL imports: $($foundBlockedDlls -join ', ')"
+              exit 1
+            }
+
+            if ($foundBlockedFuncs) {
+              Write-Host "::error::$name.exe has blocked post-Win2K function imports:`n$($foundBlockedFuncs -join "`n")"
+              exit 1
+            }
+          }
+
+      # "Standalone" as a measurement rather than a claim. Static CRT linking
+      # keeps the only imports to Windows itself; if that ever slips, the
+      # binary starts naming vcruntime140.dll / ucrtbase.dll and fails on a
+      # clean machine without Visual C++ redistributables.
+      - name: No C runtime dependency
+        shell: pwsh
+        run: |
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+            $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
+              ForEach-Object { $_.Value.ToLower() } |
+              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+              Sort-Object -Unique
+            if ($runtime) {
+              Write-Host "::error::$name.exe imports a C runtime: $($runtime -join ', ')"
+              exit 1
+            }
+            "{0}.exe: {1:N1} MB, no C runtime dependency" -f $name, ((Get-Item $exe).Length / 1MB)
+          }
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $sums = foreach ($pair in @(
+            @{ src = "binmodem.exe"; dst = "binmodem-x86.exe" },
+            @{ src = "dialsnoop.exe"; dst = "dialsnoop-x86.exe" }
+          )) {
+            Copy-Item "target/i686-pc-windows-msvc/release/$($pair.src)" "dist/$($pair.dst)"
+            (Get-FileHash "dist/$($pair.dst)" -Algorithm SHA256).Hash.ToLower() + "  $($pair.dst)"
+          }
+          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
+          Get-Content dist/SHA256SUMS-x86.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binmodem-windows-x86
+          path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (gh release view "${{ github.ref_name }}" 2>$null) {
+            gh release upload "${{ github.ref_name }}" `
+              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt --clobber
+          } else {
+            gh release create "${{ github.ref_name }}" `
+              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt `
+              --title "${{ github.ref_name }}" `
+              --notes-file .github/release-notes.md
+          }
