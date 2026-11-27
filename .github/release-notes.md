@@ -45,6 +45,14 @@ dialsnoop.exe                 the same reader, as a program of its own
 
 **Not tried:** a gateway, a real robbed bit and a call through the air. The new handshake did not run on a real sound card.
 
+### V.34 on one pair of wires
+
+- V.34 now has an echo canceller. It trains in phase 3 and follows a drift of the echo.
+- The calling modem looks for S in phase 4. The V.8 answerer accepts two zero octets and 67 ms of silence as CJ.
+- `modem-loop --headroom` sets the level of each end on a shared line. 0.25 is correct for V.34.
+- **Not proven:** on one shared virtual cable with an echo 182 ms away, 4 of 7 calls connected at 33 600. The other 3 stopped in phase 2, before the canceller. The window did not run with it.
+- V.90 and V.92 have no echo canceller.
+
 ### TCP over the call
 
 - On a call with a long round trip, data crossed in bursts with a gap of one round trip between them. The sender of the proxy now follows the queue for the modem, and the receiver offers a larger window.
