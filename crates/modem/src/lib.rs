@@ -1615,8 +1615,25 @@ impl Modem {
     pub fn echo_return_loss(&self) -> Option<f64> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => Some(m.echo_return_loss()),
+            Some(Pump::V34(m)) => Some(m.echo_return_loss()),
             _ => None,
         }
+    }
+
+    /// On a V.34 call: how far down the canceller's taps left the recording
+    /// of this end's training segment, in decibels, as they were learned and
+    /// then as they were fitted by least squares.
+    pub fn echo_fit(&self) -> Option<(f64, f64)> {
+        match self.pump.as_ref() {
+            Some(Pump::V34(m)) => m.echo_fit(),
+            _ => None,
+        }
+    }
+
+    /// On a V.34 call: whether the canceller found that its echo moves, and
+    /// changed to the taps that follow it.
+    pub fn echo_following(&self) -> bool {
+        matches!(self.pump.as_ref(), Some(Pump::V34(m)) if m.echo_following())
     }
 
     /// What the canceller is taking out at this instant, rather than what it
@@ -1624,6 +1641,7 @@ impl Modem {
     pub fn echo_return_loss_now(&self) -> Option<f64> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => Some(m.echo_return_loss_now()),
+            Some(Pump::V34(m)) => Some(m.echo_return_loss_now()),
             _ => None,
         }
     }
@@ -1889,6 +1907,7 @@ impl Modem {
     pub fn reflection(&self) -> Option<datapump::v32::startup::Reflection> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.reflection(),
+            Some(Pump::V34(m)) => m.reflection(),
             _ => None,
         }
     }

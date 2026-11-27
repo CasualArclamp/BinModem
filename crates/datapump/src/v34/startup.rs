@@ -3,6 +3,49 @@
 
 use super::phase2::{self, Role};
 use super::training::{self, Settings};
+use dsp::{EchoCanceller, EchoFinder};
+
+pub use dsp::Reflection;
+
+/// How far back the first run of the canceller's taps looks, in
+/// milliseconds: the reflection off a hybrid and a little behind it. The
+/// same as V.32's canceller, which this one is a copy of in everything but
+/// where its training segment is.
+const ECHO_SPAN_MS: f64 = 8.0;
+
+/// How much line the second run of taps covers, in milliseconds.
+const FAR_SPAN_MS: f64 = 4.0;
+
+/// The weakest reflection worth a second run of taps. See V.32's.
+const FAINTEST: f64 = 0.15;
+
+/// The canceller's step while it trains. See V.32's.
+const ECHO_STEP: f64 = 0.25;
+
+/// How much the canceller has to have taken out of what it heard, over its
+/// training, to be kept: a decibel. A canceller trained on a line with no
+/// echo has learned the line's noise and would add it back. See V.32's.
+const NOTHING_CANCELLED_DB: f64 = 1.0;
+
+/// How much of this end's TRN the far end's J can run into, over and above
+/// a round trip, in seconds. See where it is used.
+const STILL_J: f64 = 0.02;
+
+/// How long the two cancellers are compared for at a time, in seconds.
+const DRIFT_LOOK: f64 = 0.5;
+
+/// How much more the taps that stay have to leave of the line than the
+/// taps that follow, as a share of it, for the echo to have moved: an echo
+/// that is back up to 25 dB below the far end.
+const DRIFT_WORSE: f64 = 0.003;
+
+/// The least distance back that a reflection is looked for, in seconds.
+///
+/// The round trip of phase 2 bounds a reflection off a network. A sound
+/// card's cable is not a network: this end's signal comes back after the
+/// card's own buffers, which the round trip to the far end says little
+/// about. So the search goes this far in any case.
+const LEAST_SEARCH: f64 = 0.12;
 
 /// Retrains in a row that phase 2 may ask for before its failure is taken as
 /// the end of the call.
@@ -46,6 +89,43 @@ pub struct Modem {
     /// mode.
     reached_phase4: bool,
     reached_data: bool,
+    /// Both directions of V.34 are in one band. On a two-wire line this
+    /// end's own signal comes back, and the canceller takes it out.
+    echo: EchoCanceller,
+    /// Looks for a reflection that the first run of taps does not reach,
+    /// in the first half of this end's TRN.
+    finder: Option<EchoFinder>,
+    /// Samples of this end's TRN to let go by before the search starts:
+    /// the far end's J can still be arriving. See [`STILL_J`].
+    search_in: usize,
+    searched: usize,
+    search_for: usize,
+    reflection: Option<Reflection>,
+    /// The sample this end sent last.
+    sent: f64,
+    was_training: bool,
+    /// What arrived and what the canceller left, over this end's TRN.
+    heard_in_training: f64,
+    left_in_training: f64,
+    trained_loss: f64,
+    /// What went out and what came back over this end's TRN, for
+    /// [`EchoCanceller::fit`], with enough of what went out before it to lie
+    /// under the furthest tap.
+    recent: std::collections::VecDeque<(f64, f64)>,
+    recorded: Option<(Vec<f64>, Vec<f64>)>,
+    /// Samples of the recording that are from before the TRN.
+    recorded_before: usize,
+    /// How far down the two sets of taps left the recording of the last
+    /// TRN: the taps as they were learned, then as they were fitted.
+    fitted: Option<(f64, f64)>,
+    /// A copy of the canceller that follows drift. See [`Self::watch_drift`].
+    follower: Option<EchoCanceller>,
+    following: bool,
+    /// What each of the two left of the line, over the look now running.
+    left: (f64, f64),
+    left_for: usize,
+    worse_looks: u32,
+    trace: (f64, f64, f64, usize),
 }
 
 impl Modem {
@@ -66,7 +146,249 @@ impl Modem {
             phase2_retrains: 0,
             reached_phase4: false,
             reached_data: false,
+            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, ECHO_STEP),
+            finder: None,
+            search_in: 0,
+            searched: 0,
+            search_for: 0,
+            reflection: None,
+            sent: 0.0,
+            was_training: false,
+            heard_in_training: 0.0,
+            left_in_training: 0.0,
+            trained_loss: 0.0,
+            recent: std::collections::VecDeque::new(),
+            recorded: None,
+            recorded_before: 0,
+            fitted: None,
+            follower: None,
+            following: false,
+            left: (0.0, 0.0),
+            left_for: 0,
+            worse_looks: 0,
+            trace: (0.0, 0.0, 0.0, 0),
         }
+    }
+
+    /// How far down the canceller's taps left the recording of this end's
+    /// last TRN, in decibels: as they were learned, then as they were
+    /// fitted. `None` if there was no fit.
+    pub fn echo_fit(&self) -> Option<(f64, f64)> {
+        self.fitted
+    }
+
+    /// How much of its own echo the canceller had taken out when this end's
+    /// TRN ended, in decibels. That is the last moment the number means
+    /// anything: after it the far end is in what arrives and in what is left.
+    pub fn echo_return_loss(&self) -> f64 {
+        self.trained_loss
+    }
+
+    /// What the canceller is taking out at this instant.
+    pub fn echo_return_loss_now(&self) -> f64 {
+        self.echo.echo_return_loss()
+    }
+
+    /// The reflection the canceller found past its first run of taps.
+    pub fn reflection(&self) -> Option<Reflection> {
+        self.reflection
+    }
+
+    /// Take this end's own echo out of a sample from the line.
+    ///
+    /// The canceller learns only while this end sends the TRN of phase 3,
+    /// when the far end is silent. The first half of that TRN finds where a
+    /// far reflection is, and the second half fits it.
+    fn cancel(&mut self, line: f64) -> f64 {
+        let training = self.training.as_ref().is_some_and(training::Modem::training_echo);
+        if training && !self.was_training {
+            self.begin_search();
+            (self.heard_in_training, self.left_in_training) = (0.0, 0.0);
+            // The recording starts with what is already under the taps,
+            // and what came back with it.
+            self.recorded = Some(self.recent.iter().copied().unzip());
+            self.recorded_before = self.recent.len();
+        }
+        // What went out lately, as far back as a tap can be placed.
+        let keep = self.search_reach() + self.echo.span() + 1;
+        self.recent.push_back((self.sent, line));
+        while self.recent.len() > keep {
+            self.recent.pop_front();
+        }
+        if let (true, Some((sent, heard))) = (training, self.recorded.as_mut()) {
+            sent.push(self.sent);
+            heard.push(line);
+        }
+        self.echo.set_adapting(training);
+        let cleaned = self.echo.process(self.sent, line);
+        if self.search_in > 0 {
+            self.search_in -= 1;
+        } else if let Some(finder) = self.finder.as_mut() {
+            // What the near taps left, and not what arrived: see V.32's.
+            finder.feed(self.sent, cleaned);
+            self.searched += 1;
+            if self.searched >= self.search_for {
+                self.place_far_taps();
+            }
+        }
+        self.watch_drift(line, cleaned);
+        if training && self.finder.is_none() {
+            self.heard_in_training += line * line;
+            self.left_in_training += cleaned * cleaned;
+        }
+        if self.was_training && !training {
+            self.finder = None;
+            self.trained_loss = self.echo.echo_return_loss();
+            let removed = 10.0 * (self.heard_in_training / self.left_in_training.max(1e-30)).log10();
+            let recorded = self.recorded.take();
+            if self.heard_in_training <= 1e-12 || removed <= NOTHING_CANCELLED_DB {
+                // No echo on this line. What the taps learned is noise.
+                self.echo.reset();
+                self.reflection = None;
+                self.fitted = None;
+            } else if let Some((sent, heard)) = recorded {
+                // The whole TRN, solved outright. What came back before
+                // the TRN is not fitted: the far end was not silent then.
+                //
+                // Nor is the start of the TRN. The answer modem stops its J
+                // when it hears the S of the call modem, and that silence
+                // is a round trip and the time to detect S behind the S
+                // itself. S, S-bar and PP are 432 symbols, which a long
+                // round trip uses up; the J then runs into the TRN.
+                let late = self.still_j().min((sent.len() - self.recorded_before) / 2);
+                self.fitted = self.echo.fit(&sent, &heard, self.recorded_before + late);
+                if let Some((learned, fitted)) = self.fitted {
+                    self.trained_loss = self.trained_loss.max(learned.max(fitted));
+                }
+            }
+            if std::env::var_os("V34_ECHO_TRACE").is_some() {
+                eprintln!(
+                    "v34 echo[{:?}]: round trip {:?} s, removed {removed:.1} dB, reflection {:?}, fit {:?}",
+                    self.phase2.role(),
+                    self.phase2.round_trip(),
+                    self.reflection,
+                    self.fitted
+                );
+            }
+            // A sound card's cable does not keep its echo where training
+            // found it. See [`Self::watch_drift`].
+            if self.following {
+                self.echo.follow_drift(true);
+            } else if self.fitted.is_some() {
+                let mut follower = self.echo.clone();
+                follower.follow_drift(true);
+                self.follower = Some(follower);
+                (self.left, self.left_for, self.worse_looks) = ((0.0, 0.0), 0, 0);
+            }
+        }
+        self.was_training = training;
+        if std::env::var_os("V34_ECHO_TRACE").is_some() {
+            self.trace.0 += line * line;
+            self.trace.1 += cleaned * cleaned;
+            self.trace.2 += self.sent * self.sent;
+            self.trace.3 += 1;
+            if self.trace.3 >= (0.1 * self.fs) as usize {
+                let db = |x: f64| 10.0 * x.max(1e-30).log10();
+                eprintln!(
+                    "v34 trace[{:?}] {}: snr {:.1} line {:.1} left {:.1} sent {:.1} dB",
+                    self.phase2.role(),
+                    self.phase(),
+                    self.snr_db().unwrap_or(0.0),
+                    db(self.trace.0 / self.trace.3 as f64),
+                    db(self.trace.1 / self.trace.3 as f64),
+                    db(self.trace.2 / self.trace.3 as f64)
+                );
+                self.trace = (0.0, 0.0, 0.0, 0);
+            }
+        }
+        cleaned
+    }
+
+    fn begin_search(&mut self) {
+        let Some(training) = self.training.as_ref() else {
+            return;
+        };
+        let first = self.echo.span();
+        let last = self.search_reach();
+        if last <= first {
+            return;
+        }
+        let all = (training.training_echo_seconds() * self.fs) as usize;
+        self.finder = Some(EchoFinder::new(first, last));
+        self.search_in = self.still_j().min(all / 4);
+        self.searched = 0;
+        self.search_for = all / 2 - self.search_in;
+    }
+
+    fn place_far_taps(&mut self) {
+        let Some(finder) = self.finder.take() else {
+            return;
+        };
+        let Some(found) = finder.best().filter(|f| f.strength >= FAINTEST) else {
+            return;
+        };
+        let taps = self.far_taps();
+        let offset = found.delay.saturating_sub(taps / 2).max(self.echo.span());
+        self.echo.watch_far_echo(offset, taps);
+        self.reflection = Some(found);
+    }
+
+    /// How many samples of this end's TRN the far end's J can run into.
+    fn still_j(&self) -> usize {
+        ((self.phase2.round_trip().unwrap_or(0.0) + STILL_J) * self.fs) as usize
+    }
+
+    /// Change to the canceller that follows drift, if the echo has moved.
+    ///
+    /// Taps that stay where training put them cancel an echo that stays
+    /// where it was almost exactly: 53 dB of signal to noise in phase 4
+    /// against an echo as loud as the far end, and 33 600 bit/s. Taps that
+    /// follow drift read between samples, and that costs them: 35 to 40 dB
+    /// on the same line, and 24 000 bit/s. But on a sound card's cable with
+    /// two clocks the echo does move, and taps that stay are then useless
+    /// in seconds. So both run. The second is a copy that follows drift,
+    /// and it takes over when it leaves less of the line than the first.
+    ///
+    /// The two hear the same far end, so the difference between what they
+    /// leave is the difference between their echoes and little else.
+    fn watch_drift(&mut self, line: f64, cleaned: f64) {
+        let Some(follower) = self.follower.as_mut() else {
+            return;
+        };
+        let followed = follower.process(self.sent, line);
+        self.left.0 += cleaned * cleaned;
+        self.left.1 += followed * followed;
+        self.left_for += 1;
+        if self.left_for < (DRIFT_LOOK * self.fs) as usize {
+            return;
+        }
+        let worse = self.left.0 > self.left.1 * (1.0 + DRIFT_WORSE);
+        self.worse_looks = if worse { self.worse_looks + 1 } else { 0 };
+        (self.left, self.left_for) = ((0.0, 0.0), 0);
+        if self.worse_looks >= 2
+            && let Some(follower) = self.follower.take()
+        {
+            self.echo = follower;
+            self.following = true;
+            if std::env::var_os("V34_ECHO_TRACE").is_some() {
+                eprintln!("v34 echo[{:?}]: the echo moves; following it", self.phase2.role());
+            }
+        }
+    }
+
+    /// Whether the canceller has changed to the taps that follow drift.
+    pub fn echo_following(&self) -> bool {
+        self.following
+    }
+
+    /// The furthest back a reflection is looked for, in samples.
+    fn search_reach(&self) -> usize {
+        let round_trip = self.phase2.round_trip().unwrap_or(0.0);
+        (round_trip.max(LEAST_SEARCH) * self.fs) as usize + self.far_taps()
+    }
+
+    fn far_taps(&self) -> usize {
+        (FAR_SPAN_MS * self.fs / 1000.0) as usize
     }
 
     /// Full retrains since the call began.
@@ -219,6 +541,14 @@ impl Modem {
 
     /// Carry the start-up one sample further.
     pub fn step(&mut self, line: f64) -> f64 {
+        let cleaned = self.cancel(line);
+        let out = self.step_cleaned(cleaned);
+        self.sent = out;
+        out
+    }
+
+    /// The start-up itself, on a line with this end's echo taken out.
+    fn step_cleaned(&mut self, line: f64) -> f64 {
         if let Some(training) = self.training.as_mut() {
             let out = training.step(line);
             if training.take_retrain() {

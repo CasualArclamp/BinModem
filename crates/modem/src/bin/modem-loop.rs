@@ -45,6 +45,7 @@ fn main() -> ExitCode {
     let mut output: Option<String> = None;
     let mut carrier = "V22B".to_owned();
     let mut seconds = 30.0f64;
+    let mut headroom = HEADROOM;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -54,10 +55,11 @@ fn main() -> ExitCode {
             "--out" => output = Some(value()),
             "--carrier" => carrier = value().to_ascii_uppercase(),
             "--seconds" => seconds = value().parse().unwrap_or(seconds),
+            "--headroom" => headroom = value().parse().unwrap_or(headroom),
             "--help" | "-h" => {
                 println!(
-                    "modem-loop --in <device> --out <device> [--carrier B103|V21|V22B|V32] \
-                     [--seconds <n>]\n\
+                    "modem-loop --in <device> --out <device> [--carrier B103|V21|V22B|V32|V34] \
+                     [--seconds <n>] [--headroom <gain>]\n\
                      \n\
                      Places a call between two modems through the sound card. Point\n\
                      --out at a virtual cable and --in at the same cable's other end.\n\
@@ -71,6 +73,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+
+    // V.34 peaks higher than the others, and two of it at 0.45 pass full
+    // scale: the canceller cannot take out a clipped echo. See
+    // docs/design/v34-echo.md.
+    if carrier == "V34" && !args.iter().any(|a| a == "--headroom") {
+        headroom = 0.25;
     }
 
     let (Some(input), Some(output)) = (input, output) else {
@@ -128,7 +137,7 @@ fn main() -> ExitCode {
             let heard = f64::from(s);
             let a = caller.step(heard);
             let b = host.step(heard);
-            to_line.push(((a + b) as f32) * HEADROOM);
+            to_line.push(((a + b) as f32) * headroom);
         }
         audio.transmit(&to_line);
 

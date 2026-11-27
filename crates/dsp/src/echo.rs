@@ -809,6 +809,103 @@ impl EchoCanceller {
         self.adapting
     }
 
+    /// Fit the taps to a recording of a training segment, by least squares.
+    ///
+    /// `transmitted` and `received` are the samples that
+    /// [`process`](Self::process) was given, in order, over a stretch in
+    /// which the far end was silent. The least mean squares rule comes to
+    /// the same taps in the end, but not in the time a training segment
+    /// lasts. A modem's signal does not fill its band evenly, and the rule
+    /// learns the weak parts of the band many times more slowly than the
+    /// strong ones: V.34's TRN left it 33 dB down after a second. The
+    /// equations it is working towards can be solved outright.
+    ///
+    /// The taps are replaced only if the new ones leave less of the
+    /// recording than the old ones. An echo that drifts while it is recorded
+    /// has no one set of taps, and the rule, which followed it, does better
+    /// there. Returns how far down each set left the recording, in decibels:
+    /// the old taps, then the new. `None`, and nothing done, while following
+    /// drift, or if the recording is too short to settle the taps. The first
+    /// `skip` samples are history only: they lie under the taps, and what
+    /// came back in them is not fitted.
+    pub fn fit(&mut self, transmitted: &[f64], received: &[f64], skip: usize) -> Option<(f64, f64)> {
+        if self.drift.is_some() || transmitted.len() != received.len() {
+            return None;
+        }
+        let lags: Vec<usize> = (self.near.offset..self.near.end()).chain(self.far.iter().flat_map(|far| far.offset..far.end())).collect();
+        let n = lags.len();
+        let reach = *lags.last()?;
+        // The rows start where every lag has a sample under it.
+        let (from, to) = (reach.max(skip), transmitted.len());
+        if to < from + 8 * n {
+            return None;
+        }
+        // The sum over the rows of x[m - a] x[m - b] is the sum of
+        // x[k] x[k - (b - a)] over a stretch that depends on `a` alone. So
+        // one running sum for each difference of lags gives every entry.
+        let mut a = vec![crate::Complex::ZERO; n * n];
+        let mut differences: Vec<usize> = Vec::new();
+        for (j, &lj) in lags.iter().enumerate() {
+            for &li in &lags[j..] {
+                differences.push(li - lj);
+            }
+        }
+        differences.sort_unstable();
+        differences.dedup();
+        let mut running = vec![0.0; to + 1];
+        for &d in &differences {
+            // running[k] is the sum of x[m] x[m - d] for d <= m < k.
+            running[..=d].fill(0.0);
+            for k in d..to {
+                running[k + 1] = running[k] + transmitted[k] * transmitted[k - d];
+            }
+            for (j, &lj) in lags.iter().enumerate() {
+                for (i, &li) in lags.iter().enumerate().skip(j) {
+                    if li - lj == d {
+                        let sum = running[to - lj] - running[from - lj];
+                        a[j * n + i].re = sum;
+                        a[i * n + j].re = sum;
+                    }
+                }
+            }
+        }
+        let mut b = vec![crate::Complex::ZERO; n];
+        for (j, &lj) in lags.iter().enumerate() {
+            b[j].re = (from..to).map(|m| received[m] * transmitted[m - lj]).sum();
+        }
+        // A ridge, for the part of the band the signal does not reach: with
+        // nothing there to fit, the taps are held small and not left free.
+        let ridge = 1e-9 * a[0].re.max(FLOOR);
+        for j in 0..n {
+            a[j * n + j].re += ridge;
+        }
+        let solved = crate::solve_hermitian(&a, &b)?;
+        let left = |taps: &dyn Fn(usize) -> f64| -> f64 {
+            (from..to)
+                .map(|m| {
+                    let echo: f64 = lags.iter().enumerate().map(|(j, &l)| taps(j) * transmitted[m - l]).sum();
+                    (received[m] - echo).powi(2)
+                })
+                .sum()
+        };
+        let heard: f64 = received[from..to].iter().map(|x| x * x).sum();
+        let near = self.near.taps.len();
+        let old = left(&|j| if j < near { self.near.taps[j] } else { self.far.as_ref().map_or(0.0, |far| far.taps[j - near]) });
+        let new = left(&|j| solved[j].re);
+        let down = |left: f64| 10.0 * (heard.max(FLOOR) / left.max(1e-30)).log10();
+        if new < old {
+            for (j, tap) in self.near.taps.iter_mut().enumerate() {
+                *tap = solved[j].re;
+            }
+            if let Some(far) = self.far.as_mut() {
+                for (j, tap) in far.taps.iter_mut().enumerate() {
+                    *tap = solved[near + j].re;
+                }
+            }
+        }
+        Some((down(old), down(new)))
+    }
+
     /// Remove our own echo from one received sample.
     ///
     /// `transmitted` is what went out on the line this instant; `received` is
