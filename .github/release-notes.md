@@ -25,7 +25,8 @@ dialsnoop.exe                 the same reader, as a program of its own
 - **Flags after E:** in a resync, BinModem now sends HDLC flags from its E until the far E. It sent idle ones before, and the machine stopped.
 - **E again:** when the far E comes 50 ms or more after the E of BinModem, BinModem sends E again.
 - **Page speed:** the recipient now asks for a rate 8.5 dB under the signal to noise it trained to. It was 6 dB. A line that trained to 32.7 dB at 3429 Bd now gets 26 400 bit/s.
-- **Result:** with these changes, a call from the machine gave two partial pages with no bad frame, MCF, MCF and DCN in 49 s.
+- **Result:** with these changes, a call from the machine gave two partial pages with no bad frame, MCF, MCF and DCN in 49 s. BinModem was the receiver, in black and white, and the builds were builds of the branches.
+- **Not proven:** BinModem as the V.34 fax sender to a real machine with these changes.
 
 ### A Modem or Fax switch
 
