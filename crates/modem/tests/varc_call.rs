@@ -512,7 +512,8 @@ fn every_mode_runs_on_a_call_in_g711_in_either_law() {
             // rate is 2667, and on the trellis code: more than a V.34
             // carries at its best.
             ("VARCQ", "V.ARC/QAM", 35_000),
-            ("VARCP", "V.ARC/PCM", 12_000),
+            // The codec's own levels, one in each sample: 128 of them.
+            ("VARCP", "V.ARC/PCM", 40_000),
             // A name from when one pair of wires was a choice.
             ("VARCQ2W", "V.ARC/QAM", 35_000),
         ] {
@@ -565,6 +566,71 @@ fn every_mode_runs_on_a_call_in_g711_that_is_recoded() {
         let got = call.send(&sent, 15.0);
         assert!(got == sent, "{what}: {} of {} octets, at {rate} bit/s", got.len(), sent.len());
     }
+}
+
+/// V.ARC/PCM on a call in G.711 sends the codec's own levels, one in each
+/// sample, as V.90 does. The far end learns what each arrives as and
+/// selects the set. It needs the call to be a sample for a sample and no
+/// more: the two ends can be in different laws, and something on the way
+/// can decode every level, move it and code it again.
+#[test]
+fn the_baseband_mode_on_a_call_in_g711_sends_a_level_of_the_codec_in_each_sample() {
+    for (laws, recoded, least) in [
+        ((Law::Mu, Law::Mu), false, 40_000),
+        ((Law::A, Law::Mu), false, 40_000),
+        ((Law::Mu, Law::Mu), true, 30_000),
+    ] {
+        let what = format!("{laws:?}, recoded {recoded}");
+        let mut call = Sip::new((Coding::G711(laws.0), Coding::G711(laws.1)), recoded, "AT+MS=VARCP", "AT+MS=VARCP");
+        assert!(call.connect(60.0), "{what}:
+{}", call.all_notes());
+        assert_eq!(call.caller.standard(), "V.ARC/PCM", "{what}");
+        assert_eq!(call.caller.varc_bauds(), (8000, 8000), "{what}");
+        assert_eq!(call.host.varc_bauds(), (8000, 8000), "{what}");
+        assert!(!call.all_notes().contains("5333 baud"), "{what}:
+{}", call.all_notes());
+        let rate = call.caller.rate().unwrap_or(0);
+        assert!(rate >= least, "{what}: {rate} bit/s");
+        let sent = page(20_000);
+        let got = call.send(&sent, 12.0);
+        assert!(got == sent, "{what}: {} of {} octets, at {rate} bit/s", got.len(), sent.len());
+        // Five seconds with nothing lost and the check octets go.
+        if !recoded {
+            for _ in 0..8 * 8000 {
+                call.tick();
+            }
+            let rate = call.caller.rate().unwrap_or(0);
+            assert!(rate > 50_000, "{what}: {rate} bit/s");
+        }
+    }
+}
+
+/// A call that is too bad for that steps down. A filter on the way makes
+/// each sample depend on the ones before it, so no level arrives as one
+/// level. Both ends find that out, and both carry on as the waveform at
+/// 5333 baud.
+#[test]
+fn the_baseband_mode_steps_down_to_the_waveform_on_a_call_that_is_filtered() {
+    let mut call = Sip::clean(Coding::G711(Law::Mu), "VARCP");
+    let band = || (Dull::new(8_000.0, 3_400.0), Dull::new(8_000.0, 300.0));
+    call.band = Some([band(), band()]);
+    assert!(call.connect(90.0), "{}", call.all_notes());
+    assert_eq!(call.caller.standard(), "V.ARC/PCM");
+    assert_eq!(call.all_notes().matches("does not carry a level of the codec in each sample").count(), 2, "{}", call.all_notes());
+    assert!(call.caller.varc_bauds().0 < 8000, "{:?}", call.caller.varc_bauds());
+    let rate = call.caller.rate().unwrap_or(0);
+    assert!(rate > 2_000, "{rate} bit/s");
+    let sent = page(4000);
+    let got = call.send(&sent, 15.0);
+    assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+}
+
+/// A baud chosen by hand is a waveform: the codec's levels have one baud.
+#[test]
+fn a_baud_chosen_by_hand_is_not_the_codecs_levels() {
+    let mut call = Sip::new((Coding::G711(Law::Mu), Coding::G711(Law::Mu)), false, "AT+MS=VARCP;+VARC=2667", "AT+MS=VARCP");
+    assert!(call.connect(60.0), "{}", call.all_notes());
+    assert!(call.caller.varc_bauds().0 < 8000, "{:?}", call.caller.varc_bauds());
 }
 
 /// A call that is A-law at one end and mu-law at the other, with something

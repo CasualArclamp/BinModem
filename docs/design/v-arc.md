@@ -140,12 +140,15 @@ thus its band is the band of the call:
 | V.ARC/G.711 | 8000 codewords each second | 60 928 bit/s in A-law, 56 832 in mu-law, after the first tables |
 | V.ARC/DMT | carriers 15.6 Hz apart, to 3.4 kHz | 25 700 to 26 100 bit/s |
 | V.ARC/QAM | 3700 baud on a carrier at 2000 Hz, 58 Hz to 3942 Hz, with the trellis code | 37 000 bit/s |
-| V.ARC/PCM | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
+| V.ARC/PCM | 8000 baud, a level of the codec in each sample | 53 312 bit/s, after the first tables |
+| V.ARC/PCM, stepped down | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
 
 - The modulations do not need exact codewords. A call that a gateway
   decodes and codes again carries them at the same rates.
-- With a 300 Hz high-pass filter in the path, V.ARC/PCM connected at
-  9000 bit/s.
+- V.ARC/PCM sends the levels of the codec, one in each sample, as V.90
+  does. See [V.ARC/PCM on a call in G.711](#varcpcm-on-a-call-in-g711).
+- With a 300 Hz high-pass filter in the path, V.ARC/PCM steps down to the
+  waveform and connected at 9000 bit/s.
 - V.ARC/QAM fits its baud to the band that the call passes. See
   [V.ARC/QAM on a narrow line](#varcqam-on-a-narrow-line).
 - `AT+VARC=<baud>,<code>,<bits>` applies on a SIP call also. The baud is
@@ -1173,6 +1176,86 @@ rebuild one lost packet in a block, and on a line that is losing none they
 were a fifth of the line. After forty blocks with nothing missing the
 receiver asks for none (sixteen in mu-law), and for the forty-eight again
 at the first hole or the first frame that fails.
+
+## V.ARC/PCM on a call in G.711
+
+A waveform through G.711 has a signal to noise ratio of approximately
+38 dB. The codec rounds each sample to one of its levels, and that
+rounding is noise. V.ARC/PCM as a waveform runs at 5333 baud, which is not
+the rate of the codec, thus its levels fall between the levels of the
+codec.
+
+V.90 does not have that noise in one direction. The digital modem sends
+the levels of the codec, one in each sample, and the far end learns what
+each level arrives as. On a SIP call both ends are digital, thus V.ARC/PCM
+does this in both directions (`locked.rs`).
+
+**The signal**
+
+- 8000 symbols each second. Each symbol is one codeword of the law of the
+  sender.
+- A superframe is 1000 samples: a sync word of 48 samples, then a block of
+  952 samples. There are eight superframes each second.
+- The sync word is in the signs of its samples. A path can change a level,
+  but it does not change the sign.
+
+**The starting table**
+
+- The starting table has one bit in each sample: the sign.
+- The size of each sample is not data. It goes through all 128 sizes in an
+  order that the two ends know.
+- Thus the receiver learns what each of the 256 codewords of the sender
+  arrives as, while the link carries its first frames.
+- A size comes one sample sooner each time. A path that changes each sixth
+  sample (a robbed bit) then changes each size.
+
+**The set**
+
+1. After eight blocks (1 s) the receiver has each codeword and the levels
+   it arrived as.
+2. It keeps the codewords that arrive apart from all others. A codeword
+   that arrives as silence is not kept, because a lost packet is silence.
+3. If there are more than a power of two, it removes one of the two
+   nearest, again and again.
+4. It sends the set to the far end as its table: 256 bits, one for each
+   codeword. The most is 128 codewords, which is 7 bits in each sample.
+5. A sample that is not a level of the set is known to be incorrect. The
+   Reed-Solomon code corrects two such samples for the cost of one error.
+
+The code starts with 48 check octets in each codeword, which rebuilds one
+lost packet in a block. After 5 s with no incorrect sample the receiver
+asks for no check octets.
+
+**Stepping down**
+
+| The line | What happens | Rate in simulation |
+|---|---|---|
+| Codewords arrive as sent, in mu-law or A-law | 128 levels, 7 bits | 53 312 bit/s |
+| A-law at one end and mu-law at the other | 128 levels, 7 bits | 53 312 bit/s |
+| A gateway changes the law and changes it back | 128 levels, 7 bits | 53 312 bit/s |
+| A digital pad of 6 dB | 128 levels, 7 bits | 53 312 bit/s |
+| A robbed bit in each sixth sample | 64 levels, 6 bits | 45 696 bit/s |
+| Codewords of a set fail | The full code, then one bit less in each sample | |
+| Not a sample for a sample: a filter, a different codec, a wire | The waveform at 5333 baud | 22 500 bit/s or less |
+
+- The receiver asks for less when the codewords of its set fail: first the
+  48 check octets, then one bit less in each sample.
+- A line that is not a sample for a sample has no set of eight levels or
+  more, or has no sync word. Then no table is agreed. After 4 s with
+  nothing heard, or 10 s with no table, both ends start again as the
+  waveform. The log says `the call does not carry a level of the codec in
+  each sample; carrying on at 5333 baud`.
+- The handshake selects this mode when both ends are on G.711 at 8 kHz, in
+  one law or two, and asked for V.ARC/PCM with no baud set. A baud set
+  with `AT+VARC=<baud>` gives the waveform.
+
+On a real PCMU call between two `modem-sip` on one machine: `CONNECT
+41024/VARC` 2.3 s after the handshake, and the lighter code 4 s later. The
+waveform needed 19 s to connect at 22 500 bit/s.
+
+V.ARC/G.711 (`AT+MS=VARC`) is faster on a call that carries each codeword
+as it was sent: it uses all 256 codewords. It has no smaller set, thus a
+call that changes one codeword stops it.
 
 ## Compression
 

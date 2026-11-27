@@ -1001,7 +1001,10 @@ impl ScopeApp {
             "V.ARC - our own, for a sound card wired to another of these, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures. On one pair of wires each end takes its own echo out; the call finds that out for itself",
         ),
         ("VARCQ", "V.ARC/QAM - the same line with one carrier, at a third of the sample rate in baud"),
-        ("VARCP", "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud"),
+        (
+            "VARCP",
+            "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud. On a call in G.711 the levels are the codec's own, one in each sample, as V.90 has them: up to 53 312 bit/s. A call that will not carry that goes back to 5333 baud",
+        ),
         (
             "B212",
             "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",

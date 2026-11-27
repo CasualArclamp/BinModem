@@ -31,6 +31,7 @@ use varc::fit::{Fitted, Unfitted};
 use varc::hello::{Agreed, Caps, FITS, Faster, Half, Hello, Line, NARROW, Slower, Twice, Wanted, Watch};
 use datapump::v90::ucode::{self, Law};
 use varc::exact;
+use varc::locked;
 use varc::octets;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -239,6 +240,11 @@ pub(crate) struct Call {
     g711: Option<Law>,
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
+    /// The baseband mode is sending the codec's own levels, one in each
+    /// sample; and it has tried that on this call and the call would not
+    /// carry it.
+    locked: bool,
+    unlocked: bool,
     /// When the station now running was built, in samples.
     built_at: u64,
     /// Whether the fits the handshake found have been taken up.
@@ -305,6 +311,8 @@ impl Call {
             exact_line: false,
             g711: None,
             inexact: false,
+            locked: false,
+            unlocked: false,
             built_at: 0,
             refitted: false,
             squeeze: 0,
@@ -604,12 +612,19 @@ impl Call {
         !self.looped
     }
 
+    /// Whether the numbers of the call are the data, with no waveform:
+    /// samples, codewords, or the codec's levels a sample at a time.
+    fn numbers(&self) -> bool {
+        matches!(self.mode, VarcMode::Linear | VarcMode::G711) || self.locked
+    }
+
     /// The ends as they would be with nothing to agree: both the same.
     fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool, direct: bool) -> Agreed {
         Agreed {
             wanted,
             two_wire,
             direct,
+            locked: false,
             send_hz: fs_out,
             hear_hz: fs,
             send_times: 1,
@@ -668,6 +683,7 @@ impl Call {
                 let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
                 Box::new(Faster::paced(tx, agreed.send_times * slow, fs / BUILT_FOR / slow as f64))
             }
+            VarcMode::Pcm if self.locked => Box::new(locked::Tx::new(fs, &self.codewords().0)),
             VarcMode::Pcm if slowed == 0 => {
                 let tx = Box::new(Twice::new(Box::new(sc::Tx::new(self.shape().coloured(colour)))));
                 Box::new(Faster::paced(tx, agreed.send_times, fs / BUILT_FOR))
@@ -702,6 +718,10 @@ impl Call {
                 let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
                 Box::new(Slower::paced(rx, agreed.hear_times * slow, fs / BUILT_FOR / slow as f64))
             }
+            VarcMode::Pcm if self.locked => {
+                let (levels, quiet) = self.codewords();
+                Box::new(locked::Rx::new(fs, &levels, quiet))
+            }
             VarcMode::Pcm if slowed == 0 => {
                 let rx = Box::new(Half::new(Box::new(sc::Rx::new(self.shape().coloured(colour)))));
                 Box::new(Slower::paced(rx, agreed.hear_times, fs / BUILT_FOR))
@@ -733,6 +753,8 @@ impl Call {
             return FITS[fit].0 * hz;
         }
         let fastest = match self.mode {
+            // A level in each sample of the call.
+            VarcMode::Pcm if self.locked => return hz,
             VarcMode::Qam => hz / 3.0,
             VarcMode::Pcm => 2.0 * hz / 3.0,
             _ => return 0.0,
@@ -767,6 +789,9 @@ impl Call {
             Wanted::Dmt if agreed.direct && !self.inexact && self.exact_line => VarcMode::Linear,
             Wanted::Dmt => VarcMode::Dmt,
         };
+        // The baseband mode on a call in G.711 sends the codec's own levels,
+        // one in each sample, until that has been tried and failed.
+        self.locked = self.mode == VarcMode::Pcm && agreed.locked && !self.unlocked && self.g711.is_some();
         self.built_at = self.samples;
         // A baud that was asked for, by either end for what it hears, is
         // where that direction starts; and where it stays, since somebody
@@ -796,7 +821,7 @@ impl Call {
             pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
         let mut station = Station::new(fs, pairs);
-        station.level_is_fixed(matches!(self.mode, VarcMode::Linear | VarcMode::G711));
+        station.level_is_fixed(self.numbers());
         station.compress(self.squeeze);
         Ok(station)
     }
@@ -988,7 +1013,7 @@ impl Call {
         }
         if self.turn != Turn::Both {
             self.take_turns(fs, input);
-        } else if self.greets() && !matches!(self.mode, VarcMode::Linear | VarcMode::G711) {
+        } else if self.greets() && !self.numbers() {
             // Not while the numbers of the call are the data: they are not
             // sound, and the modes that use them say for themselves when
             // they do not arrive.
@@ -1094,14 +1119,18 @@ impl Call {
         // time, so both give up on it at about the same time and start
         // again as the modulation, which only wants the line to be clean.
         // What the two ends agreed in the handshake stands.
-        if matches!(self.mode, VarcMode::Linear | VarcMode::G711) && self.first_loaded.is_none() {
+        if (matches!(self.mode, VarcMode::Linear | VarcMode::G711) || self.locked) && self.first_loaded.is_none() {
             let waited = (self.samples - self.built_at) as f64 / fs;
             let heard = station.channels.iter().any(|c| c.rx.health().locked);
             if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
-                self.inexact = true;
-                self.notes.push(if self.mode == VarcMode::G711 {
+                self.notes.push(if self.locked {
+                    self.unlocked = true;
+                    "V.ARC: the call does not carry a level of the codec in each sample; carrying on at 5333 baud".to_owned()
+                } else if self.mode == VarcMode::G711 {
+                    self.inexact = true;
                     "V.ARC: the call does not carry G.711 codewords as they were sent; carrying on as the multicarrier mode".to_owned()
                 } else {
+                    self.inexact = true;
                     "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned()
                 });
                 self.station = None;

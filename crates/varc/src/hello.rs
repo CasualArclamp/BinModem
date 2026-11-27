@@ -312,6 +312,10 @@ pub struct Agreed {
     /// Both ends are on the same kind of SIP call, at one rate, so the
     /// numbers the call carries can be tried as the data.
     pub direct: bool,
+    /// Both ends are on a call in G.711, in either law, and asked for the
+    /// baseband levels with no baud chosen: the levels are the codec's
+    /// own, one in each sample. See [`crate::locked`].
+    pub locked: bool,
     /// Anything asked for that could not be had, for whoever is watching.
     pub notes: Vec<String>,
 }
@@ -321,7 +325,9 @@ pub struct Agreed {
 /// same octet from [`agree`], whichever of them asks.
 fn selection(agreed: &Result<Agreed, String>) -> u8 {
     match agreed {
-        Ok(agreed) => wanted_code(agreed.wanted) | u8::from(agreed.two_wire) << 2 | u8::from(agreed.direct) << 3,
+        Ok(agreed) => {
+            wanted_code(agreed.wanted) | u8::from(agreed.two_wire) << 2 | u8::from(agreed.direct) << 3 | u8::from(agreed.locked) << 4
+        }
         Err(_) => NO_MODE,
     }
 }
@@ -382,6 +388,15 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
             && send_times == 1
             && hear_times == 1
             && send_hz == hear_hz,
+        locked: wanted == Wanted::Pcm
+            && matches!(mine.line, Line::ALaw | Line::MuLaw)
+            && matches!(theirs.line, Line::ALaw | Line::MuLaw)
+            && send_times == 1
+            && hear_times == 1
+            && send_hz == 8000.0
+            && hear_hz == 8000.0
+            && mine.asks_baud == 0
+            && theirs.asks_baud == 0,
         send_hz,
         hear_hz,
         send_times,
@@ -1752,6 +1767,15 @@ mod tests {
         // And not across a change of rate.
         let fast = Caps { line: Line::Samples, ..caps(16_000, 16_000) };
         assert!(!agree(&fast, &on(Line::Samples)).unwrap().direct);
+        // The codec's own levels are for the baseband mode on G.711, in
+        // one law or two, where nobody chose a baud.
+        let levels = |line: Line| Caps { wanted: Wanted::Pcm, ..on(line) };
+        assert!(agree(&levels(Line::MuLaw), &levels(Line::ALaw)).unwrap().locked);
+        assert!(!agree(&levels(Line::MuLaw), &levels(Line::Sound)).unwrap().locked);
+        assert!(!agree(&levels(Line::Samples), &levels(Line::Samples)).unwrap().locked);
+        assert!(!agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap().locked);
+        let chosen = Caps { asks_baud: 4000, ..levels(Line::MuLaw) };
+        assert!(!agree(&chosen, &levels(Line::MuLaw)).unwrap().locked);
     }
 
     #[test]
