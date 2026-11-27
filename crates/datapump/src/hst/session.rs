@@ -261,6 +261,53 @@ impl Session {
         }
     }
 
+    /// The back-channel receiver for the far end's speed: the one with a
+    /// carrier, and the agreed speed's when both or neither have one.
+    fn back_listener(&self) -> &BackRx {
+        let agreed = usize::from(self.back == BackRate::B300);
+        if self.brx[agreed].carrier() {
+            &self.brx[agreed]
+        } else {
+            self.brx.iter().find(|rx| rx.carrier()).unwrap_or(&self.brx[agreed])
+        }
+    }
+
+    /// The last point the receiver this end listens with made, for a
+    /// constellation scope. The forward channel gives its equalised symbol;
+    /// the back channel, which is differential, gives the turn from one
+    /// symbol to the next.
+    pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        match self.holding {
+            Holding::Forward => self.back_listener().turn(),
+            Holding::Back => self.frx.making_symbols().then(|| self.frx.constellation_point()),
+        }
+    }
+
+    /// How many points that receiver decides between.
+    pub fn points(&self) -> usize {
+        match self.holding {
+            Holding::Forward => 8,
+            Holding::Back => self.frx.rate().points(),
+        }
+    }
+
+    /// How far out those points reach, in the units of
+    /// [`Self::constellation_point`].
+    pub fn constellation_peak(&self) -> f64 {
+        match self.holding {
+            Holding::Forward => 1.0,
+            Holding::Back => self.frx.constellation_peak(),
+        }
+    }
+
+    /// Signal to noise of the channel this end listens to, in dB.
+    pub fn snr_db(&self) -> f64 {
+        match self.holding {
+            Holding::Forward => self.back_listener().snr_db(),
+            Holding::Back => self.frx.snr_db(),
+        }
+    }
+
     /// Whether the forward channel is training, or a handover or rate change
     /// is under way: what a Courier blinks its MR lamp for.
     pub fn training(&self) -> bool {
