@@ -310,6 +310,11 @@ pub struct Capabilities {
     pub jbig: bool,
     /// Bit 79: and stripes of any other length, T.85's option.
     pub jbig_optional_l0: bool,
+    /// Bit 68: JPEG coding, T.4 Annex E, which is a greyscale page at least
+    /// (Note 34).
+    pub jpeg: bool,
+    /// Bit 69 beside 68: full colour mode, L*, a* and b* (Note 35).
+    pub full_colour: bool,
     /// How many octets the field ran to.
     pub octets: usize,
 }
@@ -443,6 +448,9 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
         // machine that says otherwise has not said it can read JBIG.
         jbig: jbig_offered(fif),
         jbig_optional_l0: jbig_offered(fif) && extended_bit(fif, 79),
+        jpeg: jpeg_offered(fif),
+        // Note 25: bit 69 is "relevant only if bit 68 is set".
+        full_colour: jpeg_offered(fif) && extended_bit(fif, 69),
         octets: fif.len(),
     }
 }
@@ -451,6 +459,14 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
 /// bit 27.
 fn jbig_offered(fif: &[u8]) -> bool {
     extended_bit(fif, 78) && bit(fif, 27)
+}
+
+/// Whether a DIS offers JPEG: bit 68, in a field that reaches it, beside
+/// bits 15 and 27. Note 25: "bits 15 and 27 in the DIS/DTC frame shall also
+/// be set to '1', if bit 68 ... [is] set", since 200 x 200 pels/25.4 mm is
+/// "basic for colour facsimile" and error correction mode "mandatory" for it.
+fn jpeg_offered(fif: &[u8]) -> bool {
+    extended_bit(fif, 68) && bit(fif, 27) && bit(fif, 15)
 }
 
 impl Capabilities {
@@ -526,6 +542,15 @@ impl Capabilities {
                     (false, false) if self.two_dimensional => "MH and MR".to_owned(),
                     (false, false) => "MH".to_owned(),
                 },
+            ),
+            (
+                "tone",
+                match (self.jpeg, self.full_colour) {
+                    (true, true) => "greyscale and colour, JPEG",
+                    (true, false) => "greyscale, JPEG",
+                    (false, _) => "black and white only",
+                }
+                .to_owned(),
             ),
             (
                 "paper",
@@ -686,8 +711,8 @@ pub struct Command {
     pub fine: bool,
     /// Bits 21 to 23, as the receiver asked for them in its DIS.
     pub scan_line_field: u8,
-    /// Bit 16 for Modified READ, bit 31 for MMR, bit 78 for JBIG, and none of
-    /// them for Modified Huffman.
+    /// Bit 16 for Modified READ, bit 31 for MMR, bit 78 for JBIG, bit 68 for
+    /// JPEG, and none of them for Modified Huffman.
     pub coding: crate::coding::Coding,
     /// Bit 79 beside 78: the JBIG page goes in stripes of other than the 128
     /// lines T.85 calls basic, which the far end said it takes.
@@ -740,8 +765,55 @@ pub fn command(command: Command) -> Vec<u8> {
             set_bit(&mut fif, 78, true);
             set_bit(&mut fif, 79, command.optional_l0);
         }
+        if command.coding == crate::coding::Coding::Jpeg {
+            // Bit 68, "JPEG coding", in the ninth octet. Note 34 wants a
+            // resolution bit beside it, and the only resolution offered or
+            // sent here is 200 x 200 pels/25.4 mm: bit 15.
+            extend_to(&mut fif, 68);
+            set_bit(&mut fif, 68, true);
+            set_bit(&mut fif, 15, true);
+        }
     }
     fif
+}
+
+/// Say in a DIS that this end reads JPEG pages, greyscale and colour: bits 68
+/// and 69 (T.30 Annex E, and T.4 Annex E).
+///
+/// Only in a field that already has bit 27, because Note 25 allows it only
+/// there; bit 15, which the same note wants, every DIS made here has. The
+/// field is extended to its ninth octet to reach them (Note 5). What is
+/// offered is the mandatory column of Table E.1/T.30 and nothing from the
+/// optional one: bits 71, 73, 74 and 75 stay clear, which is eight bits a
+/// component, chrominance subsampled, illuminant D50 and the default gamut
+/// range.
+pub fn say_jpeg(fif: &mut Vec<u8>) {
+    if !bit(fif, 27) {
+        return;
+    }
+    extend_to(fif, 69);
+    set_bit(fif, 68, true);
+    set_bit(fif, 69, true);
+}
+
+/// Say in a DCS for a JPEG page that it has L*, a* and b*: bit 69, "full
+/// colour mode" (Note 35). Without it a JPEG page is the L* component alone.
+pub fn say_full_colour(fif: &mut Vec<u8>) {
+    if extended_bit(fif, 68) {
+        set_bit(fif, 69, true);
+    }
+}
+
+/// Whether a DCS commands a JPEG page: bit 68 in a field that reaches it,
+/// beside bit 27 (Notes 25 and 34).
+pub fn commands_jpeg(fif: &[u8]) -> bool {
+    extended_bit(fif, 68) && bit(fif, 27)
+}
+
+/// Whether a DCS that commands a JPEG page says it is in colour: bit 69
+/// (Note 35).
+pub fn commands_full_colour(fif: &[u8]) -> bool {
+    commands_jpeg(fif) && extended_bit(fif, 69)
 }
 
 /// Say in a DIS that this end does V.8: bit 6, "V.8 capabilities".
