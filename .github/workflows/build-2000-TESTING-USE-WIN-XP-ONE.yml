@@ -1,4 +1,4 @@
-name: Release (Windows 2000 32-bit)
+name: Release (Windows 2000 32-bit {TESTING})
 
 on:
   push:
