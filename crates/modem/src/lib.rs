@@ -1247,6 +1247,11 @@ pub struct Modem {
     /// On unless told otherwise, and used, like error correction, only when
     /// the far end offers it too. Off, a page goes in MMR as it did before.
     pub fax_jbig: bool,
+    /// Whether a fax call offers JPEG, for greyscale and colour pages (T.30
+    /// Annex E), which goes only under error correction mode.
+    ///
+    /// On unless told otherwise. Answering, it is bits 68 and 69 of the DIS.
+    pub fax_colour: bool,
     /// Whether a fax call offers V.34 half-duplex over V.8: ANSam in place of
     /// the called tone when answering, a call menu on hearing ANSam when
     /// dialling (T.30 clause 6), and T.30 Annex F on V.34's half-duplex modem
@@ -1377,6 +1382,7 @@ impl Modem {
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_error_correction: true,
             fax_jbig: true,
+            fax_colour: true,
             fax_v34: true,
             fax_pages: Vec::new(),
             fax_identification: String::new(),
@@ -3656,6 +3662,7 @@ impl Modem {
                 call.offering(&self.fax_offer)
                     .with_error_correction(self.fax_error_correction)
                     .with_jbig(self.fax_jbig)
+                    .with_colour(self.fax_colour)
                     .with_v34(self.fax_v34),
             );
             return;
@@ -3906,6 +3913,17 @@ impl Modem {
             .as_mut()
             .and_then(FaxCall::take_received)
             .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
+    }
+
+    /// A page a fax call received with tone, greyscale or colour, as a
+    /// picture: under the same number as its page from
+    /// [`take_received_page`](Self::take_received_page), and handed over
+    /// once.
+    pub fn take_received_picture(&mut self) -> Option<(usize, fax::picture::Picture)> {
+        self.fax
+            .as_mut()
+            .and_then(FaxCall::take_received_picture)
+            .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received_picture))
     }
 
     /// The T.30 frames either end of a fax call has sent since this was last

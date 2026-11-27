@@ -1981,8 +1981,8 @@ impl ScopeApp {
             // The tab for a page as it starts rather than once it is over.
             self.tab = Tab::Fax;
         }
-        while let Some((sheet, page)) = session.take_fax_received() {
-            self.fax.arrived(sheet, page);
+        while let Some((sheet, page, picture)) = session.take_fax_received() {
+            self.fax.arrived_in_tone(sheet, page, picture);
         }
         if let Some(start) = self.fax_start.take() {
             self.start_fax(start, &session);
@@ -2020,6 +2020,7 @@ impl ScopeApp {
         session.set_fax_offer(&self.fax.ours());
         session.set_fax_error_correction(self.fax.error_correction);
         session.set_fax_jbig(self.fax.jbig);
+        session.set_fax_colour(self.fax.colour);
         session.set_fax_v34(self.fax.v34);
         session.set_fax_pages(self.fax.pages().to_vec());
     }

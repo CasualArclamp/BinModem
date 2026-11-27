@@ -10,6 +10,9 @@ ec = { path = "../ec" }
 [dev-dependencies]
 datapump = { path = "../datapump" }
 line     = { path = "../line" }
+# An encoder and a decoder that are not ours, to check ours against. Tests
+# only: the crate itself depends on nothing outside the workspace.
+image    = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [lints]
 workspace = true

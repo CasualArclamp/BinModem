@@ -30,7 +30,7 @@ trunk.
 | **Commands** | V.250 AT commands and S-registers |
 | **Terminal** | ANSI/CP437 with mouse reports, and telnet (RFC 854) |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600 |
+| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600. Colour and greyscale pages on reception |
 | **Network** | PPP with LCP, PAP, CHAP and IPCP, a dial-in login prompt and a login script |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112) |
 | **SIP** | our own SIP caller (RFC 3261, 3550 and 4566) and a dialler |
@@ -101,7 +101,7 @@ follow it. The session that it carried comes out as text.
 | [docs/usage.md](docs/usage.md) | The AT interface, the live-line setup, ZMODEM, the telnet terminal and every flag |
 | [docs/manual/status.md](docs/manual/status.md) | What works: real calls, V.32bis, V.34, V.90 and the full table of functions |
 | [docs/manual/x2.md](docs/manual/x2.md) | U.S. Robotics x2 as a server, and the test with the Courier firmware |
-| [docs/manual/fax.md](docs/manual/fax.md) | Fax: V.29, V.27 ter, V.17, Super G3 and error correction mode |
+| [docs/manual/fax.md](docs/manual/fax.md) | Fax: V.29, V.27 ter, V.17, Super G3, error correction mode and colour |
 | [docs/manual/network.md](docs/manual/network.md) | PPP, web pages through the proxy, the dial-in server and our own TCP |
 | [docs/manual/window-and-sip.md](docs/manual/window-and-sip.md) | The window and its scopes, the SIP caller and the dialler |
 | [docs/manual/review.md](docs/manual/review.md) | How to read a recording of a call between other parties |

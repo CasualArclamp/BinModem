@@ -682,6 +682,8 @@ pub struct Session {
     fax_error_correction: AtomicBool,
     /// Whether the window allows JBIG.
     fax_jbig: AtomicBool,
+    /// Whether the window allows JPEG, for greyscale and colour pages.
+    fax_colour: AtomicBool,
     /// Whether the window allows V.34 half-duplex: V.8 in front of the call,
     /// and the page on V.34 where the far end has it.
     fax_v34: AtomicBool,
@@ -693,7 +695,7 @@ pub struct Session {
     fax_pages: Mutex<Option<Vec<fax::page::Page>>>,
     /// Pages that arrived, with their numbers in the call, waiting for the
     /// window to take them.
-    fax_received: Mutex<std::collections::VecDeque<(usize, fax::page::Page)>>,
+    fax_received: Mutex<std::collections::VecDeque<Received>>,
     /// The T.30 frames either end has sent, for the window's account of how
     /// the call went.
     fax_exchange: Mutex<Vec<fax::call::Exchanged>>,
@@ -720,7 +722,14 @@ pub struct Arriving {
     /// Where in the page the first of `lines` goes.
     pub from: usize,
     pub lines: Vec<Vec<bool>>,
+    /// The same lines as a picture, if the page has tone: greyscale or
+    /// colour, in the codes it was sent in.
+    pub tone: Option<fax::picture::Picture>,
 }
+
+/// A page that arrived: its number in the call, the page as ink and paper,
+/// and the page as a picture if it came with tone.
+pub type Received = (usize, fax::page::Page, Option<std::sync::Arc<fax::picture::Picture>>);
 
 impl Default for Session {
     fn default() -> Self {
@@ -741,6 +750,7 @@ impl Default for Session {
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
             fax_jbig: AtomicBool::new(true),
+            fax_colour: AtomicBool::new(true),
             fax_v34: AtomicBool::new(true),
             fax_pages: Mutex::default(),
             fax_received: Mutex::default(),
@@ -820,6 +830,15 @@ impl Session {
         self.fax_jbig.store(on, Ordering::Relaxed);
     }
 
+    pub fn fax_colour(&self) -> bool {
+        self.fax_colour.load(Ordering::Relaxed)
+    }
+
+    /// Whether a fax call may use JPEG: answering, bits 68 and 69 of the DIS.
+    pub fn set_fax_colour(&self, on: bool) {
+        self.fax_colour.store(on, Ordering::Relaxed);
+    }
+
     /// Whether a fax call may offer V.34 half-duplex.
     pub fn fax_v34(&self) -> bool {
         self.fax_v34.load(Ordering::Relaxed)
@@ -840,14 +859,14 @@ impl Session {
         self.fax_pages.lock().ok().and_then(|mut v| v.take())
     }
 
-    fn set_fax_received(&self, sheet: usize, page: fax::page::Page) {
+    fn set_fax_received(&self, received: Received) {
         if let Ok(mut v) = self.fax_received.lock() {
-            v.push_back((sheet, page));
+            v.push_back(received);
         }
     }
 
     /// A page that arrived, with its number in the call, once and only once.
-    pub fn take_fax_received(&self) -> Option<(usize, fax::page::Page)> {
+    pub fn take_fax_received(&self) -> Option<Received> {
         self.fax_received.lock().ok().and_then(|mut v| v.pop_front())
     }
 
@@ -876,6 +895,17 @@ impl Session {
             Some(w) if w.page == arriving.page && w.from + w.lines.len() == arriving.from => {
                 w.resolution = arriving.resolution;
                 w.lines.extend(arriving.lines);
+                // The picture carries on as the lines do, or not at all.
+                w.tone = match (w.tone.take(), arriving.tone) {
+                    (Some(mut have), Some(more))
+                        if have.width == more.width && have.components == more.components =>
+                    {
+                        have.samples.extend(more.samples);
+                        have.height += more.height;
+                        Some(have)
+                    }
+                    _ => None,
+                };
             }
             _ => *waiting = Some(arriving),
         }
@@ -1700,6 +1730,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_offer = session.fax_offer();
         modem.fax_error_correction = session.fax_error_correction();
         modem.fax_jbig = session.fax_jbig();
+        modem.fax_colour = session.fax_colour();
         modem.fax_v34 = session.fax_v34();
         if let Some(pages) = session.take_fax_pages() {
             modem.fax_pages = pages;
@@ -1721,12 +1752,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     resolution: call.resolution(),
                     from: fax_lines_handed,
                     lines: lines[fax_lines_handed..].to_vec(),
+                    tone: call.arriving_picture(fax_lines_handed, lines.len()),
                 });
                 fax_lines_handed = lines.len();
             }
         }
         while let Some((sheet, page)) = modem.take_received_page() {
-            session.set_fax_received(sheet, page);
+            // A page with tone leaves its picture at the same moment, under
+            // the same number.
+            let picture = modem
+                .take_received_picture()
+                .filter(|(of, _)| *of == sheet)
+                .map(|(_, picture)| std::sync::Arc::new(picture));
+            session.set_fax_received((sheet, page, picture));
         }
         let exchanged = modem.take_fax_exchange();
         if !exchanged.is_empty()
@@ -3194,6 +3232,7 @@ mod arriving_tests {
             resolution: Resolution::Standard,
             from,
             lines: (from..from + count).map(|y| vec![y % 2 == 0; 4]).collect(),
+            tone: None,
         }
     }
 
