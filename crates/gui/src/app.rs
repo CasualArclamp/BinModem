@@ -326,6 +326,11 @@ const FACE_KEY: egui::Vec2 = egui::vec2(116.0, 36.0);
 
 /// One of the keys under them, which open things rather than do things.
 const SMALL_KEY: egui::Vec2 = egui::vec2(92.0, 24.0);
+/// Each half of the Modem or Fax switch: larger than a face key is tall, so
+/// that what the modem is can be read from across the room.
+const CLASS_KEY: egui::Vec2 = egui::vec2(96.0, 40.0);
+/// The fax class's colour: the amber the scopes already draw fax in.
+const FAX_CLASS: Color32 = Color32::from_rgb(245, 180, 70);
 
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
@@ -1667,7 +1672,16 @@ impl ScopeApp {
         }
         self.sip_call_was_up = call_up;
 
-        // The keys a call is made with.
+        // The keys a call is made with. In fax class (+FCLASS=1) the same
+        // keys make fax calls, so the row says so: an amber edge round it,
+        // and the keys named for what they now do.
+        let fax_class = self.frame.fax_class;
+        let edge = if fax_class { FAX_CLASS } else { Color32::TRANSPARENT };
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(2.0, edge))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(6, 5))
+            .show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui
                 .add(face_key("Dial").selected(self.dial_open))
@@ -1680,22 +1694,47 @@ impl ScopeApp {
             {
                 self.dial_open = !self.dial_open;
             }
-            if ui
-                .add_enabled(on_hook, face_key("Originate"))
-                .on_hover_text(
-                    "ATD - be the calling modem. The softphone places the call; \
-                     this only decides which end of it this is",
-                )
-                .clicked()
-            {
-                session.type_bytes(b"ATD\r");
-            }
-            if ui
-                .add_enabled(on_hook, face_key("Answer"))
-                .on_hover_text("ATA - be the answering modem, and go first")
-                .clicked()
-            {
-                session.type_bytes(b"ATA\r");
+            if fax_class {
+                if ui
+                    .add_enabled(on_hook, face_key("Send fax"))
+                    .on_hover_text(
+                        "ATD in fax class - send the Fax tab's pages to the dialler's \
+                         number. The Modem key on the right makes this Originate again",
+                    )
+                    .clicked()
+                {
+                    self.fax_start = Some(crate::faxwin::Start::Dial(self.dial_number.trim().to_owned()));
+                    self.tab = Tab::Fax;
+                }
+                if ui
+                    .add_enabled(on_hook, face_key("Wait for a fax"))
+                    .on_hover_text(
+                        "ATA in fax class - answer with the 2100 Hz tone and keep whatever \
+                         arrives. The Modem key on the right makes this Answer again",
+                    )
+                    .clicked()
+                {
+                    self.fax_start = Some(crate::faxwin::Start::Answer);
+                    self.tab = Tab::Fax;
+                }
+            } else {
+                if ui
+                    .add_enabled(on_hook, face_key("Originate"))
+                    .on_hover_text(
+                        "ATD - be the calling modem. The softphone places the call; \
+                         this only decides which end of it this is",
+                    )
+                    .clicked()
+                {
+                    session.type_bytes(b"ATD\r");
+                }
+                if ui
+                    .add_enabled(on_hook, face_key("Answer"))
+                    .on_hover_text("ATA - be the answering modem, and go first")
+                    .clicked()
+                {
+                    session.type_bytes(b"ATA\r");
+                }
             }
             // Two steps out of data state, and the key says which one it is
             // on. A modem in data state is not listening for commands at all:
@@ -1717,7 +1756,13 @@ impl ScopeApp {
                 .on_hover_text("ATH - put the line down")
                 .clicked()
             {
-                session.type_bytes(b"ATH\r");
+                if fax_class {
+                    // A fax call does not read the command line: the line
+                    // thread puts it down, as the Fax tab's Stop does.
+                    self.fax_start = Some(crate::faxwin::Start::HangUp);
+                } else {
+                    session.type_bytes(b"ATH\r");
+                }
             }
 
             // Which modulation, and the three things that are on or off: one
@@ -1726,7 +1771,10 @@ impl ScopeApp {
                 .iter()
                 .find(|(carrier, _)| self.carrier == *carrier)
                 .map_or(Self::CARRIERS[self.carrier].0, |(_, label)| label);
-            ui.scope(|ui| {
+            // A fax settles its own modulation, in V.8 and the DIS: the box
+            // has nothing to choose while the modem is one.
+            let mode = if fax_class { "fax" } else { mode };
+            ui.add_enabled_ui(!fax_class, |ui| {
                 ui.spacing_mut().interact_size.y = FACE_KEY.y;
                 egui::ComboBox::from_id_salt("mode")
                     .width(220.0)
@@ -1743,7 +1791,61 @@ impl ScopeApp {
                          correct errors and compress",
                     );
             });
+
+            // What the modem is: a modem or a fax (V.250 6.1.10, +FCLASS).
+            // At the right-hand end of the row, large, and following the
+            // class whoever set it -- these keys, the Fax tab, or the
+            // command typed at the terminal. Not while a call is up: the
+            // class decides what a call is, and that one has been decided.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let fax = egui::Button::new(RichText::new("Fax").size(17.0).strong().color(if fax_class {
+                    Color32::from_rgb(40, 26, 4)
+                } else {
+                    DIM
+                }))
+                .min_size(CLASS_KEY)
+                .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })
+                .fill(if fax_class { FAX_CLASS } else { PLATE });
+                if ui
+                    .add_enabled(on_hook || fax_class, fax)
+                    .on_hover_text(
+                        "AT+FCLASS=1 - the modem is a fax. Send fax and Wait for a fax make \
+                         fax calls, and the Fax tab opens",
+                    )
+                    .clicked()
+                {
+                    if on_hook && !fax_class {
+                        session.type_bytes(b"AT+FCLASS=1\r");
+                    }
+                    self.tab = Tab::Fax;
+                }
+                let modem = egui::Button::new(RichText::new("Modem").size(17.0).strong().color(if fax_class {
+                    DIM
+                } else {
+                    Color32::from_rgb(8, 30, 14)
+                }))
+                .min_size(CLASS_KEY)
+                .corner_radius(egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 })
+                .fill(if fax_class { PLATE } else { GOOD });
+                if ui
+                    .add_enabled(on_hook || !fax_class, modem)
+                    .on_hover_text(
+                        "AT+FCLASS=0 - the modem is a modem. Originate and Answer make data \
+                         calls again",
+                    )
+                    .clicked()
+                {
+                    if on_hook && fax_class {
+                        session.type_bytes(b"AT+FCLASS=0\r");
+                    }
+                    if self.tab == Tab::Fax {
+                        self.tab = Tab::Terminal;
+                    }
+                }
+            });
         });
+            });
 
         // And the ones that open something.
         ui.horizontal_wrapped(|ui| {

@@ -195,3 +195,72 @@ fn v17_goes_only_where_both_ends_offer_it() {
     assert_eq!(got.page.expect("no page arrived").lines, page.lines);
     assert_eq!(got.speeds.first(), Some(&(Modulation::V29, 9600)));
 }
+
+#[test]
+fn a_data_call_follows_a_fax_call() {
+    // The same two modems, with no restart between: a fax call to its end,
+    // then AT+FCLASS=0 at both, then a data call. A modem that a fax left
+    // anywhere but in command state, on hook, could not make the second.
+    let page = a_page(24);
+    let mut caller = Modem::new(FS);
+    caller.fax_pages = vec![page];
+    caller.fax_offer = WITH_V17.to_vec();
+    caller.fax_v34 = false;
+    let mut answerer = Modem::new(FS);
+    answerer.fax_offer = WITH_V17.to_vec();
+    let type_at = |modem: &mut Modem, line: &str| {
+        for b in line.bytes() {
+            modem.feed_dte(b);
+        }
+        modem.feed_dte(b'\r');
+    };
+    for (modem, dial) in [(&mut caller, "ATD1"), (&mut answerer, "ATA")] {
+        type_at(modem, "AT+FCLASS=1");
+        type_at(modem, dial);
+    }
+    let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+    let mut arrived = false;
+    let mut after = 0usize;
+    for _ in 0..(FS * 60.0) as usize {
+        let a = caller.step(to_caller);
+        let b = answerer.step(to_answerer);
+        to_caller = b;
+        to_answerer = a;
+        let _ = caller.take_dte();
+        let _ = answerer.take_dte();
+        arrived |= answerer.take_received_page().is_some();
+        // Two seconds past the end, for each end to put the line down.
+        if caller.state() == modem::State::Command && answerer.state() == modem::State::Command {
+            after += 1;
+            if after > (FS * 2.0) as usize {
+                break;
+            }
+        }
+    }
+    assert!(arrived, "no page arrived");
+    for (name, modem) in [("caller", &caller), ("answerer", &answerer)] {
+        assert_eq!(modem.state(), modem::State::Command, "the {name} did not come back to command state after the fax");
+        assert!(modem.is_fax_class(), "the {name} left fax class by itself");
+    }
+
+    for modem in [&mut caller, &mut answerer] {
+        type_at(modem, "AT+FCLASS=0");
+    }
+    type_at(&mut answerer, "ATA");
+    type_at(&mut caller, "ATD1");
+    let mut said = (String::new(), String::new());
+    for _ in 0..(FS * 40.0) as usize {
+        let a = caller.step(to_caller);
+        let b = answerer.step(to_answerer);
+        to_caller = b;
+        to_answerer = a;
+        said.0.push_str(&String::from_utf8_lossy(&caller.take_dte()));
+        said.1.push_str(&String::from_utf8_lossy(&answerer.take_dte()));
+        if caller.state() == modem::State::Data && answerer.state() == modem::State::Data {
+            break;
+        }
+    }
+    assert!(!caller.is_fax_class() && !answerer.is_fax_class(), "AT+FCLASS=0 did not leave fax class");
+    assert_eq!(caller.state(), modem::State::Data, "the caller made no data call after the fax: {:?}", said.0);
+    assert_eq!(answerer.state(), modem::State::Data, "the answerer made no data call after the fax: {:?}", said.1);
+}

@@ -2087,7 +2087,7 @@ impl Fax {
         if on_hook {
             if self.fax_class {
                 ui.label(
-                    RichText::new("The modem is in fax class. AT+FCLASS=0 makes it a modem again.")
+                    RichText::new("The modem is in fax class. The Modem key at the top right makes it a modem again.")
                         .small()
                         .color(dim),
                 );
