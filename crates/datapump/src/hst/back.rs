@@ -248,6 +248,10 @@ pub struct BackRx {
     countdown: f64,
     previous: (f64, f64),
     last_symbol: Option<(f64, f64)>,
+    /// The last turn between two symbols, at unit radius: one of eight
+    /// points on a circle when the line is clean. This is what a scope
+    /// plots, because the carrier phase itself is free to drift.
+    turn: Option<(f64, f64)>,
     descrambler: Scrambler,
     power: OnePole,
     carrier: bool,
@@ -282,6 +286,7 @@ impl BackRx {
             countdown: sps / 2.0,
             previous: (0.0, 0.0),
             last_symbol: None,
+            turn: None,
             descrambler: Scrambler::new(),
             power: OnePole::new(0.050, rate.baud()),
             carrier: false,
@@ -338,6 +343,8 @@ impl BackRx {
         }
         // z * conj(prev): the turn since the last symbol.
         let d = (z.0 * prev.0 + z.1 * prev.1, z.1 * prev.0 - z.0 * prev.1);
+        let scale = (prev.0.hypot(prev.1) * p.sqrt()).max(1e-12);
+        self.turn = Some((d.0 / scale, d.1 / scale));
         let angle = d.1.atan2(d.0);
         let eighths = (angle / FRAC_PI_4).round();
         let miss = angle - eighths * FRAC_PI_4;
@@ -357,6 +364,12 @@ impl BackRx {
 
     pub fn carrier(&self) -> bool {
         self.carrier
+    }
+
+    /// The last turn from one symbol to the next, scaled so the eight phase
+    /// steps sit on the unit circle. `None` until the carrier is heard.
+    pub fn turn(&self) -> Option<(f64, f64)> {
+        self.turn.filter(|_| self.carrier)
     }
 
     /// Rough signal to noise from the spread of the phase decisions, in dB.

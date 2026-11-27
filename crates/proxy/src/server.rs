@@ -200,6 +200,17 @@ impl Server {
         self.stack.size_for_link(largest_in, largest_out);
     }
 
+    /// Let the line say when data goes, and how large a window to offer
+    /// (see [`tcp::Stack::pace`] and [`tcp::Stack::set_receive_rate`]).
+    ///
+    /// `room` is what the queue for the line will take now, and `hears` the
+    /// bit rate the line delivers to this end. Call it every round, before
+    /// [`Self::tick`].
+    pub fn pace(&mut self, room: usize, hears: u32) {
+        self.stack.set_receive_rate(hears);
+        self.stack.pace(room);
+    }
+
     /// IPCP settles the address after the link is up, which is later than a
     /// stack would like but before anything is open.
     pub fn set_address(&mut self, address: [u8; 4]) -> bool {

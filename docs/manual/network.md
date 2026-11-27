@@ -45,6 +45,39 @@ The TCP is our own, written against RFC 9293. It has:
 - zero-window probing
 - out-of-order reassembly
 - the fast retransmit of RFC 5681
+- the partial acknowledgements of RFC 6582
+- the window scale of RFC 7323
+
+### A long round trip
+
+A call through a network has a round trip of one second or more. An ordinary
+TCP sends a window of data and then waits for the acknowledgements. On such a
+call the line is empty for most of each round trip.
+
+The proxy does not wait:
+
+- The sender follows the queue of the modem, not the acknowledgements. When
+  the queue has room, the next segment goes.
+- The queue holds approximately 0.35 s of line: 0.25 s in the modem and 0.1 s
+  in the link.
+- The receiver offers a window of two round trips of the line and 0.5 s more.
+  It measures the round trip and reads the bit rate from the modem.
+- A new connection starts from the round trip that the last connection
+  measured. Thus a slow line does not send each SYN two times.
+
+A simulated line shows the result (`crates/proxy/tests/pump.rs`). The figures
+are the share of the line that carries data.
+
+| Line | Before | Now |
+| --- | --- | --- |
+| V.90 at 53 333 bit/s, 0.4 s in each direction | 89 % | 99 % |
+| V.90 at 53 333 bit/s, 0.8 s in each direction | 50 % | 99 % |
+| V.ARC at 200 kbit/s, 0.4 s in each direction | 25 % | 99 % |
+| V.ARC at 744 kbit/s, 0.4 s in each direction | 7 % | 99 % |
+
+The far end can be a provider and not a BinModem. Then only the window helps,
+because the sender is not ours. The V.90 line with 0.8 s in each direction
+goes from 50 % to 94 %.
 
 Almost no part of the path belongs to the operating system. The exceptions are
 the socket from the browser to the proxy, and the name lookups. There is no

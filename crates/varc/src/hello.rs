@@ -6,64 +6,91 @@
 //! other has one device both ways; one of them has been told the line is a
 //! single pair of wires and the other has not. Nothing in a wideband signal
 //! can settle that, because until it is settled neither end knows what
-//! signal to listen for. Both simply started, and a pair that did not match
-//! heard nothing, for a minute, and said `NO CARRIER`.
+//! signal to listen for.
 //!
-//! So a call begins with each end saying what it is, slowly, in the middle of
-//! the voice band:
+//! So a call begins with a transaction in the middle of the voice band. Its
+//! shape is that of V.8 bis: a capabilities list, a mode select, and an
+//! acknowledgement.
 //!
-//! - **200 bits a second, two tones a direction.** The caller sends 1000 Hz
-//!   for a one and 1400 Hz for a nought; the answerer 2000 Hz and 2400 Hz.
-//!   All four are multiples of the bit rate, so over one bit each is exactly
-//!   invisible to a detector listening for another: an end on a two-wire
-//!   line hears the far end's tones through its own, with no echo canceller.
-//!   They fit a telephone channel with room to spare, and at this rate the
-//!   sample rate of the card generating or hearing them does not matter.
-//! - **Asynchronous characters**, a start bit, eight bits and a stop bit, so
-//!   there is no clock to recover and no training.
-//! - **One short message, over and over**: what rates this end hears and
-//!   sends at, how many channels, which modulation it was asked for, whether
-//!   it was told the line is two-wire, and whether it has yet heard the far
-//!   end's message. With a check on the end.
+//! - **300 bits a second, differential binary phase shift keying.** The
+//!   caller sends on a 1200 Hz carrier and the answerer on 2400 Hz. A nought
+//!   turns the carrier over and a one leaves it. A root raised cosine with
+//!   an excess bandwidth of a half shapes each symbol, so each direction
+//!   keeps to 450 Hz. An end on a two-wire line hears the far end through
+//!   its own signal with no echo canceller.
+//! - **HDLC frames**, as V.8 bis has them: flags between frames, a nought
+//!   stuffed after five ones, and a 16-bit frame check sequence.
+//! - **Three messages.** The caller sends CL: the rates it hears and sends
+//!   at, its channels, the modulation it was asked for, its wires, its line
+//!   and the fit its band passes. The answerer has both ends' capabilities
+//!   then. It works out the mode ([`agree`]) and sends MS: its own
+//!   capabilities and the mode it selected. The caller checks the selection
+//!   against its own answer and sends ACK. Each end repeats its message
+//!   until the reply arrives.
 //!
-//! When an end has the far end's message, and has seen in it that the far
-//! end has this one's, it sends twice more and stops. Both then work out the
-//! same answer from the same two messages ([`agree`]) and start the
-//! modulation that answer names.
+//! The answerer starts the mode when it has the ACK. The caller starts it
+//! after it has sent the ACK three times.
+
+use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 use crate::link::{Receiver, Sender};
 
-/// Bits a second.
-pub const BAUD: f64 = 200.0;
+/// Symbols a second, and bits a second.
+pub const BAUD: f64 = 300.0;
 
-/// The tones: a one and a nought from the caller, then from the answerer.
-const CALLER: (f64, f64) = (1000.0, 1400.0);
-const ANSWERER: (f64, f64) = (2000.0, 2400.0);
+/// The carriers: the caller's, then the answerer's.
+pub const CALLER_HZ: f64 = 1200.0;
+pub const ANSWERER_HZ: f64 = 2400.0;
 
-/// How loud, as a peak against full scale: -15 dBFS RMS.
+/// How loud: the amplitude of the carrier under a symbol at its middle.
+/// The signal is -15 dBFS RMS.
 const LEVEL: f64 = 0.25;
 
-/// What starts a message.
-const HEAD: [u8; 2] = *b"VA";
+/// The excess bandwidth of the pulse, and how many symbols it lasts each
+/// side of its middle.
+const ROLLOFF: f64 = 0.5;
+const HALF: usize = 5;
 
-/// The message's length on the line: the head, the body and a check.
-const FRAME: usize = HEAD.len() + BODY + 2;
-const BODY: usize = 16;
+/// Points of the pulse that are kept for each symbol.
+const FINE: usize = 64;
 
-/// Bits of idle between one message and the next.
-const GAP: usize = 16;
+/// How far the symbol clock moves for a whole error, in symbols.
+const CLOCK_GAIN: f64 = 0.04;
 
-/// Messages sent after the far end is known to have heard, before stopping.
-const PARTING: u32 = 1;
+/// The revision of the messages, in the high half of the first octet.
+const REVISION: u8 = 1;
 
-/// How long to go on once the far end's message is in hand without seeing
-/// that it has heard this end, in seconds. A far end that heard and went
-/// ahead is silent in these tones from then on.
+/// The message types, in the low half of the first octet. MS, CL, ACK(1)
+/// and NAK(1) have the codes of V.8 bis (Table 5).
+const MS: u8 = 0b0001;
+const CL: u8 = 0b0010;
+const ACK: u8 = 0b0100;
+const NAK: u8 = 0b1000;
+/// Not a V.8 bis message: see [`Watch`].
+const SLOWED: u8 = 0b1110;
+
+/// The selection in an MS when the two ends have no mode in common.
+const NO_MODE: u8 = 0xff;
+
+/// Flags between one message and the next.
+const BETWEEN: usize = 2;
+
+/// Times the caller sends its ACK.
+const ACKS: usize = 3;
+
+/// How long the answerer waits for an ACK after the caller's last message,
+/// in seconds. A caller that sent its ACK and went ahead is silent on its
+/// carrier from then on.
 const PATIENCE: f64 = 4.0;
 
 /// How long an end on a narrow line waits to measure the far end's probe
 /// before it gives up and says its message without, in seconds.
 const UNPROBED: f64 = 6.0;
+
+/// How long the far end's carrier is heard with no probe under it before
+/// the far end is taken to send none, in seconds.
+const BARE: f64 = 0.8;
 
 /// The modulations a call may be asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +131,6 @@ pub struct Caps {
     pub wanted: Wanted,
     /// This end was told the line is one pair of wires.
     pub two_wire: bool,
-    /// This end has the far end's message.
-    pub heard: bool,
     /// The baud this end wants to be sent to at, where somebody has chosen
     /// one for a single-carrier mode; nought for whatever the line bears.
     pub asks_baud: u32,
@@ -117,103 +142,135 @@ pub struct Caps {
     pub fit: u8,
 }
 
+/// The octets of a set of capabilities in a message.
+const CAPS: usize = 12;
+
 impl Caps {
-    fn encode(&self) -> [u8; FRAME] {
-        let mut out = [0u8; FRAME];
-        out[..2].copy_from_slice(&HEAD);
-        out[2] = 1;
+    fn encode(&self) -> [u8; CAPS] {
+        let mut out = [0u8; CAPS];
         let line = match self.line {
             Line::Sound => 0,
             Line::Samples => 1,
             Line::ALaw => 2,
             Line::MuLaw => 3,
         };
-        out[3] = u8::from(self.two_wire) | u8::from(self.heard) << 1 | line << 2 | (self.fit & 15) << 4;
-        out[4] = match self.wanted {
-            Wanted::Dmt => 0,
-            Wanted::Qam => 1,
-            Wanted::Pcm => 2,
-        };
-        out[5] = self.channels;
-        out[6..10].copy_from_slice(&self.hears_hz.to_le_bytes());
-        out[10..14].copy_from_slice(&self.sends_hz.to_le_bytes());
-        out[14..18].copy_from_slice(&self.asks_baud.to_le_bytes());
-        let check = crc16(&out[..FRAME - 2]);
-        out[FRAME - 2..].copy_from_slice(&check.to_le_bytes());
+        out[0] = u8::from(self.two_wire) | line << 2 | (self.fit & 15) << 4;
+        out[1] = wanted_code(self.wanted);
+        out[2] = self.channels;
+        out[3..6].copy_from_slice(&self.hears_hz.to_le_bytes()[..3]);
+        out[6..9].copy_from_slice(&self.sends_hz.to_le_bytes()[..3]);
+        out[9..12].copy_from_slice(&self.asks_baud.to_le_bytes()[..3]);
         out
     }
 
-    fn decode(frame: &[u8]) -> Option<Self> {
-        if frame.len() != FRAME || frame[..2] != HEAD || frame[2] != 1 {
+    fn decode(body: &[u8]) -> Option<Self> {
+        if body.len() != CAPS || body[0] & 2 != 0 {
             return None;
         }
-        if crc16(&frame[..FRAME - 2]) != u16::from_le_bytes([frame[FRAME - 2], frame[FRAME - 1]]) {
-            return None;
-        }
+        let three = |at: usize| u32::from_le_bytes([body[at], body[at + 1], body[at + 2], 0]);
         Some(Self {
-            two_wire: frame[3] & 1 != 0,
-            heard: frame[3] & 2 != 0,
-            wanted: match frame[4] {
-                0 => Wanted::Dmt,
-                1 => Wanted::Qam,
-                2 => Wanted::Pcm,
-                _ => return None,
-            },
-            channels: frame[5],
-            hears_hz: u32::from_le_bytes(frame[6..10].try_into().ok()?),
-            sends_hz: u32::from_le_bytes(frame[10..14].try_into().ok()?),
-            asks_baud: u32::from_le_bytes(frame[14..18].try_into().ok()?),
-            line: match frame[3] >> 2 & 3 {
+            two_wire: body[0] & 1 != 0,
+            line: match body[0] >> 2 & 3 {
                 1 => Line::Samples,
                 2 => Line::ALaw,
                 3 => Line::MuLaw,
                 _ => Line::Sound,
             },
-            fit: frame[3] >> 4,
+            fit: body[0] >> 4,
+            wanted: match body[1] {
+                0 => Wanted::Dmt,
+                1 => Wanted::Qam,
+                2 => Wanted::Pcm,
+                _ => return None,
+            },
+            channels: body[2],
+            hears_hz: three(3),
+            sends_hz: three(6),
+            asks_baud: three(9),
         })
     }
 }
 
-/// What an end says later in a call, in the same tones, when it cannot
-/// hear the far end's modulation: how many times slowed it is now listening
-/// for, as a power of two.
-///
-/// The handshake's tones get through lines the modulation does not, which is
-/// the whole reason they are what they are. A line that carries one way and
-/// not the other leaves one end loaded and waiting and the other hearing
-/// nothing it can use, and until this there was nothing either could do
-/// about it. The end that hears nothing cannot tell the far end so in the
-/// modulation, since it does not know that its own is heard; it can in
-/// these.
-const NOTICE_HEAD: [u8; 2] = *b"VN";
-const NOTICE: usize = NOTICE_HEAD.len() + 2 + 2;
-
-fn notice(slowed: u8) -> [u8; NOTICE] {
-    let mut out = [0u8; NOTICE];
-    out[..2].copy_from_slice(&NOTICE_HEAD);
-    out[2] = 1;
-    out[3] = slowed;
-    let check = crc16(&out[..NOTICE - 2]);
-    out[NOTICE - 2..].copy_from_slice(&check.to_le_bytes());
-    out
-}
-
-fn read_notice(frame: &[u8]) -> Option<u8> {
-    if frame.len() != NOTICE || frame[..2] != NOTICE_HEAD || frame[2] != 1 {
-        return None;
+fn wanted_code(wanted: Wanted) -> u8 {
+    match wanted {
+        Wanted::Dmt => 0,
+        Wanted::Qam => 1,
+        Wanted::Pcm => 2,
     }
-    (crc16(&frame[..NOTICE - 2]) == u16::from_le_bytes([frame[NOTICE - 2], frame[NOTICE - 1]])).then_some(frame[3])
 }
 
-/// What an ear made of the characters it has read.
+/// A message of the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Heard {
-    Caps(Caps),
-    /// The far end is listening for the modulation slowed by two to this.
+enum Message {
+    /// The caller's capabilities.
+    Cl(Caps),
+    /// The answerer's capabilities, and the mode it selected: see
+    /// [`selection`].
+    Ms(Caps, u8),
+    Ack,
+    Nak,
+    /// Later in a call: the far end listens for the modulation slowed by
+    /// two to this power. See [`Watch`].
     Slowed(u8),
 }
 
-/// CRC-16/CCITT, as X.25 has it.
+impl Message {
+    /// The octets of the message, with no frame check sequence.
+    fn encode(&self) -> Vec<u8> {
+        let first = |kind: u8| kind | REVISION << 4;
+        match self {
+            Self::Cl(caps) => [&[first(CL)][..], &caps.encode()].concat(),
+            Self::Ms(caps, selected) => [&[first(MS)][..], &caps.encode(), &[*selected]].concat(),
+            Self::Ack => vec![first(ACK)],
+            Self::Nak => vec![first(NAK)],
+            Self::Slowed(by) => vec![first(SLOWED), *by],
+        }
+    }
+
+    fn decode(octets: &[u8]) -> Option<Self> {
+        let (&first, body) = octets.split_first()?;
+        if first >> 4 != REVISION {
+            return None;
+        }
+        match (first & 15, body.len()) {
+            (CL, CAPS) => Caps::decode(body).map(Self::Cl),
+            (MS, len) if len == CAPS + 1 => Caps::decode(&body[..CAPS]).map(|caps| Self::Ms(caps, body[CAPS])),
+            (ACK, 0) => Some(Self::Ack),
+            (NAK, 0) => Some(Self::Nak),
+            (SLOWED, 1) => Some(Self::Slowed(body[0])),
+            _ => None,
+        }
+    }
+
+    /// The bits of the message as a frame: a flag, the octets and their
+    /// frame check sequence with a nought after each five ones, and a flag.
+    fn frame(&self) -> Vec<bool> {
+        let mut octets = self.encode();
+        octets.extend(crc16(&octets).to_le_bytes());
+        let mut bits = flags(1);
+        let mut ones = 0;
+        for octet in octets {
+            for i in 0..8 {
+                let bit = octet >> i & 1 != 0;
+                bits.push(bit);
+                ones = if bit { ones + 1 } else { 0 };
+                if ones == 5 {
+                    bits.push(false);
+                    ones = 0;
+                }
+            }
+        }
+        bits.extend(flags(1));
+        bits
+    }
+}
+
+/// The bits of `count` flags.
+fn flags(count: usize) -> Vec<bool> {
+    (0..8 * count).map(|i| !matches!(i % 8, 0 | 7)).collect()
+}
+
+/// CRC-16/CCITT, as X.25 and V.8 bis have it.
 fn crc16(octets: &[u8]) -> u16 {
     let mut crc = 0xffffu16;
     for &octet in octets {
@@ -226,7 +283,7 @@ fn crc16(octets: &[u8]) -> u16 {
 }
 
 /// What the two ends will do, worked out the same at both from the same
-/// two messages.
+/// two sets of capabilities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Agreed {
     pub wanted: Wanted,
@@ -255,8 +312,24 @@ pub struct Agreed {
     /// Both ends are on the same kind of SIP call, at one rate, so the
     /// numbers the call carries can be tried as the data.
     pub direct: bool,
+    /// Both ends are on a call in G.711, in either law, and asked for the
+    /// baseband levels with no baud chosen: the levels are the codec's
+    /// own, one in each sample. See [`crate::locked`].
+    pub locked: bool,
     /// Anything asked for that could not be had, for whoever is watching.
     pub notes: Vec<String>,
+}
+
+/// The mode an MS selects, in one octet: the modulation, the wires, and
+/// whether the numbers of the call are tried as the data. Both ends get the
+/// same octet from [`agree`], whichever of them asks.
+fn selection(agreed: &Result<Agreed, String>) -> u8 {
+    match agreed {
+        Ok(agreed) => {
+            wanted_code(agreed.wanted) | u8::from(agreed.two_wire) << 2 | u8::from(agreed.direct) << 3 | u8::from(agreed.locked) << 4
+        }
+        Err(_) => NO_MODE,
+    }
 }
 
 /// Work out what a call between `mine` and `theirs` will be.
@@ -279,19 +352,20 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         ));
     }
 
-    // Two-wire if either end was told so, and only if both can cancel an
-    // echo, which wants one sound card: hearing and sending at one rate.
-    let asked = mine.two_wire || theirs.two_wire;
+    // Every call on a sound card looks for an echo: each end has the line
+    // to itself for a moment, and an end that hears itself keeps a
+    // canceller. Nobody has to say what the line is. It was a choice, and a
+    // line with a wire each way that was told it was one pair lost half its
+    // rate to a canceller with nothing to cancel; now that end drops it.
+    // The bit in the message that asked for this is not looked at.
+    //
+    // Only if both ends can cancel an echo, which wants one sound card:
+    // hearing and sending at one rate.
     let able = mine.hears_hz == mine.sends_hz && theirs.hears_hz == theirs.sends_hz;
     // A call made of packets has a path each way and no echo to cancel.
     let packets = mine.line != Line::Sound && theirs.line != Line::Sound;
-    if asked && packets {
-        notes.push("two-wire was asked for, and a SIP call has a path each way: running as a wire each way".to_owned());
-    } else if asked && !able {
-        notes.push(
-            "two-wire was asked for, and an end hears and sends on different sound cards, which cannot cancel an echo: running as a wire each way"
-                .to_owned(),
-        );
+    if !packets && !able {
+        notes.push("an end hears and sends on different sound cards, which cannot cancel an echo: no echo is looked for".to_owned());
     }
 
     let wanted = if mine.wanted != theirs.wanted {
@@ -308,12 +382,21 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         wanted,
         send_fit: fit(theirs.fit),
         hear_fit: fit(mine.fit),
-        two_wire: asked && able && !packets,
+        two_wire: able && !packets,
         direct: mine.line != Line::Sound
             && mine.line == theirs.line
             && send_times == 1
             && hear_times == 1
             && send_hz == hear_hz,
+        locked: wanted == Wanted::Pcm
+            && matches!(mine.line, Line::ALaw | Line::MuLaw)
+            && matches!(theirs.line, Line::ALaw | Line::MuLaw)
+            && send_times == 1
+            && hear_times == 1
+            && send_hz == 8000.0
+            && hear_hz == 8000.0
+            && mine.asks_baud == 0
+            && theirs.asks_baud == 0,
         send_hz,
         hear_hz,
         send_times,
@@ -346,12 +429,13 @@ pub const FITS: [(f64, f64, f64); 3] = [(0.4625, 0.25, 0.05), (3.0 / 7.0, 0.25, 
 
 /// The probe's tones, as shares of the sample rate: two in the middle of
 /// the band, which any line passes and the rest are measured against; two
-/// at the bottom; three at the top. At 8 kHz: 600 and 2800 Hz, 100 and
+/// at the bottom; three at the top. At 8 kHz: 1800 and 3000 Hz, 100 and
 /// 200 Hz, 3600, 3800 and 3900 Hz.
 ///
-/// The two in the middle are each two bit rates from the nearest of the
-/// handshake's own tones, which is where the handshake's ear hears nothing.
-const PROBE: [f64; 7] = [0.075, 0.35, 0.0125, 0.025, 0.45, 0.475, 0.4875];
+/// The two in the middle are clear of the handshake's two carriers, at
+/// 8 kHz and at 16 kHz: each is 375 Hz or more from the edge of a carrier's
+/// band.
+const PROBE: [f64; 7] = [0.225, 0.375, 0.0125, 0.025, 0.45, 0.475, 0.4875];
 
 /// The level of each of the probe's tones.
 const PROBE_LEVEL: f64 = 0.04;
@@ -362,7 +446,7 @@ const PASSES: f64 = 0.25;
 
 /// The probe's ear: how loud each of the far end's probe tones arrives.
 ///
-/// The handshake's tones cross any line. What a single carrier needs to
+/// The handshake's carriers cross any line. What a single carrier needs to
 /// know is how much more of the band the line passes than those do, and
 /// nothing in the handshake says. So each end sends, under its handshake, a
 /// few faint steady tones at the edges of the band, and each end measures
@@ -448,229 +532,373 @@ impl Probe {
     }
 }
 
-/// One tone pair's detector on one channel: is the bit now arriving a one
-/// or a nought, and the characters that makes.
+/// The pulse of one symbol: a root raised cosine, `x` symbols from its
+/// middle. The last two symbols each side are tapered to nothing.
+fn pulse(x: f64) -> f64 {
+    static TABLE: OnceLock<Vec<f64>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let (a, pi) = (ROLLOFF, std::f64::consts::PI);
+        let half = HALF as f64;
+        (0..=2 * HALF * FINE)
+            .map(|i| {
+                let t = i as f64 / FINE as f64 - half;
+                let rrc = if t.abs() < 1e-9 {
+                    1.0 - a + 4.0 * a / pi
+                } else if (t.abs() - 1.0 / (4.0 * a)).abs() < 1e-9 {
+                    a / 2f64.sqrt() * ((1.0 + 2.0 / pi) * (pi / (4.0 * a)).sin() + (1.0 - 2.0 / pi) * (pi / (4.0 * a)).cos())
+                } else {
+                    ((pi * t * (1.0 - a)).sin() + 4.0 * a * t * (pi * t * (1.0 + a)).cos()) / (pi * t * (1.0 - (4.0 * a * t).powi(2)))
+                };
+                let taper = if t.abs() <= half - 2.0 { 1.0 } else { 0.5 + 0.5 * (pi * (t.abs() - (half - 2.0)) / 2.0).cos() };
+                rrc * taper
+            })
+            .collect()
+    });
+    let at = (x + HALF as f64) * FINE as f64;
+    if at < 0.0 || at >= (table.len() - 1) as f64 {
+        return 0.0;
+    }
+    let (whole, part) = (at as usize, at.fract());
+    table[whole] + (table[whole + 1] - table[whole]) * part
+}
+
+/// One end's voice in the handshake: bits to a shaped carrier.
+struct Voice {
+    /// The carrier: how far round it is, and how far it goes a sample.
+    turn: f64,
+    step: f64,
+    /// Symbols a sample, and how far into the symbol this sample is.
+    pace: f64,
+    into: f64,
+    /// The last symbols, the newest first: one, minus one, or nought for
+    /// silence. And how many of them are not silence.
+    past: VecDeque<f64>,
+    live: usize,
+    /// Which way up the carrier is.
+    sign: f64,
+    /// The bits still to send.
+    bits: VecDeque<bool>,
+}
+
+impl Voice {
+    fn new(fs: f64, carrier: f64) -> Self {
+        Self {
+            turn: 0.0,
+            step: std::f64::consts::TAU * carrier / fs,
+            pace: BAUD / fs,
+            into: 1.0,
+            past: VecDeque::from(vec![0.0; 2 * HALF]),
+            live: 0,
+            sign: 1.0,
+            bits: VecDeque::new(),
+        }
+    }
+
+    /// Whether there are no bits left and the last symbol has died away.
+    fn silent(&self) -> bool {
+        self.bits.is_empty() && self.live == 0
+    }
+
+    /// The next sample.
+    fn say(&mut self) -> f64 {
+        if self.silent() {
+            return 0.0;
+        }
+        self.into += self.pace;
+        if self.into >= 1.0 {
+            self.into -= 1.0;
+            // A nought turns the carrier over. A one leaves it.
+            let symbol = match self.bits.pop_front() {
+                Some(bit) => {
+                    if !bit {
+                        self.sign = -self.sign;
+                    }
+                    self.sign
+                }
+                None => 0.0,
+            };
+            if self.past.pop_back().is_some_and(|old| old != 0.0) {
+                self.live -= 1;
+            }
+            self.past.push_front(symbol);
+            if symbol != 0.0 {
+                self.live += 1;
+            }
+        }
+        let mut level = 0.0;
+        for (k, symbol) in self.past.iter().enumerate() {
+            if *symbol != 0.0 {
+                level += symbol * pulse(self.into + k as f64 - HALF as f64);
+            }
+        }
+        self.turn = (self.turn + self.step) % std::f64::consts::TAU;
+        LEVEL * level * self.turn.sin()
+    }
+}
+
+/// One carrier's receiver on one channel: the bits that arrive, and the
+/// messages they make.
 ///
-/// Each tone is measured over the last bit through a raised-cosine window,
-/// not a square one. Over a square window the four tones are invisible to
-/// each other only while each holds still, and an end on one pair of wires
-/// hears its own tones, far louder than the far end's, changing every bit:
-/// each change splashed across the far end's tones and drowned them. The
-/// raised cosine falls away fast enough that it does not.
-///
-/// A raised-cosine window is the square window's answer at the tone, less a
-/// quarter of its answers one bit rate either side, each turned to where the
-/// window began. So five running sums serve both tones: they are 400 Hz
-/// apart, which is two bit rates.
+/// The line is turned down by the carrier and brought to about 10 kHz. Then
+/// the pulse's own filter is worked out three times a symbol: on the
+/// symbol, and a quarter of a symbol before and after. The two at the sides
+/// keep the clock: the energy is greatest on the symbol. A symbol against
+/// the one before it is the bit.
 struct Ear {
-    /// The line times each of five tones 200 Hz apart, over the last bit,
-    /// and the running sums: real and imaginary for each.
-    products: Vec<[f64; 10]>,
-    sums: [f64; 10],
-    at: usize,
-    /// How far round each of the five is, and how far each goes a sample.
-    turn: [f64; 5],
-    step: [f64; 5],
-    /// How far round one bit rate is, counted from where the window began.
-    began: f64,
-    began_step: f64,
-    /// The character being read: samples until the next look, bits so far.
-    was_one: bool,
-    wait: f64,
-    bit: i8,
-    octet: u8,
-    per_bit: f64,
-    /// The last characters read, for finding a message in.
-    read: Vec<u8>,
-    /// Which tone is arriving, between minus one and one.
+    /// The carrier, as a point that goes round: where it is and how far it
+    /// goes a sample.
+    carrier: (f64, f64),
+    step: (f64, f64),
+    turned: u32,
+    /// Samples of the line to one kept, and the sum of those so far.
+    every: usize,
+    sum: (f64, f64),
+    summed: usize,
+    /// The kept samples, how many there have been, and how many there are
+    /// to a symbol.
+    kept: Vec<(f64, f64)>,
+    count: u64,
+    per_symbol: f64,
+    /// The place of the next symbol's middle among the kept samples.
+    next: f64,
+    /// The last symbol.
+    last: (f64, f64),
+    /// The frame being read: ones in a row, and the bits so far.
+    ones: u8,
+    frame: Vec<bool>,
+    /// Flags in a row with nothing wrong between them.
+    flags: u32,
+    /// The last bit as it arrived, between minus one and one.
     eye: f64,
 }
 
 impl Ear {
-    fn new(fs: f64, tones: (f64, f64)) -> Self {
-        let per_bit = fs / BAUD;
-        let len = per_bit.round() as usize;
-        let tau = std::f64::consts::TAU;
-        let mut step = [0.0; 5];
-        for (i, step) in step.iter_mut().enumerate() {
-            *step = tau * (tones.0 - BAUD + BAUD * i as f64) / fs;
-        }
-        debug_assert!((tones.1 - tones.0 - 2.0 * BAUD).abs() < 1e-9);
+    fn new(fs: f64, carrier: f64) -> Self {
+        let every = ((fs / 9600.0) as usize).max(1);
+        let per_symbol = fs / every as f64 / BAUD;
+        let angle = std::f64::consts::TAU * carrier / fs;
+        let reach = HALF as f64 * per_symbol;
         Self {
-            products: vec![[0.0; 10]; len],
-            sums: [0.0; 10],
-            at: 0,
-            turn: [0.0; 5],
-            step,
-            // The window that ends on the first sample began a bit before.
-            began: (-(tau * BAUD / fs) * (len as f64 - 1.0)).rem_euclid(tau),
-            began_step: tau * BAUD / fs,
-            was_one: true,
-            wait: 0.0,
-            bit: -1,
-            octet: 0,
-            per_bit,
-            read: Vec::with_capacity(2 * FRAME),
+            carrier: (1.0, 0.0),
+            step: (angle.cos(), angle.sin()),
+            turned: 0,
+            every,
+            sum: (0.0, 0.0),
+            summed: 0,
+            kept: vec![(0.0, 0.0); (2.0 * reach + per_symbol / 2.0).ceil() as usize + 8],
+            count: 0,
+            per_symbol,
+            next: reach + per_symbol,
+            last: (0.0, 0.0),
+            ones: 0,
+            frame: Vec::new(),
+            flags: 0,
             eye: 0.0,
         }
     }
 
-    /// The raised-cosine answer at the middle one of three neighbouring
-    /// sums, as a power.
-    fn through(&self, middle: usize) -> f64 {
-        let at = |i: usize| (self.sums[2 * i], self.sums[2 * i + 1]);
-        let (cos, sin) = (self.began.cos(), self.began.sin());
-        let (below, here, above) = (at(middle - 1), at(middle), at(middle + 1));
-        // The one below turned back by where the window began, the one
-        // above turned on by it.
-        let re = 0.5 * here.0 - 0.25 * (below.0 * cos + below.1 * sin) - 0.25 * (above.0 * cos - above.1 * sin);
-        let im = 0.5 * here.1 - 0.25 * (below.1 * cos - below.0 * sin) - 0.25 * (above.1 * cos + above.0 * sin);
-        re * re + im * im
+    /// The pulse's filter with its middle at `at` among the kept samples.
+    fn through(&self, at: f64) -> (f64, f64) {
+        let reach = HALF as f64 * self.per_symbol;
+        let (from, to) = ((at - reach).ceil().max(0.0) as u64, (at + reach).floor() as u64);
+        let mut out = (0.0, 0.0);
+        for place in from..=to.min(self.count.saturating_sub(1)) {
+            let weight = pulse((place as f64 - at) / self.per_symbol);
+            let sample = self.kept[(place % self.kept.len() as u64) as usize];
+            out.0 += weight * sample.0;
+            out.1 += weight * sample.1;
+        }
+        out
     }
 
     /// A sample; a message, if this sample finished one.
-    fn hear(&mut self, x: f64) -> Option<Heard> {
-        let mut now = [0.0; 10];
-        for i in 0..5 {
-            now[2 * i] = x * self.turn[i].cos();
-            now[2 * i + 1] = -x * self.turn[i].sin();
-            self.turn[i] = (self.turn[i] + self.step[i]) % std::f64::consts::TAU;
+    fn hear(&mut self, x: f64) -> Option<Message> {
+        self.sum.0 += x * self.carrier.0;
+        self.sum.1 -= x * self.carrier.1;
+        self.carrier = (
+            self.carrier.0 * self.step.0 - self.carrier.1 * self.step.1,
+            self.carrier.1 * self.step.0 + self.carrier.0 * self.step.1,
+        );
+        self.turned += 1;
+        if self.turned == 4096 {
+            // Keep the point on the circle.
+            self.turned = 0;
+            let size = self.carrier.0.hypot(self.carrier.1);
+            self.carrier = (self.carrier.0 / size, self.carrier.1 / size);
         }
-        let old = std::mem::replace(&mut self.products[self.at], now);
-        self.at = (self.at + 1) % self.products.len();
-        for i in 0..10 {
-            self.sums[i] += now[i] - old[i];
+        self.summed += 1;
+        if self.summed < self.every {
+            return None;
         }
-        let (one, nought) = (self.through(1), self.through(3));
-        // Which tone, and by how much: one for all of it on the tone for a
-        // one, minus one for all of it on the other. What an eye is drawn
-        // from.
-        self.eye = (one - nought) / (one + nought + 1e-30);
-        self.began = (self.began + self.began_step) % std::f64::consts::TAU;
-        let is_one = one >= nought;
+        let len = self.kept.len() as u64;
+        self.kept[(self.count % len) as usize] = self.sum;
+        self.count += 1;
+        self.sum = (0.0, 0.0);
+        self.summed = 0;
 
-        // The sums cover the bit just gone, so a change seen now happened
-        // half a bit ago and the middle of the new bit is half a bit on.
+        let reach = HALF as f64 * self.per_symbol;
+        let quarter = self.per_symbol / 4.0;
         let mut found = None;
-        if self.bit < 0 {
-            if self.was_one && !is_one {
-                self.bit = 0;
-                self.wait = self.per_bit / 2.0;
-            }
-        } else {
-            self.wait -= 1.0;
-            if self.wait <= 0.0 {
-                self.wait += self.per_bit;
-                match self.bit {
-                    // The start bit, looked at whole: still a nought?
-                    0 if is_one => self.bit = -1,
-                    0 => {
-                        self.bit = 1;
-                        self.octet = 0;
-                    }
-                    1..=8 => {
-                        self.octet |= u8::from(is_one) << (self.bit - 1);
-                        self.bit += 1;
-                    }
-                    _ => {
-                        self.bit = -1;
-                        // A stop bit that is not a one is not a character.
-                        if is_one {
-                            found = self.character();
-                        }
-                    }
-                }
+        while (self.count - 1) as f64 >= self.next + quarter + reach {
+            let (early, on, late) = (self.through(self.next - quarter), self.through(self.next), self.through(self.next + quarter));
+            let power = |z: (f64, f64)| z.0 * z.0 + z.1 * z.1;
+            // More energy after the symbol than before it: the clock is
+            // early, and the next symbol is looked at later.
+            let error = (power(late) - power(early)) / (power(late) + power(early) + 1e-30);
+            self.next += self.per_symbol * (1.0 + CLOCK_GAIN * error);
+            // The symbol against the one before: the same way up is a one.
+            let same = on.0 * self.last.0 + on.1 * self.last.1;
+            self.eye = same / ((power(on) * power(self.last)).sqrt() + 1e-30);
+            self.last = on;
+            if let Some(message) = self.bit(same >= 0.0) {
+                found = Some(message);
             }
         }
-        self.was_one = is_one;
         found
     }
 
-    fn character(&mut self) -> Option<Heard> {
-        if self.read.len() == 2 * FRAME {
-            self.read.remove(0);
+    /// A bit; a message, if this bit was the end of its closing flag.
+    fn bit(&mut self, bit: bool) -> Option<Message> {
+        if bit {
+            self.ones += 1;
+            if self.ones > 6 {
+                // Seven ones: an abort, or no signal.
+                self.ones = 7;
+                self.frame.clear();
+                self.flags = 0;
+            } else {
+                self.frame.push(true);
+            }
+            return None;
         }
-        self.read.push(self.octet);
-        let last = |len: usize| self.read.len().checked_sub(len).map(|from| &self.read[from..]);
-        last(FRAME)
-            .and_then(Caps::decode)
-            .map(Heard::Caps)
-            .or_else(|| last(NOTICE).and_then(read_notice).map(Heard::Slowed))
+        let ones = std::mem::take(&mut self.ones);
+        match ones {
+            // A stuffed nought.
+            5 => None,
+            // A flag. Its first nought and its six ones are on the end of
+            // the frame.
+            6 => {
+                let bits = self.frame.len().saturating_sub(7);
+                let found = (bits >= 24 && bits.is_multiple_of(8))
+                    .then(|| {
+                        let octets: Vec<u8> = self.frame[..bits]
+                            .chunks(8)
+                            .map(|octet| octet.iter().enumerate().fold(0, |sum, (i, &bit)| sum | u8::from(bit) << i))
+                            .collect();
+                        let (body, check) = octets.split_at(octets.len() - 2);
+                        (crc16(body) == u16::from_le_bytes([check[0], check[1]])).then(|| Message::decode(body)).flatten()
+                    })
+                    .flatten();
+                self.flags = if bits == 0 || found.is_some() { self.flags + 1 } else { 0 };
+                self.frame.clear();
+                found
+            }
+            _ => {
+                if self.frame.len() < 8 * 64 {
+                    self.frame.push(false);
+                } else {
+                    self.frame.clear();
+                    self.flags = 0;
+                }
+                None
+            }
+        }
     }
+}
+
+/// Where an end is in the transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Flags only. The caller measures the line. The answerer waits for the
+    /// CL, or has it and measures the line.
+    Flags,
+    /// The caller sends its CL until the MS arrives.
+    Cl,
+    /// The answerer sends its MS until the ACK arrives.
+    Ms,
+    /// The caller has the MS and sends its ACK, or its NAK.
+    Reply,
+    /// The last symbols die away.
+    Closing,
 }
 
 /// One end's part of the handshake.
 pub struct Hello {
+    calling: bool,
     mine: Caps,
     theirs: Option<Caps>,
+    fs_in: f64,
     fs_out: f64,
     ears: Vec<Ear>,
-    /// The tones this end sends, how far round the one being sent is, and
-    /// what is being sent: the bits of a message, then idle.
-    tones: (f64, f64),
-    turn: f64,
-    bits: Vec<bool>,
-    at: usize,
-    left_in_bit: f64,
-    /// Messages sent whole since the far end's said it had heard.
-    parting: u32,
-    /// Samples heard since the far end's message arrived.
+    voice: Voice,
+    stage: Stage,
+    /// The far end refused the selection, or selected a mode this end did
+    /// not work out for itself.
+    refused: bool,
+    /// Samples heard since the far end's last message.
     since: f64,
-    fs_in: f64,
     done: bool,
     /// The probe's tones this end sends under its own, on a narrow line,
     /// and its ear for the far end's.
     probe_turn: [f64; 7],
     probe: Option<Probe>,
     /// Whether this end has measured the far end's probe, or has given up
-    /// on there being one, and so knows what to say in its message. Until
-    /// then it sends the idle tone and no message.
+    /// on there being one, and so knows what to say in its message.
     ready: bool,
+    /// Samples heard, and how many had been when the far end's carrier was
+    /// first there.
     heard_for: f64,
+    carrier_at: Option<f64>,
 }
 
 impl std::fmt::Debug for Hello {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hello").field("mine", &self.mine).field("theirs", &self.theirs).finish_non_exhaustive()
+        f.debug_struct("Hello")
+            .field("mine", &self.mine)
+            .field("theirs", &self.theirs)
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
     }
 }
 
 impl Hello {
     /// The end that called, or the end that answered, with what it is.
     pub fn new(calling: bool, mine: Caps) -> Self {
-        let (tones, listens) = if calling { (CALLER, ANSWERER) } else { (ANSWERER, CALLER) };
-        let fs_in = f64::from(mine.hears_hz);
-        let mut hello = Self {
+        let (carrier, listens) = if calling { (CALLER_HZ, ANSWERER_HZ) } else { (ANSWERER_HZ, CALLER_HZ) };
+        let (fs_in, fs_out) = (f64::from(mine.hears_hz), f64::from(mine.sends_hz));
+        let mut voice = Voice::new(fs_out, carrier);
+        // Noughts first: a symbol that turns over each time is what the far
+        // end's clock finds soonest.
+        voice.bits.extend(std::iter::repeat_n(false, 16));
+        Self {
+            calling,
             ears: (0..mine.channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(),
             mine,
             theirs: None,
-            fs_out: f64::from(mine.sends_hz),
-            tones,
-            turn: 0.0,
-            bits: Vec::new(),
-            at: 0,
-            left_in_bit: 0.0,
-            parting: 0,
-            since: 0.0,
             fs_in,
+            fs_out,
+            voice,
+            stage: Stage::Flags,
+            refused: false,
+            since: 0.0,
             done: false,
             probe_turn: [0.0; 7],
             probe: (fs_in <= NARROW).then(|| Probe::new(fs_in)),
             ready: fs_in > NARROW,
             heard_for: 0.0,
-        };
-        hello.message();
-        hello
+            carrier_at: None,
+        }
     }
 
-    /// Which of the far end's two tones is arriving on the first channel:
-    /// one for the tone that is a one, minus one for the other, and between
-    /// them while it changes or when neither is there. For drawing.
+    /// The last bit of the far end's on the first channel as it arrived:
+    /// one for a carrier that stayed as it was, minus one for a carrier
+    /// that turned over, and between them when there is no carrier. For
+    /// drawing.
     pub fn eye(&self) -> f64 {
         self.ears.first().map_or(0.0, |ear| ear.eye)
     }
 
-    /// The far end's message, once it has arrived.
+    /// The far end's capabilities, once they have arrived.
     pub fn theirs(&self) -> Option<&Caps> {
         self.theirs.as_ref()
     }
@@ -680,58 +908,122 @@ impl Hello {
         self.done
     }
 
-    /// What the two ends will do, once this end has the far end's message.
-    pub fn agreed(&self) -> Option<Result<Agreed, String>> {
-        self.theirs.as_ref().map(|theirs| agree(&self.mine, theirs))
+    /// Where the transaction is, for whoever is watching.
+    pub fn stage(&self) -> &'static str {
+        match (self.stage, self.calling) {
+            (Stage::Flags, true) => "V.ARC: measuring the line before the CL",
+            (Stage::Flags, false) if self.theirs.is_some() => "V.ARC: CL received, measuring the line before the MS",
+            (Stage::Flags, false) => "V.ARC: waiting for the CL",
+            (Stage::Cl, _) => "V.ARC: CL sent, waiting for the MS",
+            (Stage::Ms, _) => "V.ARC: CL received, MS sent, waiting for the ACK",
+            (_, _) if self.refused => "V.ARC: the mode was refused",
+            (_, true) => "V.ARC: MS received, ACK sent",
+            (_, false) => "V.ARC: ACK received",
+        }
     }
 
-    /// The next message's bits: each character with its start and stop, and
-    /// a little idle after.
-    fn message(&mut self) {
-        let caps = Caps { heard: self.theirs.is_some(), ..self.mine };
-        self.bits.clear();
-        for octet in caps.encode() {
-            self.bits.push(false);
-            self.bits.extend((0..8).map(|i| octet >> i & 1 != 0));
-            self.bits.push(true);
-        }
-        self.bits.extend(std::iter::repeat_n(true, GAP));
-        self.at = 0;
+    /// What the two ends will do, once this end has the far end's
+    /// capabilities.
+    pub fn agreed(&self) -> Option<Result<Agreed, String>> {
+        let agreed = agree(&self.mine, self.theirs.as_ref()?);
+        Some(match agreed {
+            Ok(_) if self.refused => Err("the two ends did not select the same mode: they are not the same version".to_owned()),
+            other => other,
+        })
     }
 
     /// A frame as it arrived, a sample a channel.
     pub fn hear(&mut self, input: &[f64]) {
         self.heard_for += 1.0;
+        self.since += 1.0;
+        let mut arrived = None;
+        for (ear, &x) in self.ears.iter_mut().zip(input) {
+            if let Some(message) = ear.hear(x) {
+                arrived = Some(message);
+            }
+        }
+        if self.carrier_at.is_none() && (arrived.is_some() || self.ears.iter().any(|ear| ear.flags >= 3)) {
+            self.carrier_at = Some(self.heard_for);
+        }
         if let Some(probe) = self.probe.as_mut().filter(|_| !self.ready) {
             probe.hear(input.iter().sum::<f64>() / input.len().max(1) as f64);
-            // The far end's probe measured; or its message read with no
-            // probe under it, which is a far end that sends none; or
-            // nothing in a long while.
-            let fit = probe.fit.or((self.theirs.is_some() || self.heard_for > UNPROBED * self.fs_in).then_some(0));
-            if let Some(fit) = fit {
+            // The far end's probe measured; or its carrier heard a while
+            // with no probe under it, which is a far end that sends none;
+            // or nothing in a long while.
+            let bare = self.carrier_at.is_some_and(|at| self.heard_for - at > BARE * self.fs_in);
+            if let Some(fit) = probe.fit.or((bare || self.heard_for > UNPROBED * self.fs_in).then_some(0)) {
                 self.mine.fit = fit;
                 self.ready = true;
-                self.message();
             }
         }
-        for (ear, &x) in self.ears.iter_mut().zip(input) {
-            if let Some(Heard::Caps(caps)) = ear.hear(x) {
-                // The latest is the one that counts: it may now say the far
-                // end has heard.
+        if self.done || self.stage == Stage::Closing {
+            return;
+        }
+        match (self.calling, arrived) {
+            (false, Some(Message::Cl(caps))) if matches!(self.stage, Stage::Flags | Stage::Ms) => {
                 self.theirs = Some(caps);
+                self.since = 0.0;
             }
-        }
-        if self.theirs.is_some() {
-            self.since += 1.0;
-            if self.since > PATIENCE * self.fs_in {
-                self.done = true;
+            (false, Some(Message::Ack | Message::Nak)) if self.stage == Stage::Ms => {
+                self.refused = arrived == Some(Message::Nak);
+                self.close();
             }
+            (true, Some(Message::Ms(caps, selected))) if self.stage == Stage::Cl => {
+                self.theirs = Some(caps);
+                self.refused = selected != selection(&agree(&self.mine, &caps));
+                // The message being sent is cut off: the reply is due.
+                self.voice.bits.clear();
+                self.stage = Stage::Reply;
+            }
+            _ => {}
         }
+        if self.ready && self.stage == Stage::Flags && (self.calling || self.theirs.is_some()) {
+            self.stage = if self.calling { Stage::Cl } else { Stage::Ms };
+        }
+        // A caller that has sent its ACK and gone ahead is silent on its
+        // carrier. Its ACK was lost, and it is not waited for.
+        if self.stage == Stage::Ms && self.since > PATIENCE * self.fs_in {
+            self.close();
+        }
+    }
+
+    /// Stop: nothing more is sent but the end of the last symbols.
+    fn close(&mut self) {
+        self.voice.bits.clear();
+        self.stage = Stage::Closing;
     }
 
     /// The next sample to send, the same on every channel.
     pub fn say(&mut self) -> f64 {
         if self.done {
+            return 0.0;
+        }
+        if self.voice.bits.is_empty() {
+            match self.stage {
+                Stage::Flags => self.voice.bits.extend(flags(1)),
+                Stage::Cl => {
+                    self.voice.bits.extend(Message::Cl(self.mine).frame());
+                    self.voice.bits.extend(flags(BETWEEN));
+                }
+                Stage::Ms => {
+                    let selected = self.theirs.map_or(NO_MODE, |theirs| selection(&agree(&self.mine, &theirs)));
+                    self.voice.bits.extend(Message::Ms(self.mine, selected).frame());
+                    self.voice.bits.extend(flags(BETWEEN));
+                }
+                Stage::Reply => {
+                    let reply = if self.refused { Message::Nak } else { Message::Ack };
+                    self.voice.bits.extend(flags(1));
+                    for _ in 0..ACKS {
+                        self.voice.bits.extend(reply.frame());
+                    }
+                    self.stage = Stage::Closing;
+                }
+                Stage::Closing => {}
+            }
+        }
+        let said = self.voice.say();
+        if self.stage == Stage::Closing && self.voice.silent() {
+            self.done = true;
             return 0.0;
         }
         // The probe's tones, under whatever else is said, on a narrow line.
@@ -742,45 +1034,22 @@ impl Hello {
                 probe += PROBE_LEVEL * turn.sin();
             }
         }
-        if !self.ready {
-            // Nothing to say yet: the idle tone, which is a one.
-            self.turn = (self.turn + std::f64::consts::TAU * self.tones.0 / self.fs_out) % std::f64::consts::TAU;
-            return LEVEL * self.turn.sin() + probe;
-        }
-        if self.left_in_bit <= 0.0 {
-            self.left_in_bit += self.fs_out / BAUD;
-            self.at += 1;
-            if self.at >= self.bits.len() {
-                // A message has gone whole. Was it one the far end could
-                // act on, sent after it said it had heard?
-                if self.theirs.is_some_and(|t| t.heard) {
-                    self.parting += 1;
-                    if self.parting > PARTING {
-                        self.done = true;
-                        return 0.0;
-                    }
-                }
-                self.message();
-            }
-        }
-        self.left_in_bit -= 1.0;
-        let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
-        self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
-        LEVEL * self.turn.sin() + probe
+        said + probe
     }
 }
 
-/// An end's ear for the handshake's tones for the rest of the call, and its
-/// voice in them: for saying, and hearing said, that the modulation is not
-/// getting through and should be slowed.
+/// An end's ear for the handshake's carrier for the rest of the call, and
+/// its voice on its own: for saying, and hearing said, that the modulation
+/// is not getting through and should be slowed.
+///
+/// The handshake's signal gets through lines the modulation does not. A
+/// line that carries one way and not the other leaves one end loaded and
+/// waiting and the other hearing nothing it can use. The end that hears
+/// nothing cannot tell the far end so in the modulation, since it does not
+/// know that its own is heard. It can in this.
 pub struct Watch {
     ears: Vec<Ear>,
-    tones: (f64, f64),
-    fs_out: f64,
-    turn: f64,
-    bits: Vec<bool>,
-    at: usize,
-    left_in_bit: f64,
+    voice: Voice,
 }
 
 impl std::fmt::Debug for Watch {
@@ -793,16 +1062,8 @@ impl Watch {
     /// For the end that called or the end that answered, hearing on
     /// `channels` channels at `fs_in` and sending at `fs_out`.
     pub fn new(calling: bool, fs_in: f64, fs_out: f64, channels: usize) -> Self {
-        let (tones, listens) = if calling { (CALLER, ANSWERER) } else { (ANSWERER, CALLER) };
-        Self {
-            ears: (0..channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(),
-            tones,
-            fs_out,
-            turn: 0.0,
-            bits: Vec::new(),
-            at: 0,
-            left_in_bit: 0.0,
-        }
+        let (carrier, listens) = if calling { (CALLER_HZ, ANSWERER_HZ) } else { (ANSWERER_HZ, CALLER_HZ) };
+        Self { ears: (0..channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(), voice: Voice::new(fs_out, carrier) }
     }
 
     /// A frame as it arrived. What the far end says it is listening for,
@@ -810,7 +1071,7 @@ impl Watch {
     pub fn hear(&mut self, input: &[f64]) -> Option<u8> {
         let mut asked = None;
         for (ear, &x) in self.ears.iter_mut().zip(input) {
-            if let Some(Heard::Slowed(by)) = ear.hear(x) {
+            if let Some(Message::Slowed(by)) = ear.hear(x) {
                 asked = Some(by);
             }
         }
@@ -818,42 +1079,27 @@ impl Watch {
     }
 
     /// Tell the far end this end is listening for the modulation slowed by
-    /// two to the `slowed`: three times over, a second and a bit, during
+    /// two to the `slowed`: three times over, most of a second, during
     /// which [`Watch::say`] has the line.
     pub fn tell(&mut self, slowed: u8) {
-        self.bits.clear();
-        // A bit of idle first, so the first start bit is an edge.
-        self.bits.extend(std::iter::repeat_n(true, GAP));
+        self.voice.bits.clear();
+        // Noughts and flags first, for the far end's clock.
+        self.voice.bits.extend(std::iter::repeat_n(false, 16));
+        self.voice.bits.extend(flags(2));
         for _ in 0..3 {
-            for octet in notice(slowed) {
-                self.bits.push(false);
-                self.bits.extend((0..8).map(|i| octet >> i & 1 != 0));
-                self.bits.push(true);
-            }
-            self.bits.extend(std::iter::repeat_n(true, GAP));
+            self.voice.bits.extend(Message::Slowed(slowed).frame());
+            self.voice.bits.extend(flags(1));
         }
-        self.at = 0;
-        self.left_in_bit = self.fs_out / BAUD;
     }
 
     /// Whether there is something still being said.
     pub fn saying(&self) -> bool {
-        self.at < self.bits.len()
+        !self.voice.silent()
     }
 
     /// The next sample of what is being said; silence when nothing is.
     pub fn say(&mut self) -> f64 {
-        if !self.saying() {
-            return 0.0;
-        }
-        let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
-        self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
-        self.left_in_bit -= 1.0;
-        if self.left_in_bit <= 0.0 {
-            self.left_in_bit += self.fs_out / BAUD;
-            self.at += 1;
-        }
-        LEVEL * self.turn.sin()
+        self.voice.say()
     }
 }
 
@@ -1235,16 +1481,39 @@ mod tests {
     use super::*;
 
     fn caps(hears: u32, sends: u32) -> Caps {
-        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0, line: Line::Sound, fit: 0 }
+        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, asks_baud: 0, line: Line::Sound, fit: 0 }
     }
 
     #[test]
     fn a_message_survives_being_written_down() {
-        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, line: Line::MuLaw, fit: 3, ..caps(192_000, 48_000) };
+        let said = Caps { two_wire: true, wanted: Wanted::Pcm, asks_baud: 8000, line: Line::MuLaw, fit: 3, ..caps(192_000, 48_000) };
         assert_eq!(Caps::decode(&said.encode()), Some(said));
-        let mut spoiled = said.encode();
-        spoiled[7] ^= 1;
-        assert_eq!(Caps::decode(&spoiled), None);
+        for message in [Message::Cl(said), Message::Ms(said, 0x0a), Message::Ack, Message::Nak, Message::Slowed(3)] {
+            assert_eq!(Message::decode(&message.encode()), Some(message));
+        }
+        // The types are those of V.8 bis.
+        assert_eq!(Message::Ms(said, 0).encode()[0] & 15, 1);
+        assert_eq!(Message::Cl(said).encode()[0] & 15, 2);
+        assert_eq!(Message::Ack.encode()[0] & 15, 4);
+    }
+
+    #[test]
+    fn a_frame_is_read_from_its_bits_and_a_spoiled_one_is_not() {
+        let said = Caps { asks_baud: 0xff_ffff, ..caps(0xff_ffff, 0x7e_7e7e) };
+        let message = Message::Ms(said, NO_MODE);
+        let read = |bits: &[bool]| {
+            let mut ear = Ear::new(8_000.0, CALLER_HZ);
+            bits.iter().filter_map(|&bit| ear.bit(bit)).collect::<Vec<_>>()
+        };
+        let mut bits = flags(2);
+        bits.extend(message.frame());
+        bits.extend(Message::Ack.frame());
+        // No run of ones in a frame is as long as a flag's.
+        let inside = &message.frame()[8..message.frame().len() - 8];
+        assert!(!inside.windows(6).any(|run| run.iter().all(|&bit| bit)));
+        assert_eq!(read(&bits), vec![message, Message::Ack]);
+        bits[40] ^= true;
+        assert_eq!(read(&bits), vec![Message::Ack]);
     }
 
     /// Two ends say hello over a line: `gain` on the way, `noise` on top,
@@ -1252,7 +1521,7 @@ mod tests {
     /// pair of wires.
     fn meet(a: Caps, b: Caps, own: f64, noise: f64) -> (Hello, Hello, f64) {
         // The line is as fast as the faster card on it, and each end's
-        // samples are held or skipped to fit. Crude, and enough for tones.
+        // samples are held or skipped to fit. Crude, and enough for this.
         let line = f64::from(a.sends_hz.max(a.hears_hz).max(b.sends_hz).max(b.hears_hz));
         let (mut caller, mut host) = (Hello::new(true, a), Hello::new(false, b));
         let mut seed = 9u64;
@@ -1351,8 +1620,8 @@ mod tests {
         // does: the widest fit, each way.
         let (caller, host, took) = probed(None, 0.0, Wanted::Qam);
         assert_eq!((caller.hear_fit, caller.send_fit, host.hear_fit, host.send_fit), (1, 1, 1, 1));
-        // And it costs the handshake a few tenths of a second.
-        assert!(took < 6.0, "{took} s");
+        // The probe, the CL, the MS and the ACK: under three seconds.
+        assert!(took < 3.0, "{took} s");
         // An end that starts most of a second after the other.
         let (caller, host, _) = probed(None, 0.8, Wanted::Qam);
         assert_eq!((caller.hear_fit, host.hear_fit), (1, 1));
@@ -1376,11 +1645,13 @@ mod tests {
         // and the handshake takes what it took.
         let narrow = Caps { wanted: Wanted::Qam, ..caps(8_000, 8_000) };
         let wide = Caps { wanted: Wanted::Qam, ..caps(48_000, 48_000) };
-        let (caller, host, took) = meet(narrow, wide, 0.0, 0.0);
-        assert!(caller.done() && host.done());
-        assert!(took < 8.0, "{took} s");
-        let agreed = caller.agreed().unwrap().unwrap();
-        assert_eq!((agreed.hear_fit, agreed.send_fit), (0, 0));
+        for (a, b) in [(narrow, wide), (wide, narrow)] {
+            let (caller, host, took) = meet(a, b, 0.0, 0.0);
+            assert!(caller.done() && host.done());
+            assert!(took < 4.0, "{took} s");
+            let agreed = caller.agreed().unwrap().unwrap();
+            assert_eq!((agreed.hear_fit, agreed.send_fit), (0, 0));
+        }
     }
 
     #[test]
@@ -1391,15 +1662,93 @@ mod tests {
         let b = Caps { two_wire: true, ..caps(192_000, 48_000) };
         let (caller, host, took) = meet(a, b, 0.0, 0.0);
         assert!(caller.done() && host.done(), "after {took:.1} s");
-        assert!(took < 6.0, "took {took:.1} s");
+        // A CL, an MS and three ACKs, with no probe to wait for.
+        assert!(took < 2.0, "took {took:.1} s");
         assert_eq!(caller.theirs().map(|c| (c.hears_hz, c.sends_hz)), Some((192_000, 48_000)));
+        assert_eq!(host.theirs().map(|c| (c.hears_hz, c.sends_hz)), Some((48_000, 192_000)));
+        assert_eq!((caller.stage(), host.stage()), ("V.ARC: MS received, ACK sent", "V.ARC: ACK received"));
         let (ours, theirs) = (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap());
-        // A wire each way after all, each direction at its own rate.
+        // No echo is looked for, and each direction is at its own rate.
         assert!(!ours.two_wire && !theirs.two_wire);
         assert_eq!((ours.send_hz, ours.hear_hz), (192_000.0, 48_000.0));
         assert_eq!((theirs.send_hz, theirs.hear_hz), (48_000.0, 192_000.0));
         assert_eq!((ours.send_times, ours.hear_times), (1, 1));
-        assert!(ours.notes.iter().any(|n| n.contains("two-wire was asked for")), "{:?}", ours.notes);
+        assert!(ours.notes.iter().any(|n| n.contains("cannot cancel an echo")), "{:?}", ours.notes);
+    }
+
+    /// Two ends at 48 kHz, a sample at a time, with a line each way that
+    /// `carries` says is whole or cut: how long each took to be done.
+    fn in_step(mut carries: impl FnMut(&Hello, &Hello) -> (bool, bool), seconds: f64) -> (Hello, Hello, Option<f64>, Option<f64>) {
+        let fs = 48_000.0;
+        let (mut caller, mut host) = (Hello::new(true, caps(48_000, 48_000)), Hello::new(false, caps(48_000, 48_000)));
+        let (mut caller_done, mut host_done) = (None, None);
+        for tick in 0..(seconds * fs) as usize {
+            let (out, back) = carries(&caller, &host);
+            let (from_caller, from_host) = (caller.say(), host.say());
+            caller.hear(&[if back { from_host } else { 0.0 }; 2]);
+            host.hear(&[if out { from_caller } else { 0.0 }; 2]);
+            if caller.done() && caller_done.is_none() {
+                caller_done = Some(tick as f64 / fs);
+            }
+            if host.done() && host_done.is_none() {
+                host_done = Some(tick as f64 / fs);
+            }
+        }
+        (caller, host, caller_done, host_done)
+    }
+
+    #[test]
+    fn each_message_is_repeated_until_its_reply_arrives() {
+        // Nothing gets back to the caller for two seconds: it sends its CL
+        // all that time, the answerer its MS, and nobody is done.
+        let mut ticks = 0;
+        let (caller, host, caller_done, host_done) = in_step(
+            |caller, host| {
+                ticks += 1;
+                if ticks == 2 * 48_000 {
+                    assert_eq!(caller.stage(), "V.ARC: CL sent, waiting for the MS");
+                    assert_eq!(host.stage(), "V.ARC: CL received, MS sent, waiting for the ACK");
+                    assert!(caller.theirs().is_none() && host.theirs().is_some());
+                }
+                (true, ticks > 2 * 48_000)
+            },
+            4.0,
+        );
+        assert!(caller.done() && host.done());
+        // The answerer is done when it has the ACK, which is before the
+        // caller has sent its last.
+        assert!(caller_done.unwrap() > 2.0 && host_done.unwrap() > 2.0);
+        assert!(host_done.unwrap() < caller_done.unwrap() + 0.1);
+    }
+
+    #[test]
+    fn an_answerer_whose_ack_is_lost_goes_on_when_the_caller_is_silent() {
+        // The line to the answerer is cut when the caller has the MS.
+        let (caller, host, caller_done, host_done) = in_step(|caller, _| (caller.theirs().is_none(), true), 8.0);
+        assert!(caller.done() && host.done());
+        assert!(host_done.unwrap() > caller_done.unwrap() + PATIENCE - 1.0, "{caller_done:?} {host_done:?}");
+        assert_eq!(caller.agreed().unwrap().unwrap().wanted, host.agreed().unwrap().unwrap().wanted);
+    }
+
+    #[test]
+    fn a_selection_this_end_did_not_work_out_is_refused() {
+        // An answerer of some other version, which selects what this
+        // caller does not: the caller says NAK, and neither end starts.
+        let fs = 48_000.0;
+        let mut caller = Hello::new(true, caps(48_000, 48_000));
+        let mut far = Voice::new(fs, ANSWERER_HZ);
+        let mut ear = Ear::new(fs, CALLER_HZ);
+        let mut replies = Vec::new();
+        for _ in 0..(3.0 * fs) as usize {
+            if far.bits.is_empty() {
+                far.bits.extend(Message::Ms(caps(48_000, 48_000), 2).frame());
+            }
+            caller.hear(&[far.say(); 2]);
+            replies.extend(ear.hear(caller.say()));
+        }
+        assert!(caller.done());
+        assert!(replies.contains(&Message::Nak) && !replies.contains(&Message::Ack), "{replies:?}");
+        assert!(caller.agreed().unwrap().is_err());
     }
 
     #[test]
@@ -1418,6 +1767,15 @@ mod tests {
         // And not across a change of rate.
         let fast = Caps { line: Line::Samples, ..caps(16_000, 16_000) };
         assert!(!agree(&fast, &on(Line::Samples)).unwrap().direct);
+        // The codec's own levels are for the baseband mode on G.711, in
+        // one law or two, where nobody chose a baud.
+        let levels = |line: Line| Caps { wanted: Wanted::Pcm, ..on(line) };
+        assert!(agree(&levels(Line::MuLaw), &levels(Line::ALaw)).unwrap().locked);
+        assert!(!agree(&levels(Line::MuLaw), &levels(Line::Sound)).unwrap().locked);
+        assert!(!agree(&levels(Line::Samples), &levels(Line::Samples)).unwrap().locked);
+        assert!(!agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap().locked);
+        let chosen = Caps { asks_baud: 4000, ..levels(Line::MuLaw) };
+        assert!(!agree(&chosen, &levels(Line::MuLaw)).unwrap().locked);
     }
 
     #[test]
@@ -1425,18 +1783,19 @@ mod tests {
         let on = |line: Line| Caps { line, two_wire: true, ..caps(8_000, 8_000) };
         let agreed = agree(&on(Line::MuLaw), &on(Line::MuLaw)).unwrap();
         assert!(!agreed.two_wire);
-        assert!(agreed.notes.iter().any(|note| note.contains("a SIP call has a path each way")), "{:?}", agreed.notes);
+        assert!(agreed.notes.is_empty(), "{:?}", agreed.notes);
         // One end on a sound card can still have an echo to cancel.
         assert!(agree(&on(Line::Sound), &on(Line::MuLaw)).unwrap().two_wire);
     }
 
     #[test]
     fn it_gets_through_on_one_pair_of_wires_and_through_noise() {
-        // Each end's own tones four times as loud as the far end's, and
-        // noise as loud as the far end's tones.
+        // Each end's own signal four times as loud as the far end's, and
+        // noise as loud as the far end's signal.
         let a = Caps { two_wire: true, ..caps(48_000, 48_000) };
         let (caller, host, took) = meet(a, caps(48_000, 48_000), 2.0, 0.09);
         assert!(caller.done() && host.done(), "after {took:.1} s");
+        assert!(took < 3.0, "took {took:.1} s");
         let ours = caller.agreed().unwrap().unwrap();
         assert!(ours.two_wire, "{:?}", ours.notes);
         assert_eq!(host.agreed().unwrap().unwrap().two_wire, ours.two_wire);
@@ -1448,28 +1807,72 @@ mod tests {
         let (fast, slow) = (caller.agreed().unwrap().unwrap(), host.agreed().unwrap().unwrap());
         assert_eq!((fast.send_hz, fast.hear_hz, fast.send_times, fast.hear_times), (48_000.0, 48_000.0, 4, 4));
         assert_eq!((slow.send_hz, slow.hear_hz, slow.send_times, slow.hear_times), (48_000.0, 48_000.0, 1, 1));
-        // And cards that no whole number relates are told so.
+        // And cards that no whole number relates are told so: the answerer
+        // selects no mode, and both ends know why.
         let odd = agree(&caps(44_100, 44_100), &caps(48_000, 48_000));
         assert!(odd.is_err_and(|why| why.contains("44100") && why.contains("48000")));
+        let (caller, host, _) = meet(caps(44_100, 44_100), caps(48_000, 48_000), 0.0, 0.0);
+        assert!(caller.done() && host.done());
+        assert!(caller.agreed().unwrap().is_err_and(|why| why.contains("44100")));
+        assert!(host.agreed().unwrap().is_err_and(|why| why.contains("44100")));
+    }
+
+    #[test]
+    fn the_signal_keeps_to_its_band() {
+        // A second of each carrier with messages on it, and how much of
+        // its power is more than 300 Hz from the carrier: under a
+        // thousandth.
+        let fs = 48_000.0;
+        for carrier in [CALLER_HZ, ANSWERER_HZ] {
+            let mut voice = Voice::new(fs, carrier);
+            let said: Vec<f64> = (0..fs as usize)
+                .map(|_| {
+                    if voice.bits.is_empty() {
+                        voice.bits.extend(Message::Cl(caps(48_000, 192_000)).frame());
+                    }
+                    voice.say()
+                })
+                .collect();
+            let total: f64 = said.iter().map(|x| x * x).sum::<f64>() / fs;
+            // -15 dBFS RMS, to within a decibel.
+            assert!((10.0 * total.log10() + 15.0).abs() < 1.0, "{} dB", 10.0 * total.log10());
+            let mut outside = 0.0;
+            for hz in (0..4000).step_by(1) {
+                if (f64::from(hz) - carrier).abs() <= 300.0 {
+                    continue;
+                }
+                let (mut re, mut im) = (0.0, 0.0);
+                for (n, x) in said.iter().enumerate() {
+                    let turn = std::f64::consts::TAU * f64::from(hz) * n as f64 / fs;
+                    re += x * turn.cos();
+                    im += x * turn.sin();
+                }
+                outside += 2.0 * (re * re + im * im) / (fs * fs);
+            }
+            assert!(outside < 1e-3 * total, "{carrier} Hz: {:.1} dB", 10.0 * (outside / total).log10());
+        }
     }
 
     #[test]
     fn an_end_that_cannot_hear_says_so_through_the_other_ends_signal() {
-        // The far end is sending its modulation, which to these tones is
-        // noise right across the band and as loud as they are.
+        // The far end is sending its modulation, which to this signal is
+        // noise right across the band and as loud as it is.
         let (mut deaf, mut far) = (Watch::new(true, 48_000.0, 48_000.0, 1), Watch::new(false, 48_000.0, 48_000.0, 1));
         deaf.tell(2);
         let mut seed = 5u64;
         let mut heard = Vec::new();
+        let mut said_for = 0;
         for _ in 0..(3.0 * 48_000.0) as usize {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let hiss = 0.18 * (((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5) * 3.46;
+            said_for += usize::from(deaf.saying());
             let said = deaf.say();
             heard.extend(far.hear(&[0.3 * said + hiss]));
             // And nothing the deaf end hears is a notice to it.
             assert_eq!(deaf.hear(&[hiss + said]), None);
         }
         assert!(!deaf.saying());
+        assert!(said_for < 48_000, "{said_for} samples");
         assert!(!heard.is_empty() && heard.iter().all(|&by| by == 2), "{heard:?}");
     }
 
@@ -1478,7 +1881,7 @@ mod tests {
         let mut hello = Hello::new(true, caps(48_000, 48_000));
         for _ in 0..(10.0 * 48_000.0) as usize {
             let own = hello.say();
-            // Its own tones come straight back and nothing else does.
+            // Its own signal comes straight back and nothing else does.
             hello.hear(&[own, own]);
         }
         assert!(!hello.done());

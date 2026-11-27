@@ -470,9 +470,49 @@ impl FaxCall {
         self
     }
 
+    /// Offer JPEG for greyscale and colour pages (T.30 Annex E), or not.
+    /// Only ever used under error correction mode.
+    #[must_use]
+    pub fn with_colour(mut self, on: bool) -> Self {
+        self.call.set_colour(on);
+        self
+    }
+
+    /// Send the page in hand as this picture, greyscale or colour, if the
+    /// far end's DIS says it reads one. The page of ink and paper the call
+    /// was made with goes to any other far end.
+    #[must_use]
+    pub fn with_picture(mut self, picture: fax::picture::Picture) -> Self {
+        self.call.set_picture(Some(picture));
+        self
+    }
+
+    /// Send the pages of the call as these pictures, in the order of the
+    /// pages, if every page has one, they are all of a kind, and the far end
+    /// reads that kind.
+    #[must_use]
+    pub fn with_pictures(mut self, pictures: Vec<Option<fax::picture::Picture>>) -> Self {
+        self.call.set_pictures(pictures);
+        self
+    }
+
+    /// The same pages as lightness alone, which go in place of colour to a
+    /// far end that reads greyscale and not colour.
+    #[must_use]
+    pub fn with_lightness(mut self, pictures: Vec<Option<fax::picture::Picture>>) -> Self {
+        self.call.set_lightness(pictures);
+        self
+    }
+
     /// The coding the page goes in, once a DCS has settled it.
     pub fn coding(&self) -> Coding {
         self.call.coding()
+    }
+
+    /// Whether the JPEG page of this call is in full colour, as its DCS
+    /// said.
+    pub fn full_colour(&self) -> bool {
+        self.call.full_colour()
     }
 
     pub fn role(&self) -> Role {
@@ -693,6 +733,19 @@ impl FaxCall {
     /// than copied and moved exactly once. Whoever takes it owns it.
     pub fn take_received(&mut self) -> Option<(usize, Page)> {
         self.call.take_received()
+    }
+
+    /// The oldest picture that arrived and has not been taken: a page that
+    /// came with tone, greyscale or colour, under the same number as its
+    /// page of ink and paper.
+    pub fn take_received_picture(&mut self) -> Option<(usize, fax::picture::Picture)> {
+        self.call.take_received_picture()
+    }
+
+    /// Lines `from..to` of the page arriving, as a picture, if it is one
+    /// with tone.
+    pub fn arriving_picture(&self, from: usize, to: usize) -> Option<fax::picture::Picture> {
+        self.call.arriving_picture(from, to)
     }
 
     /// Pages finished so far in this call.

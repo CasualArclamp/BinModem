@@ -13,6 +13,7 @@ pub mod frame;
 pub mod hello;
 pub mod interp;
 pub mod link;
+pub mod locked;
 pub mod lz;
 pub mod map;
 pub mod rs;

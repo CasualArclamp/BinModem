@@ -1247,6 +1247,11 @@ pub struct Modem {
     /// On unless told otherwise, and used, like error correction, only when
     /// the far end offers it too. Off, a page goes in MMR as it did before.
     pub fax_jbig: bool,
+    /// Whether a fax call offers JPEG, for greyscale and colour pages (T.30
+    /// Annex E), which goes only under error correction mode.
+    ///
+    /// On unless told otherwise. Answering, it is bits 68 and 69 of the DIS.
+    pub fax_colour: bool,
     /// Whether a fax call offers V.34 half-duplex over V.8: ANSam in place of
     /// the called tone when answering, a call menu on hearing ANSam when
     /// dialling (T.30 clause 6), and T.30 Annex F on V.34's half-duplex modem
@@ -1265,6 +1270,13 @@ pub struct Modem {
     /// first one's again by accident: putting pages in is a deliberate act
     /// and so is putting the same ones in twice.
     pub fax_pages: Vec<fax::page::Page>,
+    /// The same pages as pictures with tone, greyscale or colour, for a far
+    /// end that reads JPEG: one for each page, in order, or none at all.
+    /// Taken by the call with the pages.
+    pub fax_pictures: Vec<Option<fax::picture::Picture>>,
+    /// And as lightness alone, for a far end that reads greyscale and not
+    /// colour.
+    pub fax_lightness: Vec<Option<fax::picture::Picture>>,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// Twenty characters of digits, spaces and a plus, and blank is legal:
@@ -1377,8 +1389,11 @@ impl Modem {
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_error_correction: true,
             fax_jbig: true,
+            fax_colour: true,
             fax_v34: true,
             fax_pages: Vec::new(),
+            fax_pictures: Vec::new(),
+            fax_lightness: Vec::new(),
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
@@ -1495,10 +1510,12 @@ impl Modem {
                 VarcMode::Pcm => 2,
                 _ => 0,
             };
-            return Some(v8::bis::varc::Offer { modulation, two_wire: named.ends_with("2W") });
+            return Some(v8::bis::varc::Offer { modulation, two_wire: false });
         }
-        let (mode, two_wire) = self.at.config.varc_bis;
-        (mode != 0).then(|| v8::bis::varc::Offer { modulation: mode - 1, two_wire })
+        // The second number said one pair of wires. Every call looks for an
+        // echo now, so it is taken and not used.
+        let (mode, _) = self.at.config.varc_bis;
+        (mode != 0).then(|| v8::bis::varc::Offer { modulation: mode - 1, two_wire: false })
     }
 
     /// Whether a call starts with a negotiation: automode, and always for a
@@ -1598,8 +1615,25 @@ impl Modem {
     pub fn echo_return_loss(&self) -> Option<f64> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => Some(m.echo_return_loss()),
+            Some(Pump::V34(m)) => Some(m.echo_return_loss()),
             _ => None,
         }
+    }
+
+    /// On a V.34 call: how far down the canceller's taps left the recording
+    /// of this end's training segment, in decibels, as they were learned and
+    /// then as they were fitted by least squares.
+    pub fn echo_fit(&self) -> Option<(f64, f64)> {
+        match self.pump.as_ref() {
+            Some(Pump::V34(m)) => m.echo_fit(),
+            _ => None,
+        }
+    }
+
+    /// On a V.34 call: whether the canceller found that its echo moves, and
+    /// changed to the taps that follow it.
+    pub fn echo_following(&self) -> bool {
+        matches!(self.pump.as_ref(), Some(Pump::V34(m)) if m.echo_following())
     }
 
     /// What the canceller is taking out at this instant, rather than what it
@@ -1607,6 +1641,7 @@ impl Modem {
     pub fn echo_return_loss_now(&self) -> Option<f64> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => Some(m.echo_return_loss_now()),
+            Some(Pump::V34(m)) => Some(m.echo_return_loss_now()),
             _ => None,
         }
     }
@@ -1615,6 +1650,9 @@ impl Modem {
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
         if let Some(fax) = self.fax.as_ref() {
             return fax.constellation_point();
+        }
+        if self.hst.is_some() {
+            return self.hst_session().and_then(hst::Session::constellation_point);
         }
         self.pump.as_ref().and_then(Pump::constellation_point)
     }
@@ -1641,6 +1679,10 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.residual_error();
         }
+        if self.hst.is_some() {
+            // As a distance, the way the scope's reading expects it.
+            return self.hst_session().map(|s| 10f64.powf(-s.snr_db() / 20.0));
+        }
         self.pump.as_ref().and_then(Pump::residual_error)
     }
 
@@ -1661,6 +1703,9 @@ impl Modem {
         if let Some(call) = self.varc.as_ref() {
             return if call.greeting() { 2 } else { 1usize << self.varc_bits.min(24) };
         }
+        if self.hst.is_some() {
+            return self.hst_session().map_or(2, hst::Session::points);
+        }
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
@@ -1674,6 +1719,9 @@ impl Modem {
     pub fn constellation_peak(&self) -> f32 {
         if let Some(fax) = self.fax.as_ref() {
             return fax.constellation_peak() as f32;
+        }
+        if self.hst.is_some() {
+            return self.hst_session().map_or(1.0, |s| s.constellation_peak() as f32);
         }
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => match m.status() {
@@ -1703,9 +1751,9 @@ impl Modem {
             return fax.shape();
         }
         if let Some(call) = self.varc.as_ref() {
-            // The handshake is two tones a direction.
+            // The handshake is a carrier a direction, turned over or not.
             if call.greeting() {
-                return "2FSK";
+                return "DBPSK";
             }
             return match (self.varc_bits, call.mode) {
                 (0, _) => "-",
@@ -1714,6 +1762,20 @@ impl Modem {
                 (_, VarcMode::G711) => "G.711",
                 (_, VarcMode::Pcm) => "PCM",
                 _ => "QAM",
+            };
+        }
+        if self.hst.is_some() {
+            return match self.hst_session() {
+                None => "-",
+                // The back channel: eight phase steps, read differentially.
+                Some(s) if s.holding() == hst::Holding::Forward => "8DPSK",
+                // The forward channel is V.32bis's trellis code.
+                Some(s) => match s.points() {
+                    128 => "128TCM",
+                    64 => "64TCM",
+                    32 => "32TCM",
+                    _ => "16TCM",
+                },
             };
         }
         self.pump.as_ref().map_or("-", Pump::shape)
@@ -1845,6 +1907,7 @@ impl Modem {
     pub fn reflection(&self) -> Option<datapump::v32::startup::Reflection> {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.reflection(),
+            Some(Pump::V34(m)) => m.reflection(),
             _ => None,
         }
     }
@@ -2477,9 +2540,10 @@ impl Modem {
         self.varc.as_ref().and_then(varc::Call::far_end)
     }
 
-    /// On a two-wire V.ARC call (`+MS=VARC2W`): how far down each channel's
-    /// canceller has taken this end's own echo, in decibels, and how far
-    /// round the line it found it, in samples. Empty on any other call.
+    /// On a V.ARC call that hears its own echo: how far down each channel's
+    /// canceller has taken it, in decibels, and how far round the line it
+    /// found it, in samples. Empty on any other call, and once this end has
+    /// had the line to itself and heard no echo.
     pub fn varc_echo(&self) -> Vec<(f64, Option<usize>)> {
         self.varc.as_ref().map_or_else(Vec::new, varc::Call::echo)
     }
@@ -2507,9 +2571,10 @@ impl Modem {
         self.call_refused.take()
     }
 
-    /// A V.ARC call's handshake as it is heard: which of the far end's two
-    /// tones is arriving, between minus one and one, eight to a bit, since
-    /// this was last asked. Empty once the handshake is over.
+    /// A V.ARC call's handshake as it is heard: each bit of the far end's,
+    /// one for a carrier that stayed as it was and minus one for a carrier
+    /// that turned over, eight to a bit, since this was last asked. Empty
+    /// once the handshake is over.
     pub fn varc_symbols(&mut self) -> Vec<f64> {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
@@ -3590,7 +3655,6 @@ impl Modem {
             self.varc_bits = 0;
             self.state = State::Handshaking;
             let mut call = varc::Call::new(mode, role, looped);
-            call.two_wire(self.at.modulation.carrier.ends_with("2W"));
             let (baud, code, bits) = self.at.config.varc;
             call.ask_for(baud, code, bits);
             call.compress(self.varc_compressors());
@@ -3619,6 +3683,8 @@ impl Modem {
                 Role::Calling => {
                     let pages = std::mem::take(&mut self.fax_pages);
                     FaxCall::originate_pages(self.fs, &self.fax_identification, pages)
+                        .with_pictures(std::mem::take(&mut self.fax_pictures))
+                        .with_lightness(std::mem::take(&mut self.fax_lightness))
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
             };
@@ -3626,6 +3692,7 @@ impl Modem {
                 call.offering(&self.fax_offer)
                     .with_error_correction(self.fax_error_correction)
                     .with_jbig(self.fax_jbig)
+                    .with_colour(self.fax_colour)
                     .with_v34(self.fax_v34),
             );
             return;
@@ -3878,6 +3945,17 @@ impl Modem {
             .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
     }
 
+    /// A page a fax call received with tone, greyscale or colour, as a
+    /// picture: under the same number as its page from
+    /// [`take_received_page`](Self::take_received_page), and handed over
+    /// once.
+    pub fn take_received_picture(&mut self) -> Option<(usize, fax::picture::Picture)> {
+        self.fax
+            .as_mut()
+            .and_then(FaxCall::take_received_picture)
+            .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received_picture))
+    }
+
     /// The T.30 frames either end of a fax call has sent since this was last
     /// asked, in order: the call in progress's, or the one that just ended.
     pub fn take_fax_exchange(&mut self) -> Vec<fax::call::Exchanged> {
@@ -3937,11 +4015,7 @@ impl Modem {
             2 => VarcMode::Pcm,
             _ => VarcMode::Dmt,
         };
-        self.line_notes.push(format!(
-            "V.8: both ends have V.ARC; {}{} follows, from its own handshake",
-            mode.name(),
-            if offer.two_wire { " on one pair of wires" } else { "" }
-        ));
+        self.line_notes.push(format!("V.8: both ends have V.ARC; {} follows, from its own handshake", mode.name()));
         self.since_dial_ms = 0;
         self.rate = 0;
         self.transmit_rate = 0;
@@ -3960,7 +4034,6 @@ impl Modem {
         self.varc_bits = 0;
         self.state = State::Handshaking;
         let mut call = varc::Call::new(mode, self.role, false);
-        call.two_wire(offer.two_wire);
         let (baud, code, bits) = self.at.config.varc;
         call.ask_for(baud, code, bits);
         call.compress(self.varc_compressors());
@@ -4057,6 +4130,11 @@ impl Modem {
                 }
             }
             v8line::Status::Agreed(modulation) => {
+                // A QC1a went out ahead of the CM and a JM came back: the far
+                // end read the CM and left the short start-up alone.
+                if negotiation.quick_declined() {
+                    self.line_notes.push("V.92 quick connect: QC1a sent; the far end answered with JM, so a full start-up".to_owned());
+                }
                 if VarcMode::from_carrier(&self.at.modulation.carrier).is_some() {
                     self.line_notes.push(format!(
                         "V.8: the far end has no V.ARC; an ordinary call instead, on {}",
@@ -4084,6 +4162,13 @@ impl Modem {
             // V.92's short Phase 1 in V.8's place (9.2/V.92): no menus, and
             // the pair is a V.92 one by what the two sequences said.
             v8line::Status::Quick(quick) => {
+                self.line_notes.push(
+                    match quick.role {
+                        PcmRole::Analogue => "V.92 quick connect: QC1a sent, QCA1d heard; short Phase 1",
+                        PcmRole::Digital => "V.92 quick connect: QC1a heard, QCA1d sent; short Phase 1",
+                    }
+                    .to_owned(),
+                );
                 self.declared_lapm = quick.lapm;
                 self.quick = Some(quick);
                 self.pcm_role = Some(quick.role);

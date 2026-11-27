@@ -31,6 +31,7 @@ use varc::fit::{Fitted, Unfitted};
 use varc::hello::{Agreed, Caps, FITS, Faster, Half, Hello, Line, NARROW, Slower, Twice, Wanted, Watch};
 use datapump::v90::ucode::{self, Law};
 use varc::exact;
+use varc::locked;
 use varc::octets;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -116,14 +117,16 @@ fn patience(slowed: u8) -> f64 {
     6.0 + 3.0 * f64::from(times(slowed))
 }
 
-/// How long each end of a two-wire call has the line to itself, to learn
+/// How long each end of a call on a sound card has the line to itself, to learn
 /// its own echo with nobody talking over it, in seconds. The canceller needs
 /// most of a second to find how far round the line its echo is and a
 /// fraction of one to fit it.
 const ALONE: f64 = 2.0;
 
-/// Where a two-wire call has got to in learning its echoes. After the
-/// handshake the caller sends alone, then the answerer, then both.
+/// Where a call on a sound card has got to in learning its echoes. After
+/// the handshake the caller sends alone, then the answerer, then both. An
+/// end that hears nothing come back in its turn has no echo, and when the
+/// turns are over it starts again with no canceller.
 ///
 /// Neither end has a clock the other can see, so each step is taken on what
 /// is heard: the line going quiet, the far end's signal starting, the far
@@ -169,10 +172,9 @@ pub(crate) struct Call {
     fs_out: f64,
     /// The trim, over all channels, that whoever is watching was last told.
     trim_said: f64,
-    /// The line is one pair of wires, both ends sending into it: a
-    /// canceller a channel takes this end's own signal out of what it
-    /// hears. Empty on a line with a wire each way.
-    two_wire: bool,
+    /// On one pair of wires, both ends sending into it: a canceller a
+    /// channel takes this end's own signal out of what it hears. Empty once
+    /// this end has had the line to itself and heard no echo.
     echo: Vec<Canceller>,
     cleaned: Vec<f64>,
     /// How far down the echo was when whoever is watching was last told.
@@ -192,6 +194,12 @@ pub(crate) struct Call {
     /// How loud the line is with nobody on it, as heard between the
     /// handshake and the first turn.
     floor: f64,
+    /// The loudest the line was in the second half of this end's turn,
+    /// when only this end sent: its echo, or nothing.
+    echoed: f64,
+    /// This end's turn found no echo. When the turns are over it starts
+    /// again as an end on a wire each way.
+    unechoed: bool,
     /// For the rest of the call: an ear for the handshake's tones, and a
     /// voice in them, for an end that cannot hear the modulation to say so.
     watch: Option<Watch>,
@@ -232,6 +240,11 @@ pub(crate) struct Call {
     g711: Option<Law>,
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
+    /// The baseband mode is sending the codec's own levels, one in each
+    /// sample; and it has tried that on this call and the call would not
+    /// carry it.
+    locked: bool,
+    unlocked: bool,
     /// When the station now running was built, in samples.
     built_at: u64,
     /// Whether the fits the handshake found have been taken up.
@@ -266,7 +279,6 @@ impl Call {
             fs: 0.0,
             fs_out: 0.0,
             trim_said: 0.0,
-            two_wire: false,
             echo: Vec::new(),
             cleaned: Vec::new(),
             echo_said: 0.0,
@@ -278,6 +290,8 @@ impl Call {
             spoke: 0.0,
             muted: false,
             floor: 0.0,
+            echoed: 0.0,
+            unechoed: false,
             watch: None,
             hears_slowed: 0,
             sends_slowed: 0,
@@ -297,6 +311,8 @@ impl Call {
             exact_line: false,
             g711: None,
             inexact: false,
+            locked: false,
+            unlocked: false,
             built_at: 0,
             refitted: false,
             squeeze: 0,
@@ -481,8 +497,15 @@ impl Call {
         self.turn = match self.turn {
             Turn::Quiet { waited, still } => {
                 let still = if self.loud < quiet { still + 1.0 } else { 0.0 };
-                if still > 0.15 * fs || waited > 1.5 * fs {
-                    self.floor = self.loud;
+                // The caller starts its turn after 0.15 s of quiet. The
+                // answerer must be listening by then, so it asks for less
+                // quiet. It also waits longer for it: the two ends do not
+                // finish the handshake at the same moment, and a caller
+                // that finished 1 s later is still sending its tones.
+                let (enough, most) = if self.calling { (0.15, 1.5) } else { (0.05, 4.0) };
+                if still > enough * fs || waited > most * fs {
+                    // A line that was never quiet says nothing of its floor.
+                    self.floor = self.loud.min(quiet);
                     if self.calling {
                         self.muted = false;
                         Turn::Mine { left: ALONE * fs }
@@ -493,9 +516,30 @@ impl Call {
                     Turn::Quiet { waited: waited + 1.0, still }
                 }
             }
-            Turn::Mine { left } if left > 0.0 => Turn::Mine { left: left - 1.0 },
+            Turn::Mine { left } if left > 0.0 => {
+                if left < 0.5 * ALONE * fs {
+                    self.echoed = self.echoed.max(self.loud);
+                }
+                Turn::Mine { left: left - 1.0 }
+            }
             Turn::Mine { .. } => {
-                if let Some(down) = settle(&mut self.echo) {
+                // No echo: nothing came back, or what came back is not
+                // this end's own signal. The canceller looks for its own
+                // signal at every delay, and finds none in a far end that
+                // did not keep to its turn. Or what came back is a
+                // hundredth of what the handshake sounded like and the
+                // canceller could not learn it in its turn.
+                let found = self.echo.iter().all(|c| c.delay().is_some());
+                let learned = found && self.echo.iter().all(|c| c.down_db() >= 20.0);
+                if self.echoed < signal || !found || (!learned && self.echoed < 0.01 * self.spoke) {
+                    // This end sent alone and nothing came back: the line
+                    // has a wire each way. A canceller with no echo to learn
+                    // learns the far end as if it were one, and that is
+                    // noise. So it goes.
+                    self.echo.clear();
+                    self.unechoed = true;
+                    self.notes.push("V.ARC: no echo of this end on the line: a wire each way, and no canceller".to_owned());
+                } else if let Some(down) = settle(&mut self.echo) {
                     self.notes.push(format!("V.ARC: this end's echo learned with the line to itself: {down:.0} dB down"));
                 }
                 if self.calling {
@@ -518,6 +562,12 @@ impl Call {
             Turn::Theirs { armed: true, waited, heard: None, .. } => {
                 if self.loud > signal {
                     Turn::Theirs { armed: true, waited: 0.0, heard: Some(self.loud), gone: 0.0, left: ALONE * fs }
+                } else if waited > 4.0 * fs && !self.calling {
+                    // The caller's turn was not heard. This end takes its
+                    // own turn all the same: a canceller that has had no
+                    // turn does not know if there is an echo.
+                    self.muted = false;
+                    Turn::Mine { left: ALONE * fs }
                 } else if waited > 4.0 * fs {
                     // Nobody took a turn. On with it.
                     self.muted = false;
@@ -562,12 +612,19 @@ impl Call {
         !self.looped
     }
 
+    /// Whether the numbers of the call are the data, with no waveform:
+    /// samples, codewords, or the codec's levels a sample at a time.
+    fn numbers(&self) -> bool {
+        matches!(self.mode, VarcMode::Linear | VarcMode::G711) || self.locked
+    }
+
     /// The ends as they would be with nothing to agree: both the same.
     fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool, direct: bool) -> Agreed {
         Agreed {
             wanted,
             two_wire,
             direct,
+            locked: false,
             send_hz: fs_out,
             hear_hz: fs,
             send_times: 1,
@@ -626,6 +683,7 @@ impl Call {
                 let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
                 Box::new(Faster::paced(tx, agreed.send_times * slow, fs / BUILT_FOR / slow as f64))
             }
+            VarcMode::Pcm if self.locked => Box::new(locked::Tx::new(fs, &self.codewords().0)),
             VarcMode::Pcm if slowed == 0 => {
                 let tx = Box::new(Twice::new(Box::new(sc::Tx::new(self.shape().coloured(colour)))));
                 Box::new(Faster::paced(tx, agreed.send_times, fs / BUILT_FOR))
@@ -660,6 +718,10 @@ impl Call {
                 let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
                 Box::new(Slower::paced(rx, agreed.hear_times * slow, fs / BUILT_FOR / slow as f64))
             }
+            VarcMode::Pcm if self.locked => {
+                let (levels, quiet) = self.codewords();
+                Box::new(locked::Rx::new(fs, &levels, quiet))
+            }
             VarcMode::Pcm if slowed == 0 => {
                 let rx = Box::new(Half::new(Box::new(sc::Rx::new(self.shape().coloured(colour)))));
                 Box::new(Slower::paced(rx, agreed.hear_times, fs / BUILT_FOR))
@@ -691,6 +753,8 @@ impl Call {
             return FITS[fit].0 * hz;
         }
         let fastest = match self.mode {
+            // A level in each sample of the call.
+            VarcMode::Pcm if self.locked => return hz,
             VarcMode::Qam => hz / 3.0,
             VarcMode::Pcm => 2.0 * hz / 3.0,
             _ => return 0.0,
@@ -725,6 +789,9 @@ impl Call {
             Wanted::Dmt if agreed.direct && !self.inexact && self.exact_line => VarcMode::Linear,
             Wanted::Dmt => VarcMode::Dmt,
         };
+        // The baseband mode on a call in G.711 sends the codec's own levels,
+        // one in each sample, until that has been tried and failed.
+        self.locked = self.mode == VarcMode::Pcm && agreed.locked && !self.unlocked && self.g711.is_some();
         self.built_at = self.samples;
         // A baud that was asked for, by either end for what it hears, is
         // where that direction starts; and where it stays, since somebody
@@ -754,7 +821,7 @@ impl Call {
             pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
         let mut station = Station::new(fs, pairs);
-        station.level_is_fixed(matches!(self.mode, VarcMode::Linear | VarcMode::G711));
+        station.level_is_fixed(self.numbers());
         station.compress(self.squeeze);
         Ok(station)
     }
@@ -814,12 +881,6 @@ impl Call {
         }
     }
 
-    /// Say that the line is one pair of wires, or is not. Before the call's
-    /// first sample.
-    pub fn two_wire(&mut self, two_wire: bool) {
-        self.two_wire = two_wire;
-    }
-
     /// How far down each channel's canceller has taken this end's echo, in
     /// decibels, and how far round the line it found it, in samples. Empty
     /// on a line with a wire each way.
@@ -859,7 +920,7 @@ impl Call {
         // First, each end says what it is, and the two work out what they
         // will do. Until that is done there is no modulation to run.
         if self.station.is_none() && self.agreed.is_none() && self.greets() {
-            let (calling, wanted, two_wire, asks_baud) = (self.calling, self.wanted(), self.two_wire, self.asks_baud);
+            let (calling, wanted, asks_baud) = (self.calling, self.wanted(), self.asks_baud);
             let line = self.line();
             let hello = self.hello.get_or_insert_with(|| {
                 Hello::new(
@@ -869,8 +930,7 @@ impl Call {
                         sends_hz: fs_out as u32,
                         channels: input.len() as u8,
                         wanted,
-                        two_wire,
-                        heard: false,
+                        two_wire: false,
                         asks_baud,
                         line,
                         fit: 0,
@@ -904,10 +964,10 @@ impl Call {
                 ));
             }
             said.push(format!(
-                "V.ARC: agreed on {}, {:.0} Hz out and {:.0} Hz back",
-                if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
+                "V.ARC: agreed on {:.0} Hz out and {:.0} Hz back{}",
                 agreed.send_hz,
-                agreed.hear_hz
+                agreed.hear_hz,
+                if agreed.two_wire { "; each end first looks for its own echo" } else { "" }
             ));
             said.extend(agreed.notes.iter().map(|note| format!("V.ARC: {note}")));
             self.notes.push(said.join("\n"));
@@ -917,13 +977,10 @@ impl Call {
             let agreed = match self.agreed.clone() {
                 Some(agreed) => agreed,
                 None => {
-                    // Nobody to agree with: this end as it was asked to be.
-                    if self.two_wire && fs != fs_out {
-                        return Err(format!(
-                            "V.ARC two-wire needs its input and output on one sound card at one rate: this line hears at {fs} Hz and sends at {fs_out} Hz. A line with a wire each way is plain V.ARC"
-                        ));
-                    }
-                    Self::alone(fs, fs_out, self.wanted(), self.two_wire, self.line() != Line::Sound)
+                    // Nobody to agree with: a lead that comes straight
+                    // back. What it hears is itself, and that is no echo to
+                    // take out.
+                    Self::alone(fs, fs_out, self.wanted(), false, self.line() != Line::Sound)
                 }
             };
             let mut station = self.build(fs, &agreed, input.len())?;
@@ -956,11 +1013,28 @@ impl Call {
         }
         if self.turn != Turn::Both {
             self.take_turns(fs, input);
-        } else if self.greets() && !matches!(self.mode, VarcMode::Linear | VarcMode::G711) {
+        } else if self.greets() && !self.numbers() {
             // Not while the numbers of the call are the data: they are not
             // sound, and the modes that use them say for themselves when
             // they do not arrive.
             self.slow_down(fs, fs_out, input)?;
+        }
+        if self.unechoed && self.turn == Turn::Both {
+            // The turns are over and this end has no echo. It starts again
+            // as an end on a wire each way: at its full level, and with a
+            // receiver that did not hear the turns.
+            self.unechoed = false;
+            if let Some(agreed) = self.agreed.as_mut() {
+                agreed.two_wire = false;
+            }
+            self.station = None;
+            self.watch = None;
+            self.deaf = 0;
+            self.unheard = 0.0;
+            self.heard_once = false;
+            self.read_before = 0;
+            self.trim_said = 0.0;
+            return Ok(true);
         }
         let station = self.station.as_mut().expect("just built");
         if self.echo.is_empty() {
@@ -1045,14 +1119,18 @@ impl Call {
         // time, so both give up on it at about the same time and start
         // again as the modulation, which only wants the line to be clean.
         // What the two ends agreed in the handshake stands.
-        if matches!(self.mode, VarcMode::Linear | VarcMode::G711) && self.first_loaded.is_none() {
+        if (matches!(self.mode, VarcMode::Linear | VarcMode::G711) || self.locked) && self.first_loaded.is_none() {
             let waited = (self.samples - self.built_at) as f64 / fs;
             let heard = station.channels.iter().any(|c| c.rx.health().locked);
             if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
-                self.inexact = true;
-                self.notes.push(if self.mode == VarcMode::G711 {
+                self.notes.push(if self.locked {
+                    self.unlocked = true;
+                    "V.ARC: the call does not carry a level of the codec in each sample; carrying on at 5333 baud".to_owned()
+                } else if self.mode == VarcMode::G711 {
+                    self.inexact = true;
                     "V.ARC: the call does not carry G.711 codewords as they were sent; carrying on as the multicarrier mode".to_owned()
                 } else {
+                    self.inexact = true;
                     "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned()
                 });
                 self.station = None;
@@ -1131,7 +1209,7 @@ impl Call {
 
     pub fn phase(&self) -> &'static str {
         if let Some(hello) = self.hello.as_ref() {
-            return if hello.theirs().is_some() { "V.ARC: agreeing with the far end" } else { "V.ARC: calling the far end" };
+            return hello.stage();
         }
         match self.turn {
             Turn::Quiet { .. } => return "V.ARC: waiting for the line to go quiet",
@@ -1222,12 +1300,12 @@ impl Call {
             )
         };
         let asked = |caps: &Caps| {
-            let mode = match caps.wanted {
+            match caps.wanted {
                 Wanted::Dmt => "multicarrier",
                 Wanted::Qam => "QAM",
                 Wanted::Pcm => "baseband levels",
-            };
-            format!("{mode}, {}", if caps.two_wire { "one pair of wires" } else { "a wire each way" })
+            }
+            .to_owned()
         };
         // While it is still going on, what has arrived so far.
         let far = self.hello.as_ref().and_then(|hello| hello.theirs().copied()).or(self.far);
@@ -1235,13 +1313,16 @@ impl Call {
             Some(caps) => {
                 rows.push(("V.ARC hello", said(&caps)));
                 rows.push(("asked for", asked(&caps)));
-                if self.hello.is_some() {
-                    rows.push(("far end", if caps.heard { "has heard this end" } else { "has not heard this end yet" }.to_owned()));
+                if let Some(hello) = self.hello.as_ref() {
+                    rows.push(("transaction", hello.stage().trim_start_matches("V.ARC: ").to_owned()));
                 }
             }
             None if self.hello.is_some() => {
-                let (ours, theirs) = if self.calling { ("1000 and 1400", "2000 and 2400") } else { ("2000 and 2400", "1000 and 1400") };
-                rows.push(("V.ARC hello", format!("calling on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
+                let (ours, theirs) = if self.calling { (1200, 2400) } else { (2400, 1200) };
+                rows.push(("V.ARC hello", format!("carrier on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
+                if let Some(hello) = self.hello.as_ref() {
+                    rows.push(("transaction", hello.stage().trim_start_matches("V.ARC: ").to_owned()));
+                }
             }
             None => {}
         }
@@ -1249,10 +1330,10 @@ impl Call {
             rows.push((
                 "agreed",
                 format!(
-                    "{}, {:.0} Hz out and {:.0} Hz back",
-                    if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
+                    "{:.0} Hz out and {:.0} Hz back, {}",
                     agreed.send_hz,
-                    agreed.hear_hz
+                    agreed.hear_hz,
+                    if agreed.two_wire { "with an echo canceller" } else { "no echo canceller" }
                 ),
             ));
             for note in &agreed.notes {
@@ -1278,8 +1359,8 @@ impl Call {
         self.hello.is_some()
     }
 
-    /// The handshake's tones as heard since this was last asked: which of
-    /// the far end's two is arriving, between minus one and one.
+    /// The handshake's bits as heard since this was last asked: one for a
+    /// carrier that stayed as it was, minus one for one that turned over.
     pub fn take_symbols(&mut self) -> Vec<f64> {
         std::mem::take(&mut self.symbols)
     }

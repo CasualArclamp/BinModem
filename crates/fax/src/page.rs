@@ -218,6 +218,14 @@ impl Halftone {
 /// many lines tall that makes it, capped at the A4 sheet -- a picture taller
 /// than A4 is scaled down to fit it, as before.
 pub fn render(image: &Grey, resolution: Resolution, halftone: Halftone) -> Page {
+    ink(lay(image, resolution), resolution, halftone)
+}
+
+/// Lay an image on the paper, as [`render`] does before it turns grey to
+/// ink: `WIDTH` values across each scan line, one line after another, 0.0
+/// for paper and 1.0 for ink. A page with tone is three of these, one for
+/// each of red, green and blue.
+pub fn lay(image: &Grey, resolution: Resolution) -> Vec<f32> {
     let max_lines = resolution.lines();
     let height = if image.width == 0 || image.height == 0 {
         max_lines
@@ -228,7 +236,7 @@ pub fn render(image: &Grey, resolution: Resolution, halftone: Halftone) -> Page 
         let lines = (image.height as f64 / image.width as f64) * WIDTH_MM * resolution.lines_per_mm();
         (lines.round() as usize).clamp(1, max_lines)
     };
-    ink(image.fit(WIDTH, height, resolution.lines_per_mm()), resolution, halftone)
+    image.fit(WIDTH, height, resolution.lines_per_mm())
 }
 
 /// Turn grey that is already on the paper into a page: `WIDTH` values across

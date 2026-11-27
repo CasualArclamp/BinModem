@@ -1165,6 +1165,7 @@ fn over_the_voip_line_the_resyncs_e_from_the_source_comes_after_the_recipients()
         // to hear the far end's, on the link's clock: call, then answer.
         let mut began: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
         let mut heard: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut queued: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
         let mut was = [(false, false); 2];
         let done = link.run_until(40.0, |l| {
             for (k, end) in l.ends().into_iter().enumerate() {
@@ -1175,6 +1176,8 @@ fn over_the_voip_line_the_resyncs_e_from_the_source_comes_after_the_recipients()
                 }
                 if now.1 && !was[k].1 {
                     heard[k].push(l.seconds());
+                    // What an end has to send the moment the far E comes.
+                    queued[k].push(control.transmitter.pending_bits());
                 }
                 was[k] = now;
             }
@@ -1195,6 +1198,32 @@ fn over_the_voip_line_the_resyncs_e_from_the_source_comes_after_the_recipients()
             heard[r][1],
             began[r][1]
         );
+        // So the recipient's E had gone when the source's came, and a source
+        // that looks for the far E only after its own would have missed it
+        // (live-1795769529): the recipient sends E's twenty ones again, as
+        // the first of its data. The source, whose E went after the far one
+        // came, sends nothing extra: it has only what this test's ends keep
+        // queued, and the recipient has that and twenty bits more.
+        assert_eq!(
+            queued[r][1],
+            queued[s][1] + control::E_BITS,
+            "{source:?} source: the recipient did not send E again, or the source did: {queued:?}: {what}"
+        );
         finish(&mut link, 40.0);
     }
+}
+
+/// The rate the recipient asks for leaves a page's allowance under the
+/// signal to noise it trained to: the line of 2026-11-27, 32.7 dB at 3429
+/// Bd, is asked for 26 400 bit/s and not the 28 800 that lost one frame in
+/// forty.
+#[test]
+fn the_recipient_asks_for_a_rate_with_a_pages_allowance_in_hand() {
+    assert_eq!(super::rate_by_snr(32.7, 3429.0), 11);
+    // 6 dB would have had 28 800 from 31.3 dB up; it now wants 33.8 dB.
+    assert_eq!(super::rate_by_snr(33.7, 3429.0), 11);
+    assert_eq!(super::rate_by_snr(33.9, 3429.0), 12);
+    // A clean line still gets everything, and a poor one a rate.
+    assert_eq!(super::rate_by_snr(46.0, 3429.0), 14);
+    assert_eq!(super::rate_by_snr(5.0, 2400.0), 1);
 }

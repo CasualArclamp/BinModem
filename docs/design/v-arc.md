@@ -38,7 +38,7 @@ call of this modem starts, because the far end can be any modem.
 | Step | What it is | What it decides |
 |---|---|---|
 | 1 | V.8: ANSam, CM, JM, CJ | Whether the two ends have V.ARC |
-| 2 | The V.ARC handshake: 200 bit/s, two tones for each direction | Rates, channels, wires, the modulation, and what the line is made of |
+| 2 | The V.ARC handshake: 300 bit/s DBPSK, one carrier for each direction, CL then MS then ACK | Rates, channels, wires, the modulation, and what the line is made of |
 | 3 | The mode | The tables, then data |
 
 This sequence is the same on a sound card, on an EasySip line and on a SIP
@@ -57,7 +57,7 @@ modem that is set to V.ARC puts one block in that category of its menu:
 | `FF FF` | the T.35 country code |
 | `04` `42 69 6E 4D` | the length of the provider code, and the code "BinM" |
 | `01` | the edition of this block |
-| flags | bits 1 and 2: multicarrier, QAM or baseband levels; bit 3: one pair of wires |
+| flags | bits 1 and 2: multicarrier, QAM or baseband levels; bit 3: not used (it asked for one pair of wires) |
 
 - The block is the same block that V.8 bis carries. See
   [V.8 bis](#v8-bis). The codes are not registered.
@@ -88,17 +88,27 @@ mode. Step 2 does that.
 ### Step 2: the V.ARC handshake
 
 This is the V.ARC equivalent of V.8. See [The handshake](#the-handshake)
-for the signal. Each end sends one message again and again until each has
-the message of the other. The message says:
+for the signal. It is one transaction of three messages, with the shape of
+a V.8 bis transaction:
+
+| Message | From | What it says |
+|---|---|---|
+| CL | The caller | The capabilities of the caller |
+| MS | The answerer | The capabilities of the answerer, and the mode that the answerer selected |
+| ACK | The caller | The caller has the MS and selected the same mode |
+
+The capabilities of an end are:
 
 - the rates at which this end hears and sends
 - the number of channels
 - the modulation that this end was set to
-- whether this end was told that the line is one pair of wires
+- a bit that is not used (it asked for one pair of wires)
 - what the line of this end is made of: a sound card, a SIP call in linear
   samples, a SIP call in A-law, or a SIP call in mu-law
+- the fit that the band of this end passes (see [The line probe](#the-line-probe))
 
-Both ends then calculate the same result from the two messages. On a SIP
+Each end sends its message again and again until the reply arrives. Both
+ends calculate the same result from the two sets of capabilities. On a SIP
 call the handshake runs at the rate of the call. For G.711 that is 8 kHz.
 
 ### Step 3: the mode on each line
@@ -113,8 +123,9 @@ call the handshake runs at the rate of the call. For G.711 that is 8 kHz.
 - The two direct modes (V.ARC/L16, V.ARC/G.711) are a trial. If nothing is
   heard in 4 s, or the ends have no connection in 10 s, the call continues
   as the multicarrier modulation. The handshake does not run again.
-- `VARC2W` on a SIP call runs as `VARC`. A SIP call has a path for each
-  direction and no echo. The transcript says so.
+- A call on a sound card looks for an echo before the modulation starts.
+  See [One pair of wires](#one-pair-of-wires-the-echo-canceller). A SIP
+  call has a path for each direction and no echo, and does not look.
 - If the two ends were set to different modulations, the multicarrier
   modulation runs.
 
@@ -129,12 +140,15 @@ thus its band is the band of the call:
 | V.ARC/G.711 | 8000 codewords each second | 60 928 bit/s in A-law, 56 832 in mu-law, after the first tables |
 | V.ARC/DMT | carriers 15.6 Hz apart, to 3.4 kHz | 25 700 to 26 100 bit/s |
 | V.ARC/QAM | 3700 baud on a carrier at 2000 Hz, 58 Hz to 3942 Hz, with the trellis code | 37 000 bit/s |
-| V.ARC/PCM | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
+| V.ARC/PCM | 8000 baud, a level of the codec in each sample | 53 312 bit/s, after the first tables |
+| V.ARC/PCM, stepped down | 5333 baud, 0 Hz to 3.2 kHz | 22 500 bit/s |
 
 - The modulations do not need exact codewords. A call that a gateway
   decodes and codes again carries them at the same rates.
-- With a 300 Hz high-pass filter in the path, V.ARC/PCM connected at
-  9000 bit/s.
+- V.ARC/PCM sends the levels of the codec, one in each sample, as V.90
+  does. See [V.ARC/PCM on a call in G.711](#varcpcm-on-a-call-in-g711).
+- With a 300 Hz high-pass filter in the path, V.ARC/PCM steps down to the
+  waveform and connected at 9000 bit/s.
 - V.ARC/QAM fits its baud to the band that the call passes. See
   [V.ARC/QAM on a narrow line](#varcqam-on-a-narrow-line).
 - `AT+VARC=<baud>,<code>,<bits>` applies on a SIP call also. The baud is
@@ -402,11 +416,12 @@ must know the band before it selects a fit. The V.ARC handshake measures
 it, as the line probe of V.34 does (10.1.2.3), but smaller.
 
 - On a line of 16 kHz or less, each end sends seven weak steady tones below
-  its handshake tones. At 8 kHz they are 600 Hz and 2800 Hz in the middle of
-  the band, 100 Hz and 200 Hz at the bottom, and 3600 Hz, 3800 Hz and
+  its handshake carrier. At 8 kHz they are 1800 Hz and 3000 Hz in the middle
+  of the band, 100 Hz and 200 Hz at the bottom, and 3600 Hz, 3800 Hz and
   3900 Hz at the top.
-- The two middle tones are two bit rates from the nearest handshake tone.
-  The handshake receiver hears nothing there.
+- The two middle tones are 375 Hz or more from the band of each handshake
+  carrier, at 8 kHz and at 16 kHz. The handshake receiver hears nothing
+  there.
 - Each end measures the tones of the other end in blocks of 0.1 s. It
   waits for three blocks in which the middle tones are present and stable.
 - An edge tone passes if it is not more than 6 dB below the middle tones.
@@ -418,11 +433,12 @@ it, as the line probe of V.34 does (10.1.2.3), but smaller.
 | 200 Hz and 3600 Hz | 3 |
 | less than that | none: the carrier as it is built |
 
-- An end sends no handshake message until it has measured. Until then it
-  sends the idle tone and its probe. The message then says which fit this
-  end can hear.
-- If the message of the far end arrives and no probe was measured, the far
-  end has no probe. The end then says "none" and continues.
+- An end sends no CL and no MS until it has measured. Until then it
+  sends flags and its probe. The message then says which fit this end can
+  hear.
+- If the carrier of the far end is there for 0.8 s and no probe was
+  measured, the far end has no probe. The end then says "none" and
+  continues.
 - If an end hears nothing of the modulation at one fit, it asks for the
   next fit, then for the carrier as it is built, then for halves of that.
   This is the procedure of
@@ -504,34 +520,84 @@ not have the same sound card: one hears at 192 kHz and sends at 48, the
 other has one device both ways, one was told the line is a single pair of
 wires and the other was not. Nothing in a wideband signal can settle that,
 because until it is settled neither end knows what signal to listen for.
-Before this, both simply started, and a pair that did not match heard
-nothing for a minute and said `NO CARRIER`.
 
-- **200 bits a second, two tones a direction**, in the middle of the voice
-  band: the caller sends 1000 Hz for a one and 1400 Hz for a nought, the
-  answerer 2000 Hz and 2400 Hz. A telephone channel carries them, and the
-  sample rate of the card making or hearing them does not matter.
-- **All four are multiples of the bit rate**, and each is measured over one
-  bit through a raised-cosine window, so an end on one pair of wires hears
-  the far end's tones through its own with no echo canceller. With a square
-  window it did not: each change of its own tone splashed across the far
-  end's.
-- **Asynchronous characters**, a start bit and a stop bit, so there is no
-  clock to recover.
-- **One message of 16 octets, over and over**: the rates this end hears and
-  sends at, how many channels, which modulation it was asked for, whether it
-  was told two-wire, what its line is made of, which fit of a single carrier
-  its band passes, and whether it has the far end's message yet; then a
-  CRC.
-- When an end has the far end's message and has seen in it that the far end
-  has its own, it sends once more and stops. About four seconds.
+The handshake has the shape of a V.8 bis transaction: a capabilities list,
+a mode select and an acknowledgement.
 
-What it looks like on the line, recorded off a virtual cable both ends were
-on: the answerer's pair at 2000 and 2400 Hz, the caller's at 1000 and
-1400 Hz starting a second later, six messages each, a moment of quiet, and
-then the first end's turn alone on the line.
+**The signal**
 
-![The handshake's tones, then quiet, then the caller's turn](../images/v-arc/handshake-tones.png)
+- **300 bit/s DBPSK.** The caller sends on a 1200 Hz carrier and the
+  answerer on 2400 Hz. A nought turns the carrier over. A one does not
+  change it.
+- **A root raised cosine** with an excess bandwidth of 0.5 shapes each
+  symbol. Each direction keeps to 450 Hz: 975 Hz to 1425 Hz, and 2175 Hz to
+  2625 Hz. Less than a thousandth of the power is more than 300 Hz from the
+  carrier.
+- An end on one pair of wires hears the far end through its own signal with
+  no echo canceller, because the two bands do not touch.
+- A telephone channel carries both carriers. The sample rate of the card
+  does not matter.
+- The receiver has a symbol clock. It compares the energy a quarter of a
+  symbol before and after each symbol, and moves to the middle.
+- The level is -15 dBFS RMS.
+
+**The frames**
+
+The frames are HDLC frames, as in V.8 bis: flags between frames, a nought
+after each five ones, and a 16-bit frame check sequence. The first octet
+has the message type in its low half and the revision (1) in its high
+half. MS, CL, ACK and NAK have the type codes of V.8 bis.
+
+| Message | Type | Octets | What follows the type |
+|---|---|---|---|
+| MS | 0001 | 14 | Capabilities (12 octets), then the selected mode (1 octet) |
+| CL | 0010 | 13 | Capabilities (12 octets) |
+| ACK | 0100 | 1 | Nothing |
+| NAK | 1000 | 1 | Nothing |
+
+The capabilities are: one octet of flags (two-wire, the line, the fit), the
+modulation, the channels, and three numbers of 24 bits (the rate this end
+hears at, the rate it sends at, the baud it asks for). The selected mode is
+one octet: the modulation, the wires, and whether the numbers of the call
+are the data. `FF` means that the two ends have no mode in common.
+
+**The transaction**
+
+1. Each end starts with 16 noughts, for the clock of the far end, and then
+   sends flags.
+2. The caller sends CL again and again.
+3. The answerer reads the CL. It calculates the mode from the two sets of
+   capabilities (`hello::agree`). It sends MS again and again.
+4. The caller reads the MS. It calculates the mode for itself. If the two
+   results are the same, it sends ACK three times and starts the mode. If
+   they are not, it sends NAK three times and the call stops.
+5. The answerer reads the ACK and starts the mode.
+
+If each ACK is lost, the answerer hears no caller for 4 s. It then starts
+the mode, because a caller that sent its ACK is silent on its carrier.
+
+The transaction takes about 1.5 s on a sound card. On a line of 16 kHz or
+less the probe adds about 0.5 s.
+
+What the answerer sends on a real G.711 call between two `modem-sip` on one
+machine. The call has about 0.3 s of delay each way, thus the MS goes about
+three times before the ACK arrives.
+
+![The answerer's carrier at 2400 Hz: flags, then MS frames, above and below it the probe](../images/v-arc/handshake-dbpsk.png)
+
+**Against the earlier handshake**
+
+The earlier handshake (to 5.6.0) was 200 bit/s FSK with two tones for each
+direction, asynchronous characters, and one message that each end sent
+until it saw a "heard" flag. Measured in simulation, two ends at 48 kHz:
+
+| | FSK, to 5.6.0 | DBPSK, CL, MS and ACK |
+|---|---|---|
+| Time on a clean line | 4.3 s | 1.5 s |
+| Most noise it gets through (signal to noise in 24 kHz) | -9 dB | -12 dB |
+
+A build with the earlier handshake cannot make a V.ARC call with this one. Use the same
+build at both ends.
 
 Both ends then work out the same answer from the same two messages
 (`hello::agree`):
@@ -539,24 +605,24 @@ Both ends then work out the same answer from the same two messages
 | Question | Answer |
 |---|---|
 | What rate does each direction run at? | The slower of the two cards on it. The end with the faster card converts, by a whole number of times (`Faster`, `Slower`). Cards that no whole number relates, 44.1 and 48 kHz, are told so. |
-| One pair of wires? | If either end was told so, and both hear and send on one card at one rate, and the line is not a SIP call. Otherwise a wire each way, with a note. |
+| Does each end look for its echo? | Yes, if both ends hear and send on one card at one rate, and the line is not a SIP call. An end that hears no echo uses no canceller. |
 | Are the numbers of the call the data? | Only if both ends are on a SIP call of the same coding at one rate. See [The start of a call](#the-start-of-a-call). |
 | Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
 
-While it lasts the symbol scope shows the far end's tones as it shows any
-FSK. The window's "distant" panel shows what the far end said and what was
-agreed, where a V.8 menu would be:
+While it lasts the symbol scope shows each bit of the far end: up for a
+carrier that did not change, down for a carrier that turned over. The
+window's "distant" panel shows what the far end said, where the transaction
+is, and what was agreed, where a V.8 menu would be:
 
 ![What the far end said in the handshake](../images/v-arc/hello.png)
 
 There is no handshake on a lead that comes straight back (`ATDLOOP`), where
 there is nobody else. Each other call has it, a SIP call included.
 
-Run for real, both on one machine: Line In at 192 kHz with CABLE-B at 48 kHz
-the other way (2.13 and 0.80 Mbit/s, as before it), and two ends sharing
-VB-Cable A two-wire. A fast card calling a slow one, and two ends
-told two-wire that cannot be, are tested in simulation only: there is no
-pair of real devices here to wire that way.
+Run for real: a V.ARC/QAM call in G.711 mu-law between two `modem-sip` on
+one machine (37 000 bit/s each way). The sound card rigs are tested in
+simulation only with this handshake: two cards at different rates, a fast
+card that calls a slow one, and one pair of wires.
 
 Two things it turned up in the receiver, both now fixed:
 
@@ -581,7 +647,7 @@ define (8.5). The modem puts a block in that field beside its usual list:
 | `FF FF` | country code |
 | `04` `42 69 6E 4D` | provider code, "BinM", and its length |
 | `01` | edition of this block |
-| flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: one pair of wires |
+| flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: not used (it asked for one pair of wires) |
 
 "Non-standard field" is set in the identification field (Table 5-1) and
 "non-standard capabilities" is set below the data mode (Table 6-3a).
@@ -602,7 +668,7 @@ The transaction is then as it was (CRe, CRd, CL, MS, ACK):
 
 `+VARCBIS=<mode>,<wires>` sets what a modem lists when `+MS` names an
 ordinary mode. Mode 0 is off (the default), 1 is multicarrier, 2 is QAM, 3
-is PCM. Wires 1 is one pair of wires. With `+MS=VARC` or one of the other
+is PCM. The modem accepts `<wires>` and does not use it. With `+MS=VARC` or one of the other
 V.ARC modes, the modem lists that mode and `+VARCBIS` is not necessary.
 In the window, the setting is below the V.8 bis switch.
 
@@ -623,8 +689,8 @@ about it.
 
 - **Saying so.** A receiver that has read nothing of the far end for
   `6 + 3 x speed` seconds starts listening for the modulation at half the
-  speed and says so in the handshake's tones (a `VN` message of six octets,
-  three times over, `hello::Watch`). It cannot say so in the modulation,
+  speed and says so on the handshake's carrier (a frame of type 1110 with
+  one octet, three times over, `hello::Watch`). It cannot say so in the modulation,
   since it does not know its own is heard. Its own sending waits while it
   does: a second and a bit.
 - **Slowing.** An end that hears that said sends at the speed it was told.
@@ -784,9 +850,73 @@ is needed.
 
 ## One pair of wires: the echo canceller
 
-Everything above supposes a wire each way. `AT+MS=VARC2W` is the multicarrier
-mode on a line where both ends send into the same pair, and each hears the
-other with its own signal on top (`echo.rs`).
+Everything above supposes a wire each way. On one pair of wires both ends
+send into the same pair, and each hears the other with its own signal on top
+(`echo.rs`).
+
+### The call finds the type of line
+
+There is one way to run a V.ARC call. The modes `VARC2W`, `VARCQ2W` and
+`VARCP2W` told the modem that the line was one pair of wires. They are now
+other names for `VARC`, `VARCQ` and `VARCP`.
+
+- Each call on a sound card starts with the turns that are given below.
+  Each end has the line to itself for 2 s.
+- An end that hears its own signal come back keeps its canceller.
+- An end that hears nothing come back has no echo. When the turns are
+  complete, it starts again with no canceller and at its full level.
+- An end also drops a canceller that did not learn the echo, if the echo
+  is 20 dB or more below the sound of the handshake.
+- The turns add approximately 4 s to the start of a call.
+- A SIP call does not look for an echo. A call where an end hears and
+  sends on two sound cards does not look, because two cards cannot cancel
+  an echo.
+
+A canceller with no echo to learn is not harmless. It learns the far end as
+if the far end were an echo, and that adds noise. The table shows a line
+with a wire each way in simulation at 48 kHz, after 50 s.
+
+| Mode | Told one pair of wires, before | A wire each way | Now |
+|---|---|---|---|
+| Multicarrier | 337 kbit/s, and it started at 153 | 437 kbit/s | 437 kbit/s |
+| QAM | 160 kbit/s | 338 and 356 kbit/s | 338 and 356 kbit/s |
+| PCM | 90 kbit/s | 306 and 333 kbit/s | 306 and 333 kbit/s |
+
+Two `varc-link` ends on one machine, V.ARC/QAM, with nothing set for the
+type of line:
+
+| Line | What the call found | After 40 s to 60 s |
+|---|---|---|
+| VB-Cable A one way and VB-Cable B the other way | no echo at each end | 369 and 372 kbit/s, 0 octets incorrect |
+| VB-Cable A, shared | an echo 151 ms round the line, 28 dB down after the turn | 181 and 187 kbit/s, 0 octets incorrect |
+
+### A different carrier in each direction does not help
+
+Does QAM on one pair of wires get a better result if the two directions
+have different carriers? The measurement says no.
+
+- The canceller subtracts a filtered copy of the samples that this end
+  sent. It does not use the carrier.
+- The two directions already use different sync words, thus a receiver
+  does not lock to its own echo.
+- A small difference keeps the two bands on top of each other. A large
+  difference pushes one band against the edge of the line.
+
+In simulation the carrier of one direction was moved. The echo was 6 dB
+louder than the far end. The table shows the two directions after 50 s.
+
+| Carrier difference | Echo of four samples | Echo with a tail of 2 ms |
+|---|---|---|
+| 0 Hz | 177.5 and 191 kbit/s | 175.5 and 164 kbit/s |
+| 500 Hz | 181.5 and 189 kbit/s | 179.5 and 158 kbit/s |
+| 1000 Hz | 156 and 177.5 kbit/s | 171.5 and 160 kbit/s |
+| 2000 Hz | 126 and 131 kbit/s | 138.5 and 137 kbit/s |
+
+The limit for QAM on one pair of wires is the canceller. It leaves the
+signal approximately 41 dB above the echo. The multicarrier mode has a
+second stage that goes to 70 dB and more. QAM does not have that stage.
+
+### The canceller
 
 - **Where the echo is.** A sound card puts tens of milliseconds between a
   sample written and the same sample heard. The delay is found by laying a
@@ -806,8 +936,8 @@ other with its own signal on top (`echo.rs`).
 It needs one sound card, input and output at the same rate, since it lays
 what was sent against what was heard sample for sample.
 
-`AT+MS=VARCQ2W` and `AT+MS=VARCP2W` are the single-carrier modes on one pair
-of wires. The canceller in front knows nothing of the modulation and serves
+The single-carrier modes run on one pair of wires also. The canceller in
+front knows nothing of the modulation and serves
 them as it is; the second stage below is the multicarrier receiver's and
 they do not have it, so they settle where the first stage leaves them. On
 the shared virtual cable, learning while the far end talked: QAM 85 to
@@ -824,7 +954,7 @@ the shared virtual cable, learning while the far end talked: QAM 85 to
 **Turns.** After the handshake, and before either modulation is heard by
 anyone, each end has the line to itself (`Turn` in the modem's `varc.rs`):
 
-1. Both fall silent until the handshake's tones have gone.
+1. Both fall silent until the handshake's carriers have gone.
 2. The caller sends alone for 2 s. Its canceller finds its echo and fits
    it against the line's noise and nothing else.
 3. The caller stops; when its echo has died away the answerer hears the line
@@ -1047,6 +1177,86 @@ were a fifth of the line. After forty blocks with nothing missing the
 receiver asks for none (sixteen in mu-law), and for the forty-eight again
 at the first hole or the first frame that fails.
 
+## V.ARC/PCM on a call in G.711
+
+A waveform through G.711 has a signal to noise ratio of approximately
+38 dB. The codec rounds each sample to one of its levels, and that
+rounding is noise. V.ARC/PCM as a waveform runs at 5333 baud, which is not
+the rate of the codec, thus its levels fall between the levels of the
+codec.
+
+V.90 does not have that noise in one direction. The digital modem sends
+the levels of the codec, one in each sample, and the far end learns what
+each level arrives as. On a SIP call both ends are digital, thus V.ARC/PCM
+does this in both directions (`locked.rs`).
+
+**The signal**
+
+- 8000 symbols each second. Each symbol is one codeword of the law of the
+  sender.
+- A superframe is 1000 samples: a sync word of 48 samples, then a block of
+  952 samples. There are eight superframes each second.
+- The sync word is in the signs of its samples. A path can change a level,
+  but it does not change the sign.
+
+**The starting table**
+
+- The starting table has one bit in each sample: the sign.
+- The size of each sample is not data. It goes through all 128 sizes in an
+  order that the two ends know.
+- Thus the receiver learns what each of the 256 codewords of the sender
+  arrives as, while the link carries its first frames.
+- A size comes one sample sooner each time. A path that changes each sixth
+  sample (a robbed bit) then changes each size.
+
+**The set**
+
+1. After eight blocks (1 s) the receiver has each codeword and the levels
+   it arrived as.
+2. It keeps the codewords that arrive apart from all others. A codeword
+   that arrives as silence is not kept, because a lost packet is silence.
+3. If there are more than a power of two, it removes one of the two
+   nearest, again and again.
+4. It sends the set to the far end as its table: 256 bits, one for each
+   codeword. The most is 128 codewords, which is 7 bits in each sample.
+5. A sample that is not a level of the set is known to be incorrect. The
+   Reed-Solomon code corrects two such samples for the cost of one error.
+
+The code starts with 48 check octets in each codeword, which rebuilds one
+lost packet in a block. After 5 s with no incorrect sample the receiver
+asks for no check octets.
+
+**Stepping down**
+
+| The line | What happens | Rate in simulation |
+|---|---|---|
+| Codewords arrive as sent, in mu-law or A-law | 128 levels, 7 bits | 53 312 bit/s |
+| A-law at one end and mu-law at the other | 128 levels, 7 bits | 53 312 bit/s |
+| A gateway changes the law and changes it back | 128 levels, 7 bits | 53 312 bit/s |
+| A digital pad of 6 dB | 128 levels, 7 bits | 53 312 bit/s |
+| A robbed bit in each sixth sample | 64 levels, 6 bits | 45 696 bit/s |
+| Codewords of a set fail | The full code, then one bit less in each sample | |
+| Not a sample for a sample: a filter, a different codec, a wire | The waveform at 5333 baud | 22 500 bit/s or less |
+
+- The receiver asks for less when the codewords of its set fail: first the
+  48 check octets, then one bit less in each sample.
+- A line that is not a sample for a sample has no set of eight levels or
+  more, or has no sync word. Then no table is agreed. After 4 s with
+  nothing heard, or 10 s with no table, both ends start again as the
+  waveform. The log says `the call does not carry a level of the codec in
+  each sample; carrying on at 5333 baud`.
+- The handshake selects this mode when both ends are on G.711 at 8 kHz, in
+  one law or two, and asked for V.ARC/PCM with no baud set. A baud set
+  with `AT+VARC=<baud>` gives the waveform.
+
+On a real PCMU call between two `modem-sip` on one machine: `CONNECT
+41024/VARC` 2.3 s after the handshake, and the lighter code 4 s later. The
+waveform needed 19 s to connect at 22 500 bit/s.
+
+V.ARC/G.711 (`AT+MS=VARC`) is faster on a call that carries each codeword
+as it was sent: it uses all 256 codewords. It has no smaller set, thus a
+call that changes one codeword stops it.
+
 ## Compression
 
 V.ARC has its own retransmission and so no V.42 over it, which left it
@@ -1191,8 +1401,7 @@ and CABLE-B at 48 kHz, 2.14 Mbit/s one way and 0.80 the other.
 
 Before this a V.ARC call on two such devices ended at once in `NO CARRIER`,
 with the reason only in the transcript. A call the line cannot run now says
-why in red on the line's row of the window: a two-wire call on two devices,
-for one, which is still refused.
+why in red on the line's row of the window.
 
 During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a

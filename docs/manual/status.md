@@ -55,6 +55,11 @@ Phase 2 reads the probe of the far end for 300 ms, not the full 500 that V.34
 permits. A real modem needed the difference to hear our reply. Without the
 difference that modem stalled three times in sequence.
 
+V.34 has an echo canceller for one pair of wires. Two of these modems on one
+shared virtual cable, with an echo 182 ms away, connect at 33 600. Phase 2
+can still fail on that cable. See
+[docs/design/v34-echo.md](../design/v34-echo.md).
+
 ## V.90
 
 V.90 works in both directions.
@@ -114,7 +119,7 @@ and one table.
 | **Terminal** | ANSI/CP437 with mouse reports. Telnet (RFC 854) lets you use the terminal alone |
 | **Settings** | kept between runs, so the modem starts again in the state in which you left it |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, send and receive. V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800). Super G3: V.8, then T.30 Annex F on the half-duplex mode of V.34 at up to 33 600. T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG. T.30 Annex A error correction mode. Any number of pages in a call, each drawn as it arrives. A PDF is sent one page to a sheet at its printed size. The received pages are saved as a PDF |
+| **Fax** | T.30 group 3, send and receive. V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800). Super G3: V.8, then T.30 Annex F on the half-duplex mode of V.34 at up to 33 600. T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG. Greyscale and colour pages as JPEG (T.4 Annex E), send and receive. T.30 Annex A error correction mode. Any number of pages in a call, each drawn as it arrives. A PDF is sent one page to a sheet at its printed size. The received pages are saved as a PDF |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it. A dial-in login prompt, and a login script for calls that BinModem places |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages directly to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |

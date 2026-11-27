@@ -11,10 +11,12 @@ pub mod coding;
 pub mod ecm;
 pub mod frames;
 pub mod jbig;
+pub mod jpeg;
 pub mod mmr;
 pub mod mr;
 pub mod page;
 pub mod pdf;
+pub mod picture;
 pub mod t30;
 pub mod t4;
 

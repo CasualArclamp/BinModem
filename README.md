@@ -30,7 +30,7 @@ trunk.
 | **Commands** | V.250 AT commands and S-registers |
 | **Terminal** | ANSI/CP437 with mouse reports, and telnet (RFC 854) |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600 |
+| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600. Colour and greyscale pages |
 | **Network** | PPP with LCP, PAP, CHAP and IPCP, a dial-in login prompt and a login script |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112) |
 | **SIP** | our own SIP caller (RFC 3261, 3550 and 4566) and a dialler |
@@ -101,14 +101,16 @@ follow it. The session that it carried comes out as text.
 | [docs/usage.md](docs/usage.md) | The AT interface, the live-line setup, ZMODEM, the telnet terminal and every flag |
 | [docs/manual/status.md](docs/manual/status.md) | What works: real calls, V.32bis, V.34, V.90 and the full table of functions |
 | [docs/manual/x2.md](docs/manual/x2.md) | U.S. Robotics x2 as a server, and the test with the Courier firmware |
-| [docs/manual/fax.md](docs/manual/fax.md) | Fax: V.29, V.27 ter, V.17, Super G3 and error correction mode |
+| [docs/manual/fax.md](docs/manual/fax.md) | Fax: V.29, V.27 ter, V.17, Super G3, error correction mode and colour |
 | [docs/manual/network.md](docs/manual/network.md) | PPP, web pages through the proxy, the dial-in server and our own TCP |
 | [docs/manual/window-and-sip.md](docs/manual/window-and-sip.md) | The window and its scopes, the SIP caller and the dialler |
 | [docs/manual/review.md](docs/manual/review.md) | How to read a recording of a call between other parties |
+| [docs/manual/constellations.md](docs/manual/constellations.md) | The received constellation of every mode, over a line with noise |
 | [docs/manual/roadmap.md](docs/manual/roadmap.md) | Work in progress (V.ARC and others) and next steps (V.33, V.92) |
 | [docs/manual/linux.md](docs/manual/linux.md) | Build on Linux |
 | [docs/design/architecture.md](docs/design/architecture.md) | The design and the milestone ladder |
 | [docs/design/v-arc.md](docs/design/v-arc.md) | The design of V.ARC |
+| [docs/design/v34-echo.md](docs/design/v34-echo.md) | The echo canceller of V.34 |
 | [docs/design/v92](docs/design/v92) | The notes and the plan for V.92 |
 
 ## Security notes

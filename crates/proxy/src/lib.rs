@@ -49,9 +49,10 @@ pub const DEFAULT_PORT: u16 = 8080;
 
 /// How much to move between a socket and a connection in one go.
 ///
-/// A modem carries at most a few kilobytes a second, so the size is about how
-/// much work one round of the loop does rather than about throughput.
-pub(crate) const CHUNK: usize = 4096;
+/// One of these moves each round. A dial-up modem carries a few kilobytes a
+/// second and V.ARC on a linear call carries ninety, so this has to be more
+/// than a round of the fastest line.
+pub(crate) const CHUNK: usize = 16 * 1024;
 
 /// How much may be waiting to go one way before this end stops taking more in.
 ///

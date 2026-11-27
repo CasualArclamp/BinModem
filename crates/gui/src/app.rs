@@ -204,15 +204,15 @@ impl Modulation {
             6 => &[300],
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
-            8..=13 => &[0],
+            8..=10 => &[0],
             // Bell 212A, and the Bell 103 it carries for a far end that is
             // one: a ceiling of 300 asks for the 103 outright.
-            14 => &[300, 1200],
-            15 => &[1200],
+            11 => &[300, 1200],
+            12 => &[1200],
             // HST's forward channel: V.17's four trellis rates, 2400 baud.
-            16 => &[7200, 9600, 12_000, 14_400],
+            13 => &[7200, 9600, 12_000, 14_400],
             // The 1986 HST: 9600 and nothing else.
-            17 => &[9600],
+            14 => &[9600],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -282,7 +282,7 @@ fn follow(
     if seen == Some(now) {
         return None;
     }
-    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier)?;
+    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier.trim_end_matches("2W"))?;
     let modulation =
         Modulation { automode: now.automode, min_rate: now.min_rate, max_rate: now.max_rate };
     (index != carrier || modulation != held).then_some((index, modulation))
@@ -326,6 +326,11 @@ const FACE_KEY: egui::Vec2 = egui::vec2(116.0, 36.0);
 
 /// One of the keys under them, which open things rather than do things.
 const SMALL_KEY: egui::Vec2 = egui::vec2(92.0, 24.0);
+/// Each half of the Modem or Fax switch: larger than a face key is tall, so
+/// that what the modem is can be read from across the room.
+const CLASS_KEY: egui::Vec2 = egui::vec2(96.0, 40.0);
+/// The fax class's colour: the amber the scopes already draw fax in.
+const FAX_CLASS: Color32 = Color32::from_rgb(245, 180, 70);
 
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
@@ -973,7 +978,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 18] = [
+    const CARRIERS: [(&'static str, &'static str); 15] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -993,19 +998,13 @@ impl ScopeApp {
         ),
         (
             "VARC",
-            "V.ARC - our own, for a sound card wired to another of these by a stereo lead, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures",
+            "V.ARC - our own, for a sound card wired to another of these, or a SIP call in any coding. The call starts with V.8, and a far end with no V.ARC gets an ordinary call. Hundreds of carriers, each loaded for what the line measures. On one pair of wires each end takes its own echo out; the call finds that out for itself",
         ),
         ("VARCQ", "V.ARC/QAM - the same line with one carrier, at a third of the sample rate in baud"),
-        ("VARCP", "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud"),
         (
-            "VARC2W",
-            "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
+            "VARCP",
+            "V.ARC/PCM - the same line with levels at baseband, at two-thirds of the sample rate in baud. On a call in G.711 the levels are the codec's own, one in each sample, as V.90 has them: up to 53 312 bit/s. A call that will not carry that goes back to 5333 baud",
         ),
-        (
-            "VARCQ2W",
-            "V.ARC/QAM two-wire - one carrier on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
-        ),
-        ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
         (
             "B212",
             "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",
@@ -1667,7 +1666,16 @@ impl ScopeApp {
         }
         self.sip_call_was_up = call_up;
 
-        // The keys a call is made with.
+        // The keys a call is made with. In fax class (+FCLASS=1) the same
+        // keys make fax calls, so the row says so: an amber edge round it,
+        // and the keys named for what they now do.
+        let fax_class = self.frame.fax_class;
+        let edge = if fax_class { FAX_CLASS } else { Color32::TRANSPARENT };
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(2.0, edge))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(6, 5))
+            .show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui
                 .add(face_key("Dial").selected(self.dial_open))
@@ -1680,22 +1688,47 @@ impl ScopeApp {
             {
                 self.dial_open = !self.dial_open;
             }
-            if ui
-                .add_enabled(on_hook, face_key("Originate"))
-                .on_hover_text(
-                    "ATD - be the calling modem. The softphone places the call; \
-                     this only decides which end of it this is",
-                )
-                .clicked()
-            {
-                session.type_bytes(b"ATD\r");
-            }
-            if ui
-                .add_enabled(on_hook, face_key("Answer"))
-                .on_hover_text("ATA - be the answering modem, and go first")
-                .clicked()
-            {
-                session.type_bytes(b"ATA\r");
+            if fax_class {
+                if ui
+                    .add_enabled(on_hook, face_key("Send fax"))
+                    .on_hover_text(
+                        "ATD in fax class - send the Fax tab's pages to the dialler's \
+                         number. The Modem key on the right makes this Originate again",
+                    )
+                    .clicked()
+                {
+                    self.fax_start = Some(crate::faxwin::Start::Dial(self.dial_number.trim().to_owned()));
+                    self.tab = Tab::Fax;
+                }
+                if ui
+                    .add_enabled(on_hook, face_key("Wait for a fax"))
+                    .on_hover_text(
+                        "ATA in fax class - answer with the 2100 Hz tone and keep whatever \
+                         arrives. The Modem key on the right makes this Answer again",
+                    )
+                    .clicked()
+                {
+                    self.fax_start = Some(crate::faxwin::Start::Answer);
+                    self.tab = Tab::Fax;
+                }
+            } else {
+                if ui
+                    .add_enabled(on_hook, face_key("Originate"))
+                    .on_hover_text(
+                        "ATD - be the calling modem. The softphone places the call; \
+                         this only decides which end of it this is",
+                    )
+                    .clicked()
+                {
+                    session.type_bytes(b"ATD\r");
+                }
+                if ui
+                    .add_enabled(on_hook, face_key("Answer"))
+                    .on_hover_text("ATA - be the answering modem, and go first")
+                    .clicked()
+                {
+                    session.type_bytes(b"ATA\r");
+                }
             }
             // Two steps out of data state, and the key says which one it is
             // on. A modem in data state is not listening for commands at all:
@@ -1717,7 +1750,13 @@ impl ScopeApp {
                 .on_hover_text("ATH - put the line down")
                 .clicked()
             {
-                session.type_bytes(b"ATH\r");
+                if fax_class {
+                    // A fax call does not read the command line: the line
+                    // thread puts it down, as the Fax tab's Stop does.
+                    self.fax_start = Some(crate::faxwin::Start::HangUp);
+                } else {
+                    session.type_bytes(b"ATH\r");
+                }
             }
 
             // Which modulation, and the three things that are on or off: one
@@ -1726,7 +1765,10 @@ impl ScopeApp {
                 .iter()
                 .find(|(carrier, _)| self.carrier == *carrier)
                 .map_or(Self::CARRIERS[self.carrier].0, |(_, label)| label);
-            ui.scope(|ui| {
+            // A fax settles its own modulation, in V.8 and the DIS: the box
+            // has nothing to choose while the modem is one.
+            let mode = if fax_class { "fax" } else { mode };
+            ui.add_enabled_ui(!fax_class, |ui| {
                 ui.spacing_mut().interact_size.y = FACE_KEY.y;
                 egui::ComboBox::from_id_salt("mode")
                     .width(220.0)
@@ -1743,7 +1785,61 @@ impl ScopeApp {
                          correct errors and compress",
                     );
             });
+
+            // What the modem is: a modem or a fax (V.250 6.1.10, +FCLASS).
+            // At the right-hand end of the row, large, and following the
+            // class whoever set it -- these keys, the Fax tab, or the
+            // command typed at the terminal. Not while a call is up: the
+            // class decides what a call is, and that one has been decided.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let fax = egui::Button::new(RichText::new("Fax").size(17.0).strong().color(if fax_class {
+                    Color32::from_rgb(40, 26, 4)
+                } else {
+                    DIM
+                }))
+                .min_size(CLASS_KEY)
+                .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })
+                .fill(if fax_class { FAX_CLASS } else { PLATE });
+                if ui
+                    .add_enabled(on_hook || fax_class, fax)
+                    .on_hover_text(
+                        "AT+FCLASS=1 - the modem is a fax. Send fax and Wait for a fax make \
+                         fax calls, and the Fax tab opens",
+                    )
+                    .clicked()
+                {
+                    if on_hook && !fax_class {
+                        session.type_bytes(b"AT+FCLASS=1\r");
+                    }
+                    self.tab = Tab::Fax;
+                }
+                let modem = egui::Button::new(RichText::new("Modem").size(17.0).strong().color(if fax_class {
+                    DIM
+                } else {
+                    Color32::from_rgb(8, 30, 14)
+                }))
+                .min_size(CLASS_KEY)
+                .corner_radius(egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 })
+                .fill(if fax_class { PLATE } else { GOOD });
+                if ui
+                    .add_enabled(on_hook || !fax_class, modem)
+                    .on_hover_text(
+                        "AT+FCLASS=0 - the modem is a modem. Originate and Answer make data \
+                         calls again",
+                    )
+                    .clicked()
+                {
+                    if on_hook && fax_class {
+                        session.type_bytes(b"AT+FCLASS=0\r");
+                    }
+                    if self.tab == Tab::Fax {
+                        self.tab = Tab::Terminal;
+                    }
+                }
+            });
         });
+            });
 
         // And the ones that open something.
         ui.horizontal_wrapped(|ui| {
@@ -1885,8 +1981,8 @@ impl ScopeApp {
             // The tab for a page as it starts rather than once it is over.
             self.tab = Tab::Fax;
         }
-        while let Some((sheet, page)) = session.take_fax_received() {
-            self.fax.arrived(sheet, page);
+        while let Some((sheet, page, picture)) = session.take_fax_received() {
+            self.fax.arrived_in_tone(sheet, page, picture);
         }
         if let Some(start) = self.fax_start.take() {
             self.start_fax(start, &session);
@@ -1924,8 +2020,10 @@ impl ScopeApp {
         session.set_fax_offer(&self.fax.ours());
         session.set_fax_error_correction(self.fax.error_correction);
         session.set_fax_jbig(self.fax.jbig);
+        session.set_fax_colour(self.fax.colour);
         session.set_fax_v34(self.fax.v34);
         session.set_fax_pages(self.fax.pages().to_vec());
+        session.set_fax_pictures(self.fax.pictures());
     }
 
     /// A SIP call ringing here: ring, ask, and do what was chosen.
@@ -3267,15 +3365,15 @@ impl ScopeApp {
                         ui.label("");
                         ui.add_enabled_ui(self.v8bis, |ui| {
                             ui.horizontal(|ui| {
-                                const OFFERS: [(u8, bool, &str); 7] = [
+                                const OFFERS: [(u8, bool, &str); 4] = [
                                     (0, false, "do not list V.ARC"),
                                     (1, false, "list V.ARC"),
                                     (2, false, "list V.ARC/QAM"),
                                     (3, false, "list V.ARC/PCM"),
-                                    (1, true, "list V.ARC two-wire"),
-                                    (2, true, "list V.ARC/QAM two-wire"),
-                                    (3, true, "list V.ARC/PCM two-wire"),
                                 ];
+                                // A setting saved when one pair of wires was
+                                // a choice is the same mode now.
+                                self.varc_bis.1 = false;
                                 let name = OFFERS.iter().find(|o| (o.0, o.1) == self.varc_bis).map_or(OFFERS[0].2, |o| o.2);
                                 egui::ComboBox::from_id_salt("varc-bis")
                                     .width(190.0)
@@ -4985,27 +5083,24 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 18] = [
+    const MODES: [(usize, &'static str); 15] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
         (3, "V.32bis"),
         (2, "V.32"),
         (1, "V.22bis"),
-        (14, "Bell 212A"),
-        (15, "Bell 202"),
+        (11, "Bell 212A"),
+        (12, "Bell 202"),
         (6, "V.21"),
         (0, "Bell 103"),
         // Not a Recommendation's, and only for another of its kind.
-        (16, "HST"),
-        (17, "HST 9600"),
+        (13, "HST"),
+        (14, "HST 9600"),
         // Not slower than the rest: not for the same kind of line at all.
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
         (10, "V.ARC/PCM"),
-        (11, "V.ARC two-wire"),
-        (12, "V.ARC/QAM two-wire"),
-        (13, "V.ARC/PCM two-wire"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -6168,7 +6263,7 @@ fn from_remembered(
     let mut m = Modulation::default();
     let mut p = Protection::default();
     if let Some(name) = r.text("carrier")
-        && let Some(i) = ScopeApp::CARRIERS.iter().position(|c| c.0 == name)
+        && let Some(i) = ScopeApp::CARRIERS.iter().position(|c| c.0 == name.trim_end_matches("2W"))
     {
         carrier = i;
     }
@@ -6865,28 +6960,28 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS[16].0, "HST");
-        assert_eq!(Modulation::rates(16), &[7200, 9600, 12_000, 14_400]);
+        assert_eq!(ScopeApp::CARRIERS[13].0, "HST");
+        assert_eq!(Modulation::rates(13), &[7200, 9600, 12_000, 14_400]);
         assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
         assert_eq!(Modulation::rates(6), &[300]);
         // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W"), (12, "VARCQ2W"), (13, "VARCP2W")] {
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP")] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
             let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS[14].0, "B212");
-        assert_eq!(Modulation::rates(14), &[300, 1200]);
-        assert_eq!(ScopeApp::CARRIERS[15].0, "B202");
-        assert_eq!(Modulation::rates(15), &[1200]);
-        assert_eq!(ScopeApp::CARRIERS.len(), 18);
-        assert_eq!(ScopeApp::CARRIERS[17].0, "HST96");
-        assert_eq!(Modulation::rates(17), &[9600]);
+        assert_eq!(ScopeApp::CARRIERS[11].0, "B212");
+        assert_eq!(Modulation::rates(11), &[300, 1200]);
+        assert_eq!(ScopeApp::CARRIERS[12].0, "B202");
+        assert_eq!(Modulation::rates(12), &[1200]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 15);
+        assert_eq!(ScopeApp::CARRIERS[14].0, "HST96");
+        assert_eq!(Modulation::rates(14), &[9600]);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the
