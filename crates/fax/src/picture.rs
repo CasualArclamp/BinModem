@@ -106,6 +106,44 @@ impl Picture {
         self.rgb_rows(0, self.height)
     }
 
+    /// A picture from sRGB, three octets a pel and `width` pels across, in
+    /// the default gamut and at the basic resolution of 200 pels to 25.4 mm
+    /// (T.30 Table 2 Note 25).
+    pub fn of_rgb(width: usize, rgb: &[u8]) -> Self {
+        let (pels, _) = rgb.as_chunks::<3>();
+        // A page is mostly runs of one colour, paper above all, and the
+        // conversion is a cube root and a power for each of three: the last
+        // answer is kept for a pel that is the same as the one before it.
+        let mut last = ([255u8; 3], lab_of_rgb([255; 3]));
+        let mut samples = Vec::with_capacity(pels.len() * 3);
+        for pel in pels {
+            if *pel != last.0 {
+                last = (*pel, lab_of_rgb(*pel));
+            }
+            samples.extend_from_slice(&last.1);
+        }
+        Self {
+            width,
+            height: pels.len().checked_div(width).unwrap_or(0),
+            components: 3,
+            samples,
+            pels_per_inch: 200,
+            ..Self::default()
+        }
+    }
+
+    /// The picture as its lightness alone: L* and nothing else, which is
+    /// what a greyscale page is (T.4 E.6.2.2). Without the stream, which was
+    /// of all three.
+    pub fn lightness(&self) -> Self {
+        Self {
+            components: 1,
+            samples: self.samples.iter().step_by(self.components.max(1)).copied().collect(),
+            jpeg: Vec::new(),
+            ..self.clone()
+        }
+    }
+
     /// Millimetres of paper across and down.
     pub fn size_mm(&self) -> (f64, f64) {
         let per_mm = f64::from(self.pels_per_inch.max(1)) / 25.4;
@@ -283,6 +321,18 @@ mod tests {
         assert!((gamut.value(0, red[0]) - 54.3).abs() < 0.6, "{red:?}");
         assert!((gamut.value(1, red[1]) - 80.8).abs() < 0.8, "{red:?}");
         assert!((gamut.value(2, red[2]) - 69.9).abs() < 0.8, "{red:?}");
+    }
+
+    #[test]
+    fn a_picture_is_made_from_rgb_and_its_lightness_taken() {
+        let picture = Picture::of_rgb(2, &[255, 255, 255, 0, 0, 0, 200, 60, 50, 128, 128, 128]);
+        assert_eq!((picture.width, picture.height, picture.components), (2, 2, 3));
+        assert_eq!(picture.lab(0, 0), [255, 128, 96]);
+        assert_eq!(picture.lab(1, 0), [0, 128, 96]);
+        assert_eq!(picture.pels_per_inch, 200);
+        let grey = picture.lightness();
+        assert_eq!((grey.width, grey.height, grey.components), (2, 2, 1));
+        assert_eq!(grey.samples, [255, 0, picture.samples[6], picture.samples[9]]);
     }
 
     #[test]

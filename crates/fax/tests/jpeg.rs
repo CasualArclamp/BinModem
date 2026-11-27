@@ -250,6 +250,31 @@ fn a_page_arrives_by_the_row_and_comes_to_the_same_page() {
 }
 
 #[test]
+fn the_encoder_says_where_each_line_ends_and_the_decoder_agrees() {
+    for (picture, options) in [
+        (lab_test_card(160, 100), Options::default()),
+        (lab_test_card(160, 100), Options { subsample: false, restart_interval: 3, ..Options::default() }),
+        (lab_test_card(160, 100).lightness(), Options::default()),
+    ] {
+        let (stream, ends) = jpeg::encode_with_lines(&picture, options);
+        assert_eq!(stream, jpeg::encode(&picture, options));
+        assert_eq!(ends.len(), 100);
+        assert!(ends.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(*ends.last().unwrap(), stream.len());
+        // With the octets up to a line's end the decoder has that line, and
+        // with a few fewer than the first line's it has none.
+        for line in [0, 15, 16, 50, 95] {
+            let mut decoder = Decoder::new(160);
+            decoder.feed(&stream[..ends[line]]);
+            assert!(decoder.height() > line, "{options:?}: line {line} is not there at {}", ends[line]);
+        }
+        let mut decoder = Decoder::new(160);
+        decoder.feed(&stream[..ends[0] - 3]);
+        assert_eq!(decoder.height(), 0, "{options:?}");
+    }
+}
+
+#[test]
 fn the_one_bit_preview_is_dark_where_the_page_is() {
     let (width, height) = (64, 32);
     let samples = (0..width * height).map(|i| if i % width < 32 { 0 } else { 255 }).collect();

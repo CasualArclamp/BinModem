@@ -55,7 +55,16 @@ impl Leaf<'_> {
                 (columns, rows, columns as f64 / PELS_PER_MM, rows as f64 / resolution.lines_per_mm())
             }
             Self::Tone(picture) => {
-                let (wide, tall) = picture.size_mm();
+                // A page at 200 pels to 25.4 mm is on the paper of a fine
+                // page of ink: "the 200 x 200 pels/25.4 mm and 8/7.7 lines/mm
+                // resolutions are equivalent" (T.4 E.6.5, Note). So its sheet
+                // is that page's sheet, 1728 pels to 215 mm, and a page saved
+                // and sent again lands on the pels it came on.
+                let (wide, tall) = if picture.pels_per_inch == 200 {
+                    (picture.width as f64 / PELS_PER_MM, picture.height as f64 / Resolution::Fine.lines_per_mm())
+                } else {
+                    picture.size_mm()
+                };
                 (picture.width, picture.height, wide, tall)
             }
         }
@@ -359,10 +368,11 @@ mod tests {
         let pdf = document_of(&[Leaf::Ink(&ink, Resolution::Fine), Leaf::Tone(&picture)]);
         let (_, tree) = object(&pdf, 2);
         assert!(tree.contains("/Count 2"), "{tree}");
-        // The sheet is the picture's size at 200 pels to 25.4 mm.
+        // The sheet is the one a fine page of ink has: 215 mm across, and
+        // 7.7 lines to the millimetre down, which 200 to 25.4 mm stands for.
         let (wide, tall) = media_box(&object(&pdf, 7).1);
-        assert!((wide - 1728.0 / 200.0 * 72.0).abs() < 0.01, "{wide} points across");
-        assert!((tall - 40.0 / 200.0 * 72.0).abs() < 0.01, "{tall} points down");
+        assert!((wide - 215.0 * POINTS_PER_MM).abs() < 0.01, "{wide} points across");
+        assert!((tall - 40.0 / 7.7 * POINTS_PER_MM).abs() < 0.01, "{tall} points down");
 
         let (body, dict) = object(&pdf, 9);
         assert!(dict.contains("/Filter /DCTDecode"), "{dict}");

@@ -693,6 +693,9 @@ pub struct Session {
     /// Taken rather than read, and a page is megabytes of booleans, so they
     /// cross the two threads exactly once.
     fax_pages: Mutex<Option<Vec<fax::page::Page>>>,
+    /// The same pages as pictures with tone, and as lightness alone, waiting
+    /// with them: see [`Session::set_fax_pictures`].
+    fax_pictures: Mutex<Option<Pictures>>,
     /// Pages that arrived, with their numbers in the call, waiting for the
     /// window to take them.
     fax_received: Mutex<std::collections::VecDeque<Received>>,
@@ -727,6 +730,10 @@ pub struct Arriving {
     pub tone: Option<fax::picture::Picture>,
 }
 
+/// The pages of a fax to send as pictures with tone, one for each page or
+/// none at all, and the same pages as lightness alone.
+pub type Pictures = (Vec<Option<fax::picture::Picture>>, Vec<Option<fax::picture::Picture>>);
+
 /// A page that arrived: its number in the call, the page as ink and paper,
 /// and the page as a picture if it came with tone.
 pub type Received = (usize, fax::page::Page, Option<std::sync::Arc<fax::picture::Picture>>);
@@ -753,6 +760,7 @@ impl Default for Session {
             fax_colour: AtomicBool::new(true),
             fax_v34: AtomicBool::new(true),
             fax_pages: Mutex::default(),
+            fax_pictures: Mutex::default(),
             fax_received: Mutex::default(),
             fax_exchange: Mutex::default(),
             answer_call: AtomicBool::new(false),
@@ -857,6 +865,19 @@ impl Session {
 
     fn take_fax_pages(&self) -> Option<Vec<fax::page::Page>> {
         self.fax_pages.lock().ok().and_then(|mut v| v.take())
+    }
+
+    /// Leave the same pages as pictures with tone, greyscale or colour, for
+    /// a far end that reads JPEG, and as lightness alone for one that reads
+    /// greyscale and not colour. Empty for a fax of ink and paper.
+    pub fn set_fax_pictures(&self, pictures: Pictures) {
+        if let Ok(mut v) = self.fax_pictures.lock() {
+            *v = Some(pictures);
+        }
+    }
+
+    fn take_fax_pictures(&self) -> Option<Pictures> {
+        self.fax_pictures.lock().ok().and_then(|mut v| v.take())
     }
 
     fn set_fax_received(&self, received: Received) {
@@ -1734,6 +1755,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_v34 = session.fax_v34();
         if let Some(pages) = session.take_fax_pages() {
             modem.fax_pages = pages;
+        }
+        if let Some((pictures, lightness)) = session.take_fax_pictures() {
+            modem.fax_pictures = pictures;
+            modem.fax_lightness = lightness;
         }
         if let Some(call) = modem
             .fax_call()

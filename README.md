@@ -30,7 +30,7 @@ trunk.
 | **Commands** | V.250 AT commands and S-registers |
 | **Terminal** | ANSI/CP437 with mouse reports, and telnet (RFC 854) |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600. Colour and greyscale pages on reception |
+| **Fax** | T.30 group 3, send and receive: V.17, V.29, V.27 ter and Super G3 at up to 33 600. Colour and greyscale pages |
 | **Network** | PPP with LCP, PAP, CHAP and IPCP, a dial-in login prompt and a login script |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112) |
 | **SIP** | our own SIP caller (RFC 3261, 3550 and 4566) and a dialler |

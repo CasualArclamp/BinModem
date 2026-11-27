@@ -371,6 +371,18 @@ enum EcmCommand {
     Rr,
 }
 
+/// What the pages of a call go as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    /// Ink and paper, in one of the codings every page has.
+    Ink,
+    /// The pictures given: greyscale, or colour to a far end with full
+    /// colour mode.
+    Given,
+    /// The lightness of colour pictures, to a far end with greyscale only.
+    Lightness,
+}
+
 /// A fax call.
 #[derive(Debug)]
 pub struct Call {
@@ -434,9 +446,14 @@ pub struct Call {
     /// Whether this end offers JPEG, for greyscale and colour pages, and will
     /// send it to a far end that offers it too (T.30 Annex E).
     jpeg_offered: bool,
-    /// The page in hand as a picture with tone, which goes in its place if
-    /// the far end reads JPEG.
-    picture: Option<Picture>,
+    /// The pages as pictures with tone, the first of them the page in hand:
+    /// what goes in place of the pages of ink if the far end reads JPEG.
+    toned: VecDeque<Option<Picture>>,
+    /// The same pages as lightness alone, for a far end that reads JPEG in
+    /// greyscale and not in colour.
+    lightness: VecDeque<Option<Picture>>,
+    /// Which of those the pages go from, settled with the rest of the terms.
+    tone: Tone,
     /// Whether the DCS said the JPEG page arriving is in full colour (bit
     /// 69) and not the lightness alone.
     full_colour: bool,
@@ -601,7 +618,9 @@ impl Call {
             ecm: false,
             jbig_offered: true,
             jpeg_offered: true,
-            picture: None,
+            toned: VecDeque::new(),
+            lightness: VecDeque::new(),
+            tone: Tone::Ink,
             full_colour: false,
             ecm_frames: Vec::new(),
             ecm_block: 0,
@@ -722,7 +741,25 @@ impl Call {
     /// picture has to be the width of the paper, 1728 pels (T.4 E.6.2), and
     /// if it carries a JPEG stream that stream goes as it is.
     pub fn set_picture(&mut self, picture: Option<Picture>) {
-        self.picture = picture;
+        self.toned = std::iter::once(picture).collect();
+    }
+
+    /// Give the pages of the call as pictures with tone as well, in the
+    /// order of the pages: the first is the page in hand.
+    ///
+    /// They go, in JPEG, only if every page has one and they are all of a
+    /// kind, greyscale or colour: a DCS says once what the pages of a call
+    /// are (T.30 Table 2 Notes 34 and 35). Colour goes only to a far end with
+    /// full colour mode. Otherwise the pages of ink go.
+    pub fn set_pictures(&mut self, pictures: Vec<Option<Picture>>) {
+        self.toned = pictures.into();
+    }
+
+    /// Give the same pages as lightness alone: greyscale pictures, which go
+    /// in place of colour ones to a far end whose DIS has JPEG without full
+    /// colour mode -- "it accepts only the lightness component" (Note 35).
+    pub fn set_lightness(&mut self, pictures: Vec<Option<Picture>>) {
+        self.lightness = pictures.into();
     }
 
     /// The coding the page goes in, once a DCS has settled it.
@@ -1350,8 +1387,7 @@ impl Call {
                     if self.ecm {
                         self.next_block();
                     } else if let Some(next) = self.more.pop_front() {
-                        self.page = Some(next);
-                        self.sheet += 1;
+                        self.turn_to(next);
                         self.attempts = 0;
                         self.refused = 0;
                         // 5.3.6.1.6: after MCF to a multi-page signal the
@@ -1628,24 +1664,58 @@ impl Call {
             } else {
                 Coding::ModifiedHuffman
             };
-            // A picture with tone, where the far end reads one: JPEG, at
+            // Pictures with tone, where the far end reads them: JPEG, at
             // 200 x 200 pels/25.4 mm, which is the resolution bit 15 also
             // stands for and the one a DIS with bit 68 must have (Note 25).
-            // A colour picture only to a far end with full colour mode: the
-            // page of ink and paper goes to any other.
+            // Colour only to a far end with full colour mode; to one with
+            // greyscale alone, the lightness of the pages if that was given;
+            // and to any other the pages of ink and paper.
             self.full_colour = false;
-            if let Some(picture) = self.picture.as_ref()
-                && self.ecm
-                && self.jpeg_offered
-                && caps.jpeg
-                && (caps.full_colour || !picture.is_colour())
-                && picture.width == crate::page::WIDTH
-            {
+            self.tone = Tone::Ink;
+            let pages = usize::from(self.page.is_some()) + self.more.len();
+            // Every page still to go has a picture the width of the paper
+            // (T.4 E.6.2), and they are all colour or all greyscale.
+            let whole = |list: &VecDeque<Option<Picture>>| {
+                let mut kinds = list.iter().take(pages).map(|p| {
+                    p.as_ref().filter(|p| p.width == crate::page::WIDTH).map(Picture::is_colour)
+                });
+                let first = kinds.next().flatten()?;
+                (list.len() >= pages && kinds.all(|kind| kind == Some(first))).then_some(first)
+            };
+            if self.ecm && self.jpeg_offered && caps.jpeg {
+                match (whole(&self.toned), whole(&self.lightness)) {
+                    (Some(colour), _) if caps.full_colour || !colour => {
+                        self.tone = Tone::Given;
+                        self.full_colour = colour;
+                    }
+                    (_, Some(false)) => self.tone = Tone::Lightness,
+                    _ => {}
+                }
+            }
+            if self.tone != Tone::Ink {
                 self.coding = Coding::Jpeg;
                 self.resolution = Resolution::Fine;
-                self.full_colour = picture.is_colour();
             }
         }
+    }
+
+    /// The page in hand as the picture it goes as, if the call's pages go
+    /// as pictures.
+    fn picture_in_hand(&self) -> Option<&Picture> {
+        match self.tone {
+            Tone::Ink => None,
+            Tone::Given => self.toned.front()?.as_ref(),
+            Tone::Lightness => self.lightness.front()?.as_ref(),
+        }
+    }
+
+    /// The page in hand has gone and `next` is in hand now: its pictures
+    /// come to the front with it.
+    fn turn_to(&mut self, next: Page) {
+        self.page = Some(next);
+        self.toned.pop_front();
+        self.lightness.pop_front();
+        self.sheet += 1;
     }
 
     /// The far end could not read the page (RTN), which is not the end of the
@@ -1674,8 +1744,7 @@ impl Call {
             self.refused += 1;
         } else if let Some(next) = self.more.pop_front() {
             self.trouble = Some(format!("the far end could not read page {sheet}"));
-            self.page = Some(next);
-            self.sheet += 1;
+            self.turn_to(next);
             self.refused = 0;
         } else {
             self.bow_out(&format!("the far end could not read page {sheet}"));
@@ -1788,8 +1857,8 @@ impl Call {
             _ => &page.lines,
         };
         match self.coding {
-            Coding::Jpeg if self.picture.is_some() => {
-                coding::jpeg_bits(self.picture.as_ref().expect("checked just above"))
+            Coding::Jpeg if self.picture_in_hand().is_some() => {
+                coding::jpeg_bits(self.picture_in_hand().expect("checked just above"))
             }
             Coding::Jbig => coding::jbig_bits(
                 lines,
@@ -1897,10 +1966,7 @@ impl Call {
         } else if let Some(next) = self.more.pop_front() {
             // A new page is a new page count in the PPS, and its own frames
             // from its own first block.
-            self.page = Some(next);
-            // The picture was the last page's.
-            self.picture = None;
-            self.sheet += 1;
+            self.turn_to(next);
             self.ecm_frames.clear();
             self.ecm_block = 0;
             self.ecm_page = self.ecm_page.wrapping_add(1);
@@ -2802,6 +2868,37 @@ mod tests {
     }
 
     #[test]
+    fn the_pages_of_a_call_go_as_pictures_only_if_all_of_them_can() {
+        let mut dis = t30::our_capabilities(&OUR_MODULATIONS, true, true);
+        t30::say_jpeg(&mut dis);
+        let terms = |pictures: Vec<Option<Picture>>| {
+            let mut call = Call::originate_pages(FS, "1", vec![fine_page(16), fine_page(16)]);
+            call.set_pictures(pictures);
+            call.frame_arrived(Message::new(Frame::Dis, false).with_fif(&dis));
+            call
+        };
+        // A picture for each page, all colour or all greyscale.
+        let call = terms(vec![Some(a_picture(3, 16)), Some(a_picture(3, 16))]);
+        assert_eq!((call.coding, call.full_colour), (Coding::Jpeg, true));
+        let call = terms(vec![Some(a_picture(1, 16)), Some(a_picture(1, 16))]);
+        assert_eq!((call.coding, call.full_colour), (Coding::Jpeg, false));
+        // A page without one, or one of each kind: a DCS says what the pages
+        // are once, so they all go as ink.
+        assert_eq!(terms(vec![Some(a_picture(3, 16))]).coding, Coding::Jbig);
+        assert_eq!(terms(vec![Some(a_picture(3, 16)), None]).coding, Coding::Jbig);
+        assert_eq!(terms(vec![Some(a_picture(3, 16)), Some(a_picture(1, 16))]).coding, Coding::Jbig);
+        // And each page's picture is in hand when its page is.
+        let mut first = a_picture(3, 16);
+        first.samples[0] = 7;
+        let mut call = terms(vec![Some(first), Some(a_picture(3, 16))]);
+        assert_eq!(call.picture_in_hand().map(|p| p.samples[0]), Some(7));
+        let next = call.more.pop_front().unwrap();
+        call.turn_to(next);
+        assert_eq!(call.picture_in_hand().map(|p| p.samples[0]), Some(0));
+        assert_eq!(call.sheet, 2);
+    }
+
+    #[test]
     fn a_picture_goes_in_jpeg_to_a_far_end_that_reads_it() {
         let mut colour = t30::our_capabilities(&OUR_MODULATIONS, true, true);
         t30::say_jpeg(&mut colour);
@@ -2824,6 +2921,15 @@ mod tests {
         t30::set_bit(&mut grey, 69, false);
         assert_eq!(command_with_picture(a_picture(3, 16), &grey).0, Coding::Jbig);
         assert_eq!(command_with_picture(a_picture(1, 16), &grey).0, Coding::Jpeg);
+        // Unless the lightness of the page was given as well: that goes, and
+        // the DCS says greyscale (Note 35).
+        let mut call = Call::originate(FS, "1", Some(fine_page(16)));
+        call.set_picture(Some(a_picture(3, 16)));
+        call.set_lightness(vec![Some(a_picture(1, 16))]);
+        call.frame_arrived(Message::new(Frame::Dis, false).with_fif(&grey));
+        assert_eq!(call.coding, Coding::Jpeg);
+        assert!(!call.full_colour);
+        assert_eq!(call.picture_in_hand().map(|p| p.components), Some(1));
         let plain = t30::our_capabilities(&OUR_MODULATIONS, true, true);
         let (coding, dcs) = command_with_picture(a_picture(3, 16), &plain);
         assert_eq!(coding, Coding::Jbig);

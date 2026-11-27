@@ -325,3 +325,54 @@ fn a_colour_page_goes_over_super_g3() {
     assert!(t30::bit(&got.dis, 6), "the DIS is not Annex F's: {:02x?}", got.dis);
     assert_eq!(got.picture.expect("no picture arrived").jpeg, stream);
 }
+
+#[test]
+fn a_document_of_colour_pages_arrives_a_picture_to_a_page() {
+    // Each page has its picture, and each goes in its turn: the stream only,
+    // as the window hands them over, without the samples.
+    let pictures = [a_picture(64, 3), a_picture(96, 3)];
+    let streams: Vec<Vec<u8>> = pictures.iter().map(|p| sent(p).0).collect();
+    let carriers = pictures
+        .iter()
+        .zip(&streams)
+        .map(|(p, stream)| Some(Picture { samples: Vec::new(), jpeg: stream.clone(), ..p.clone() }))
+        .collect();
+    let mut caller = FaxCall::originate_pages(FS, "61399990000", vec![a_page(64), a_page(96)])
+        .offering(&WITH_V17)
+        .with_pictures(carriers);
+    let mut answerer = FaxCall::answer(FS, "61388880000").offering(&WITH_V17);
+    let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+    let mut arrived = Vec::new();
+    for _ in 0..(240.0 * FS) as usize {
+        let a = caller.step(to_caller);
+        let b = answerer.step(to_answerer);
+        to_caller = b;
+        to_answerer = a;
+        let _ = answerer.take_received();
+        arrived.extend(answerer.take_received_picture());
+        if caller.phase().is_over() && answerer.phase().is_over() {
+            break;
+        }
+    }
+    ended_well(&caller, &answerer);
+    assert_eq!(caller.coding(), Coding::Jpeg);
+    assert!(answerer.full_colour());
+    assert_eq!(arrived.iter().map(|(sheet, _)| *sheet).collect::<Vec<_>>(), [1, 2]);
+    for ((_, picture), stream) in arrived.iter().zip(&streams) {
+        assert_eq!(&picture.jpeg, stream, "a page's stream came out different");
+    }
+    assert_eq!(arrived[1].1.height, 96);
+}
+
+#[test]
+fn a_document_with_a_page_that_has_no_picture_goes_as_ink() {
+    let pages = vec![a_page(48), a_page(48)];
+    let mut caller = FaxCall::originate_pages(FS, "61399990000", pages.clone())
+        .with_pictures(vec![Some(a_picture(48, 3)), None]);
+    let mut answerer = FaxCall::answer(FS, "61388880000");
+    let got = call(&mut caller, &mut answerer, 120.0, &mut clean);
+    assert_eq!(caller.coding(), Coding::Jbig);
+    assert!(!t30::commands_jpeg(&got.dcs), "{:02x?}", got.dcs);
+    assert!(got.picture.is_none());
+    assert!(got.page.expect("no page arrived").lines == pages[0].lines);
+}

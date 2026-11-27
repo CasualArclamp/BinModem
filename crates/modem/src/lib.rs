@@ -1270,6 +1270,13 @@ pub struct Modem {
     /// first one's again by accident: putting pages in is a deliberate act
     /// and so is putting the same ones in twice.
     pub fax_pages: Vec<fax::page::Page>,
+    /// The same pages as pictures with tone, greyscale or colour, for a far
+    /// end that reads JPEG: one for each page, in order, or none at all.
+    /// Taken by the call with the pages.
+    pub fax_pictures: Vec<Option<fax::picture::Picture>>,
+    /// And as lightness alone, for a far end that reads greyscale and not
+    /// colour.
+    pub fax_lightness: Vec<Option<fax::picture::Picture>>,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// Twenty characters of digits, spaces and a plus, and blank is legal:
@@ -1385,6 +1392,8 @@ impl Modem {
             fax_colour: true,
             fax_v34: true,
             fax_pages: Vec::new(),
+            fax_pictures: Vec::new(),
+            fax_lightness: Vec::new(),
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
@@ -3653,6 +3662,8 @@ impl Modem {
                 Role::Calling => {
                     let pages = std::mem::take(&mut self.fax_pages);
                     FaxCall::originate_pages(self.fs, &self.fax_identification, pages)
+                        .with_pictures(std::mem::take(&mut self.fax_pictures))
+                        .with_lightness(std::mem::take(&mut self.fax_lightness))
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
             };

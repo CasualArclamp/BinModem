@@ -37,6 +37,37 @@ impl std::fmt::Debug for Sheet {
     }
 }
 
+/// One page of a document on the same grid, in its colours: three octets a
+/// pel, red, green and blue, and white where the page does not reach.
+pub struct Drawn {
+    pub lines: usize,
+    pub rgb: Vec<u8>,
+}
+
+impl std::fmt::Debug for Drawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Drawn({} lines)", self.lines)
+    }
+}
+
+impl Drawn {
+    /// The page as ink: luminance as the image crate reckons it for a
+    /// picture, turned round.
+    fn sheet(&self) -> Sheet {
+        let ink = self
+            .rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| {
+                let luma = (2126 * u32::from(p[0]) + 7152 * u32::from(p[1]) + 722 * u32::from(p[2])) / 10_000;
+                255 - luma as u8
+            })
+            .collect();
+        Sheet { lines: self.lines, ink }
+    }
+}
+
 impl Sheet {
     /// The sheet at a resolution, in ink.
     fn page(&self, resolution: Resolution, halftone: Halftone) -> Page {
@@ -103,12 +134,27 @@ pub fn read(
         let pages: Vec<Page> = all
             .iter()
             .take(MOST_PAGES)
-            .map(|page| draw(page, &cache, &settings).page(resolution, halftone))
+            .map(|page| draw(page, &cache, &settings).sheet().page(resolution, halftone))
             .collect();
         if pages.is_empty() {
             return Err("the PDF has no pages".to_owned());
         }
         Ok((pages, all.len()))
+    });
+    drawn.unwrap_or_else(|_| Err("the PDF could not be drawn".to_owned()))
+}
+
+/// The same pages in their colours, on fine resolution's grid: what a page
+/// sent with tone is made from. 7.7 lines to the millimetre is the 200 lines
+/// to 25.4 mm of a colour page -- "the 200 x 200 pels/25.4 mm and 8/7.7
+/// lines/mm resolutions are equivalent" (T.4 E.6.5, Note).
+pub fn read_in_colour(bytes: &Arc<Vec<u8>>) -> Result<Vec<Drawn>, String> {
+    let bytes = Arc::clone(bytes);
+    let drawn = std::panic::catch_unwind(move || {
+        let pdf = Pdf::new(bytes).map_err(|_| "that is not a PDF this can read".to_owned())?;
+        let cache = RenderCache::new();
+        let settings = InterpreterSettings::default();
+        Ok(pdf.pages().iter().take(MOST_PAGES).map(|page| draw(page, &cache, &settings)).collect())
     });
     drawn.unwrap_or_else(|_| Err("the PDF could not be drawn".to_owned()))
 }
@@ -126,7 +172,7 @@ fn draw<'a>(
     page: &'a hayro::hayro_syntax::page::Page<'a>,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
-) -> Sheet {
+) -> Drawn {
     let (wide_pt, tall_pt) = page.render_dimensions();
     // A millimetre over, so that Letter's 215.9 is not too wide.
     let turned = wide_pt > tall_pt && f64::from(wide_pt) / POINTS_PER_MM > WIDTH_MM + 1.0;
@@ -153,32 +199,26 @@ fn draw<'a>(
         },
     );
     let (w, h) = (usize::from(pixmap.width()), usize::from(pixmap.height()));
-    // Luminance as the image crate reckons it for a picture, turned into
-    // ink. The background is opaque white, so the alpha is always whole and
-    // the premultiplied colour is the colour.
-    let ink: Vec<u8> = pixmap
-        .data()
-        .iter()
-        .map(|p| {
-            let luma = (2126 * u32::from(p.r) + 7152 * u32::from(p.g) + 722 * u32::from(p.b)) / 10_000;
-            255 - luma as u8
-        })
-        .collect();
+    // The background is opaque white, so the alpha is always whole and the
+    // premultiplied colour is the colour.
+    let data = pixmap.data();
     // Across and down the paper, from the pixmap's across and down: a
     // quarter turn anticlockwise puts the pixmap's right-hand column along
     // the top of the sheet.
     let (across, down) = if turned { (h, w) } else { (w, h) };
-    let at = |x: usize, y: usize| if turned { ink[x * w + (w - 1 - y)] } else { ink[y * w + x] };
+    let at = |x: usize, y: usize| if turned { data[x * w + (w - 1 - y)] } else { data[y * w + x] };
     let across = across.min(WIDTH);
     let down = down.min(Resolution::Fine.lines()).max(1);
     let left = (WIDTH - across) / 2;
-    let mut sheet = vec![0u8; WIDTH * down];
+    let mut rgb = vec![255u8; WIDTH * down * 3];
     for y in 0..down.min(if turned { w } else { h }) {
         for x in 0..across {
-            sheet[y * WIDTH + left + x] = at(x, y);
+            let p = at(x, y);
+            let to = (y * WIDTH + left + x) * 3;
+            rgb[to..to + 3].copy_from_slice(&[p.r, p.g, p.b]);
         }
     }
-    Sheet { lines: down, ink: sheet }
+    Drawn { lines: down, rgb }
 }
 
 #[cfg(test)]

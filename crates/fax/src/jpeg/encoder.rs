@@ -117,9 +117,17 @@ fn segment(out: &mut Vec<u8>, code: u8, body: &[u8]) {
 /// The picture's samples are taken as they are: L*, or L*, a* and b*, in
 /// T.42's codes. A picture with no pels gives an empty stream.
 pub fn encode(picture: &Picture, options: Options) -> Vec<u8> {
+    encode_with_lines(picture, options).0
+}
+
+/// A picture as the JPEG data stream of T.4 Annex E, and where each line of
+/// it ends in that stream: `ends[n]` is how many octets a receiver has taken
+/// in when line `n` can be decoded. Every line of an MCU row ends where the
+/// row does, since a row is decoded whole.
+pub fn encode_with_lines(picture: &Picture, options: Options) -> (Vec<u8>, Vec<usize>) {
     let (width, height) = (picture.width, picture.height);
     if width == 0 || height == 0 || !matches!(picture.components, 1 | 3) {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let colour = picture.components == 3;
     let factor = if colour && options.subsample { 2 } else { 1 };
@@ -215,7 +223,15 @@ pub fn encode(picture: &Picture, options: Options) -> Vec<u8> {
     let mut predictions = [0i32; 3];
     let mut coefficients = [0.0f32; 64];
     let mut count = 0usize;
+    let mut ends = Vec::with_capacity(height);
     for my in 0..down {
+        // The row before this one is whole once the octet its last bits
+        // are in has gone, which it has not yet: one more, and one more
+        // again in case that octet is X'FF' and has a zero stuffed after it.
+        if my > 0 {
+            let lines = (my * mcu).min(height) - ends.len();
+            ends.extend(std::iter::repeat_n(out.len() + bits.out.len() + 2, lines));
+        }
         for mx in 0..across {
             let interval = usize::from(options.restart_interval);
             if interval > 0 && count > 0 && count.is_multiple_of(interval) {
@@ -279,5 +295,7 @@ pub fn encode(picture: &Picture, options: Options) -> Vec<u8> {
         segment(&mut out, marker::DNL, &(height as u16).to_be_bytes());
     }
     out.extend_from_slice(&[0xFF, marker::EOI]);
-    out
+    // The last row is whole, and its length known, at the end of the stream.
+    ends.resize(height, out.len());
+    (out, ends)
 }
