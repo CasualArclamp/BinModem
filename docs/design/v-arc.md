@@ -38,7 +38,7 @@ call of this modem starts, because the far end can be any modem.
 | Step | What it is | What it decides |
 |---|---|---|
 | 1 | V.8: ANSam, CM, JM, CJ | Whether the two ends have V.ARC |
-| 2 | The V.ARC handshake: 200 bit/s, two tones for each direction | Rates, channels, wires, the modulation, and what the line is made of |
+| 2 | The V.ARC handshake: 300 bit/s DBPSK, one carrier for each direction, CL then MS then ACK | Rates, channels, wires, the modulation, and what the line is made of |
 | 3 | The mode | The tables, then data |
 
 This sequence is the same on a sound card, on an EasySip line and on a SIP
@@ -88,8 +88,16 @@ mode. Step 2 does that.
 ### Step 2: the V.ARC handshake
 
 This is the V.ARC equivalent of V.8. See [The handshake](#the-handshake)
-for the signal. Each end sends one message again and again until each has
-the message of the other. The message says:
+for the signal. It is one transaction of three messages, with the shape of
+a V.8 bis transaction:
+
+| Message | From | What it says |
+|---|---|---|
+| CL | The caller | The capabilities of the caller |
+| MS | The answerer | The capabilities of the answerer, and the mode that the answerer selected |
+| ACK | The caller | The caller has the MS and selected the same mode |
+
+The capabilities of an end are:
 
 - the rates at which this end hears and sends
 - the number of channels
@@ -97,8 +105,10 @@ the message of the other. The message says:
 - whether this end was told that the line is one pair of wires
 - what the line of this end is made of: a sound card, a SIP call in linear
   samples, a SIP call in A-law, or a SIP call in mu-law
+- the fit that the band of this end passes (see [The line probe](#the-line-probe))
 
-Both ends then calculate the same result from the two messages. On a SIP
+Each end sends its message again and again until the reply arrives. Both
+ends calculate the same result from the two sets of capabilities. On a SIP
 call the handshake runs at the rate of the call. For G.711 that is 8 kHz.
 
 ### Step 3: the mode on each line
@@ -402,11 +412,12 @@ must know the band before it selects a fit. The V.ARC handshake measures
 it, as the line probe of V.34 does (10.1.2.3), but smaller.
 
 - On a line of 16 kHz or less, each end sends seven weak steady tones below
-  its handshake tones. At 8 kHz they are 600 Hz and 2800 Hz in the middle of
-  the band, 100 Hz and 200 Hz at the bottom, and 3600 Hz, 3800 Hz and
+  its handshake carrier. At 8 kHz they are 1800 Hz and 3000 Hz in the middle
+  of the band, 100 Hz and 200 Hz at the bottom, and 3600 Hz, 3800 Hz and
   3900 Hz at the top.
-- The two middle tones are two bit rates from the nearest handshake tone.
-  The handshake receiver hears nothing there.
+- The two middle tones are 375 Hz or more from the band of each handshake
+  carrier, at 8 kHz and at 16 kHz. The handshake receiver hears nothing
+  there.
 - Each end measures the tones of the other end in blocks of 0.1 s. It
   waits for three blocks in which the middle tones are present and stable.
 - An edge tone passes if it is not more than 6 dB below the middle tones.
@@ -418,11 +429,12 @@ it, as the line probe of V.34 does (10.1.2.3), but smaller.
 | 200 Hz and 3600 Hz | 3 |
 | less than that | none: the carrier as it is built |
 
-- An end sends no handshake message until it has measured. Until then it
-  sends the idle tone and its probe. The message then says which fit this
-  end can hear.
-- If the message of the far end arrives and no probe was measured, the far
-  end has no probe. The end then says "none" and continues.
+- An end sends no CL and no MS until it has measured. Until then it
+  sends flags and its probe. The message then says which fit this end can
+  hear.
+- If the carrier of the far end is there for 0.8 s and no probe was
+  measured, the far end has no probe. The end then says "none" and
+  continues.
 - If an end hears nothing of the modulation at one fit, it asks for the
   next fit, then for the carrier as it is built, then for halves of that.
   This is the procedure of
@@ -504,34 +516,84 @@ not have the same sound card: one hears at 192 kHz and sends at 48, the
 other has one device both ways, one was told the line is a single pair of
 wires and the other was not. Nothing in a wideband signal can settle that,
 because until it is settled neither end knows what signal to listen for.
-Before this, both simply started, and a pair that did not match heard
-nothing for a minute and said `NO CARRIER`.
 
-- **200 bits a second, two tones a direction**, in the middle of the voice
-  band: the caller sends 1000 Hz for a one and 1400 Hz for a nought, the
-  answerer 2000 Hz and 2400 Hz. A telephone channel carries them, and the
-  sample rate of the card making or hearing them does not matter.
-- **All four are multiples of the bit rate**, and each is measured over one
-  bit through a raised-cosine window, so an end on one pair of wires hears
-  the far end's tones through its own with no echo canceller. With a square
-  window it did not: each change of its own tone splashed across the far
-  end's.
-- **Asynchronous characters**, a start bit and a stop bit, so there is no
-  clock to recover.
-- **One message of 16 octets, over and over**: the rates this end hears and
-  sends at, how many channels, which modulation it was asked for, whether it
-  was told two-wire, what its line is made of, which fit of a single carrier
-  its band passes, and whether it has the far end's message yet; then a
-  CRC.
-- When an end has the far end's message and has seen in it that the far end
-  has its own, it sends once more and stops. About four seconds.
+The handshake has the shape of a V.8 bis transaction: a capabilities list,
+a mode select and an acknowledgement.
 
-What it looks like on the line, recorded off a virtual cable both ends were
-on: the answerer's pair at 2000 and 2400 Hz, the caller's at 1000 and
-1400 Hz starting a second later, six messages each, a moment of quiet, and
-then the first end's turn alone on the line.
+**The signal**
 
-![The handshake's tones, then quiet, then the caller's turn](../images/v-arc/handshake-tones.png)
+- **300 bit/s DBPSK.** The caller sends on a 1200 Hz carrier and the
+  answerer on 2400 Hz. A nought turns the carrier over. A one does not
+  change it.
+- **A root raised cosine** with an excess bandwidth of 0.5 shapes each
+  symbol. Each direction keeps to 450 Hz: 975 Hz to 1425 Hz, and 2175 Hz to
+  2625 Hz. Less than a thousandth of the power is more than 300 Hz from the
+  carrier.
+- An end on one pair of wires hears the far end through its own signal with
+  no echo canceller, because the two bands do not touch.
+- A telephone channel carries both carriers. The sample rate of the card
+  does not matter.
+- The receiver has a symbol clock. It compares the energy a quarter of a
+  symbol before and after each symbol, and moves to the middle.
+- The level is -15 dBFS RMS.
+
+**The frames**
+
+The frames are HDLC frames, as in V.8 bis: flags between frames, a nought
+after each five ones, and a 16-bit frame check sequence. The first octet
+has the message type in its low half and the revision (1) in its high
+half. MS, CL, ACK and NAK have the type codes of V.8 bis.
+
+| Message | Type | Octets | What follows the type |
+|---|---|---|---|
+| MS | 0001 | 14 | Capabilities (12 octets), then the selected mode (1 octet) |
+| CL | 0010 | 13 | Capabilities (12 octets) |
+| ACK | 0100 | 1 | Nothing |
+| NAK | 1000 | 1 | Nothing |
+
+The capabilities are: one octet of flags (two-wire, the line, the fit), the
+modulation, the channels, and three numbers of 24 bits (the rate this end
+hears at, the rate it sends at, the baud it asks for). The selected mode is
+one octet: the modulation, the wires, and whether the numbers of the call
+are the data. `FF` means that the two ends have no mode in common.
+
+**The transaction**
+
+1. Each end starts with 16 noughts, for the clock of the far end, and then
+   sends flags.
+2. The caller sends CL again and again.
+3. The answerer reads the CL. It calculates the mode from the two sets of
+   capabilities (`hello::agree`). It sends MS again and again.
+4. The caller reads the MS. It calculates the mode for itself. If the two
+   results are the same, it sends ACK three times and starts the mode. If
+   they are not, it sends NAK three times and the call stops.
+5. The answerer reads the ACK and starts the mode.
+
+If each ACK is lost, the answerer hears no caller for 4 s. It then starts
+the mode, because a caller that sent its ACK is silent on its carrier.
+
+The transaction takes about 1.5 s on a sound card. On a line of 16 kHz or
+less the probe adds about 0.5 s.
+
+What the answerer sends on a real G.711 call between two `modem-sip` on one
+machine. The call has about 0.3 s of delay each way, thus the MS goes about
+three times before the ACK arrives.
+
+![The answerer's carrier at 2400 Hz: flags, then MS frames, above and below it the probe](../images/v-arc/handshake-dbpsk.png)
+
+**Against the earlier handshake**
+
+The earlier handshake (to 5.6.0) was 200 bit/s FSK with two tones for each
+direction, asynchronous characters, and one message that each end sent
+until it saw a "heard" flag. Measured in simulation, two ends at 48 kHz:
+
+| | FSK, to 5.6.0 | DBPSK, CL, MS and ACK |
+|---|---|---|
+| Time on a clean line | 4.3 s | 1.5 s |
+| Most noise it gets through (signal to noise in 24 kHz) | -9 dB | -12 dB |
+
+A build with the earlier handshake cannot make a V.ARC call with this one. Use the same
+build at both ends.
 
 Both ends then work out the same answer from the same two messages
 (`hello::agree`):
@@ -543,20 +605,21 @@ Both ends then work out the same answer from the same two messages
 | Are the numbers of the call the data? | Only if both ends are on a SIP call of the same coding at one rate. See [The start of a call](#the-start-of-a-call). |
 | Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
 
-While it lasts the symbol scope shows the far end's tones as it shows any
-FSK. The window's "distant" panel shows what the far end said and what was
-agreed, where a V.8 menu would be:
+While it lasts the symbol scope shows each bit of the far end: up for a
+carrier that did not change, down for a carrier that turned over. The
+window's "distant" panel shows what the far end said, where the transaction
+is, and what was agreed, where a V.8 menu would be:
 
 ![What the far end said in the handshake](../images/v-arc/hello.png)
 
 There is no handshake on a lead that comes straight back (`ATDLOOP`), where
 there is nobody else. Each other call has it, a SIP call included.
 
-Run for real, both on one machine: Line In at 192 kHz with CABLE-B at 48 kHz
-the other way (2.13 and 0.80 Mbit/s, as before it), and two ends sharing
-VB-Cable A two-wire. A fast card calling a slow one, and two ends
-told two-wire that cannot be, are tested in simulation only: there is no
-pair of real devices here to wire that way.
+Run for real: a V.ARC/QAM call in G.711 mu-law between two `modem-sip` on
+one machine (37 000 bit/s each way). The sound card rigs are tested in
+simulation only with this handshake: two cards at different rates, a fast
+card that calls a slow one, one pair of wires, and two ends told two-wire
+that cannot be.
 
 Two things it turned up in the receiver, both now fixed:
 
@@ -623,8 +686,8 @@ about it.
 
 - **Saying so.** A receiver that has read nothing of the far end for
   `6 + 3 x speed` seconds starts listening for the modulation at half the
-  speed and says so in the handshake's tones (a `VN` message of six octets,
-  three times over, `hello::Watch`). It cannot say so in the modulation,
+  speed and says so on the handshake's carrier (a frame of type 1110 with
+  one octet, three times over, `hello::Watch`). It cannot say so in the modulation,
   since it does not know its own is heard. Its own sending waits while it
   does: a second and a bit.
 - **Slowing.** An end that hears that said sends at the speed it was told.
@@ -824,7 +887,7 @@ the shared virtual cable, learning while the far end talked: QAM 85 to
 **Turns.** After the handshake, and before either modulation is heard by
 anyone, each end has the line to itself (`Turn` in the modem's `varc.rs`):
 
-1. Both fall silent until the handshake's tones have gone.
+1. Both fall silent until the handshake's carriers have gone.
 2. The caller sends alone for 2 s. Its canceller finds its echo and fits
    it against the line's noise and nothing else.
 3. The caller stops; when its echo has died away the answerer hears the line

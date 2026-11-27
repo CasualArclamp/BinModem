@@ -1716,9 +1716,9 @@ impl Modem {
             return fax.shape();
         }
         if let Some(call) = self.varc.as_ref() {
-            // The handshake is two tones a direction.
+            // The handshake is a carrier a direction, turned over or not.
             if call.greeting() {
-                return "2FSK";
+                return "DBPSK";
             }
             return match (self.varc_bits, call.mode) {
                 (0, _) => "-",
@@ -2534,9 +2534,10 @@ impl Modem {
         self.call_refused.take()
     }
 
-    /// A V.ARC call's handshake as it is heard: which of the far end's two
-    /// tones is arriving, between minus one and one, eight to a bit, since
-    /// this was last asked. Empty once the handshake is over.
+    /// A V.ARC call's handshake as it is heard: each bit of the far end's,
+    /// one for a carrier that stayed as it was and minus one for a carrier
+    /// that turned over, eight to a bit, since this was last asked. Empty
+    /// once the handshake is over.
     pub fn varc_symbols(&mut self) -> Vec<f64> {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
