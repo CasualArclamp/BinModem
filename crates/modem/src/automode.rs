@@ -17,6 +17,16 @@
 //!   then unscrambled ones, then 2225 Hz, then V.21's mark -- and keeps the
 //!   first one the caller answers.
 //!
+//! A V.32bis answerer can say two of these things in one call. NIST's time
+//! service (ACTS, +1 303 494 4774) sends ANS, then 3 s of unscrambled ones,
+//! then V.32's AC. If it hears an AA over its ANS, it cuts the ones to 0.6 s,
+//! goes to AC, and then never answers that AA. So V.32's calling start-up
+//! sends AA only once AC starts (see `v32::startup`), and the ear has the
+//! whole 3 s of ones to hear. If a caller does send AA (2 s after a silent
+//! end of ANS), the ear waits [`BLOCKS_HELD_OVER_AA`] before it leaves V.32,
+//! because the answerer can still change to AC. A V.22bis answerer sends its
+//! ones until the caller answers, so it is still heard.
+//!
 //! 2225 and 2250 Hz are twenty-five hertz apart, so the ear works in blocks
 //! of 40 ms: a Goertzel filter over 40 ms has its first null exactly 25 Hz
 //! from its centre, and each tone falls in the other's null.
@@ -68,7 +78,10 @@ const BLOCK: f64 = 0.040;
 /// has 2225 Hz in it, hold half.
 const SHARE: f64 = 0.7;
 /// Blocks in a row a tone must hold for: 320 ms.
-const BLOCKS_HELD: usize = 8;
+pub const BLOCKS_HELD: usize = 8;
+/// Blocks in a row a tone must hold for while the caller already sends V.32's
+/// AA: 1.5 s. Over an AA, ACTS sent unscrambled ones for 0.6 s before AC.
+pub const BLOCKS_HELD_OVER_AA: usize = 38;
 /// Quieter than this, a block is not judged at all.
 const QUIET: f64 = 1e-6;
 
@@ -93,7 +106,13 @@ impl Ear {
 
     /// One sample from the line. Some once a tone has held long enough, and
     /// from then on.
+    #[cfg(test)]
     pub fn feed(&mut self, x: f64) -> Option<Answer> {
+        self.feed_for(x, BLOCKS_HELD)
+    }
+
+    /// As [`Ear::feed`], with a tone that must hold for `blocks` blocks.
+    pub fn feed_for(&mut self, x: f64, blocks: usize) -> Option<Answer> {
         if self.heard.is_some() {
             return self.heard;
         }
@@ -112,7 +131,7 @@ impl Ear {
             // A pure tone of amplitude A: power (A n / 2)^2, energy A^2 n / 2.
             let share = if self.energy / n > QUIET { 2.0 * power / (n * self.energy) } else { 0.0 };
             self.run[i] = if share > SHARE { self.run[i] + 1 } else { 0 };
-            if self.run[i] >= BLOCKS_HELD {
+            if self.run[i] >= blocks {
                 self.heard = Some(ANSWERS[i]);
             }
         }
@@ -153,6 +172,31 @@ mod tests {
         assert_eq!(hears(2100.0, 3.0), None, "ANS is not an answer of these");
         assert_eq!(hears(1800.0, 3.0), None);
         assert_eq!(hears(2225.0, 0.2), None, "too short to believe");
+    }
+
+    #[test]
+    fn over_aa_a_short_run_of_ones_is_not_an_answer() {
+        // ACTS: ANS, 0.6 s of unscrambled ones, then AC (600 and 3000 Hz).
+        let mut ear = Ear::new(FS);
+        let mut heard = None;
+        for k in 0..(3.0 * FS) as usize {
+            let t = k as f64 / FS;
+            let x = if t < 0.6 {
+                0.3 * (std::f64::consts::TAU * 2250.0 * t).sin()
+            } else {
+                0.2 * (std::f64::consts::TAU * 600.0 * t).sin() + 0.2 * (std::f64::consts::TAU * 3000.0 * t).sin()
+            };
+            heard = ear.feed_for(x, BLOCKS_HELD_OVER_AA);
+        }
+        assert_eq!(heard, None);
+
+        // A V.22bis answerer keeps its ones on: it is heard all the same.
+        let mut ear = Ear::new(FS);
+        let mut heard = None;
+        for k in 0..(2.0 * FS) as usize {
+            heard = ear.feed_for(0.3 * (std::f64::consts::TAU * 2250.0 * k as f64 / FS).sin(), BLOCKS_HELD_OVER_AA);
+        }
+        assert_eq!(heard, Some(Answer::V22bis));
     }
 
     #[test]

@@ -333,7 +333,8 @@ impl Pump {
             Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90Server(m) => m.modem().round_trip().map(|s| (s * 1000.0).round() as u32),
-            Self::V22bis(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
+            Self::V22bis(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
+            Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -4370,7 +4371,11 @@ impl Modem {
                 let offer = v32::startup::rate_signal(
                     v32::startup::Rates::between(lowest, highest.min(ceiling)),
                 );
-                Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
+                let modem = v32::startup::Modem::new(hs_role, offer, self.fs);
+                // With automode on, a calling V.32 pump is V.32bis Annex A's:
+                // it waits for AC before AA (see `automode`).
+                let modem = if role == Role::Calling && self.negotiates() { modem.annex_a() } else { modem };
+                Pump::V32(Box::new(modem))
             }
             "B103" => {
                 let hs_role = match role {
@@ -4463,7 +4468,14 @@ impl Modem {
             }
             return None;
         }
-        self.pre_v8_ear.as_mut()?.feed(line)
+        // Over our own AA, a V.32bis answerer may send ones until it hears
+        // that AA, then AC (see `automode`): give it the time to change.
+        let blocks = if matches!(self.pump.as_ref(), Some(Pump::V32(m)) if m.phase() == "AA") {
+            automode::BLOCKS_HELD_OVER_AA
+        } else {
+            automode::BLOCKS_HELD
+        };
+        self.pre_v8_ear.as_mut()?.feed_for(line, blocks)
     }
 
     /// The answering modem's automode: keep the offer the caller answered,
