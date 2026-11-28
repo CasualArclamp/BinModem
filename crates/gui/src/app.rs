@@ -533,6 +533,8 @@ pub struct ScopeApp {
     flow: terminal::Flow,
     /// What was typed while the far end had sent XOFF, to go at its XON.
     held: Vec<u8>,
+    /// Whether the character format panel is open.
+    format_open: bool,
     last_repaint: std::time::Instant,
     /// The highest each spectrum bin has been lately, falling slowly.
     hold: Vec<f32>,
@@ -797,6 +799,7 @@ impl ScopeApp {
             char_format: terminal::CharFormat::default(),
             flow: terminal::Flow::default(),
             held: Vec::new(),
+            format_open: false,
             last_repaint: std::time::Instant::now(),
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
@@ -4869,8 +4872,20 @@ impl ScopeApp {
         let button = ui
             .button(format!("{label} \u{23f7}"))
             .on_hover_text("Data bits, stop bits, parity and flow control");
-        egui::Popup::menu(&button)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        // Open and shut by this window, not by egui's memory of popups.
+        // egui keeps one popup open at a time, so the list of a box in the
+        // panel shut the panel when it opened, and the choice was lost.
+        //
+        // Read before anything below can open a list: a click that shuts a
+        // list is a click on the list, not a click away from the panel.
+        let list_was_open = egui::Popup::is_any_open(ui.ctx());
+        if button.clicked() {
+            self.format_open = !self.format_open;
+        }
+        let mut open = self.format_open;
+        let shown = egui::Popup::menu(&button)
+            .open_bool(&mut open)
+            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
             .show(|ui| {
                 // A menu draws its buttons without frames or fill. These are
                 // boxes to choose from, so they get the window's own style.
@@ -4947,6 +4962,18 @@ impl ScopeApp {
                     .weak(),
                 );
             });
+        // A click away from the panel shuts it. A click on the button has
+        // already toggled it, and a click on an open list only shuts the list.
+        if let Some(panel) = shown {
+            let clicked_away = ui.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer.interact_pos().is_some_and(|p| !panel.response.rect.contains(p))
+            });
+            if clicked_away && !list_was_open && !button.clicked() {
+                open = false;
+            }
+        }
+        self.format_open = open;
     }
 
     /// The type's size: fitted to the room, or set by hand.
