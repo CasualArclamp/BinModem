@@ -91,16 +91,17 @@ fn two_modems_reach_a_connection() {
 
 #[test]
 fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
-    // 5.4.1 a): the calling modem "shall initially remain silent", and joins in
-    // only "after receiving the answer tone for a period of at least 1 s".
-    // Talking over the answering tone would be heard by the network as well as
-    // by the far end, and the tone is what disables the echo control devices
-    // along the way.
+    // 5.4.1 a): the calling modem "shall initially remain silent". 5.4.1 lets
+    // it join in "after receiving the answer tone for a period of at least
+    // 1 s", but this one waits for AC (note 1), because NIST ignores an AA
+    // that starts over its tone. Talking over the answering tone would also
+    // be heard by the network, and the tone is what disables the echo control
+    // devices along the way.
     let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut first_sound = None;
-    for i in 0..(2.0 * FS) as usize {
+    for i in 0..(4.5 * FS) as usize {
         let (a, b) = (calling.out, answering.out);
         calling.up.step(b, &mut calling.tx, &mut calling.rx);
         calling.out = calling.tx.next_sample();
@@ -109,11 +110,10 @@ fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
         if calling.out != 0.0 && first_sound.is_none() {
             first_sound = Some(i as f64 / FS);
         }
-        if i as f64 / FS < 0.5 {
+        if i as f64 / FS < 3.3 {
             assert_eq!(
                 calling.out, 0.0,
-                "the calling modem transmitted at {:.3} s, before it could \
-                 have heard a second of tone",
+                "the calling modem transmitted at {:.3} s, over the answering tone",
                 i as f64 / FS
             );
         }
@@ -128,10 +128,10 @@ fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
         }
     }
     let at = first_sound.expect("the calling modem never answered at all");
+    // The answering tone is 3.3 s, and AC follows it.
     assert!(
-        (1.0..1.2).contains(&at),
-        "the calling modem answered at {at:.3} s rather than just after the \
-         second of tone 5.4.1 asks it to wait for"
+        (3.3..3.5).contains(&at),
+        "the calling modem answered at {at:.3} s rather than just after AC started"
     );
 }
 

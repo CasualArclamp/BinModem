@@ -130,12 +130,9 @@ A V.22bis caller measures the round trip of the line in its handshake. V.42
 adds it to the 750 ms of T400. Without it, the far end's answer to the ODP
 came back too late on a SIP line with a 1 s round trip.
 
-Plain V.32 (automode off) keeps V.32 5.4.1: AA after 1 s of answer tone. An
-answerer such as NIST can then ignore that AA. So the caller watches the AC:
-
-- If the AC stands for 2.5 s with no reversal, the caller stops AA for 0.2 s.
-- Then it starts AA again. This new AA starts after the AC.
-- It does this again each 2.5 s until the AC reverses.
+Plain V.32 (automode off) waits for AC in the same way. V.32 5.4.1 lets a
+caller send AA after 1 s of answer tone, but NIST ignores such an AA. On two
+live calls, NIST sent AC for 30 s with no reversal and then hung up.
 
 **Advanced** adjacent to the modulation box opens the other parts of `AT+MS`.
 These are the other three subparameters of V.250 6.4.1, as toggles and boxes
