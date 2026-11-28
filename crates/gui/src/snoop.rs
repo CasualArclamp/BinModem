@@ -22,6 +22,8 @@ mod review;
 // which draws things only a modem has.
 #[allow(dead_code)]
 mod scopes;
+#[allow(dead_code)]
+mod theme;
 mod window;
 
 use std::path::PathBuf;
@@ -39,11 +41,11 @@ impl eframe::App for Snoop {
         egui::Panel::top("name").show(ui, |ui| {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("DIALSNOOP").monospace().strong().color(Color32::from_rgb(220, 225, 235)));
+                ui.label(RichText::new("DIALSNOOP").monospace().strong().color(crate::theme::ink(Color32::from_rgb(220, 225, 235))));
                 ui.label(
                     RichText::new(format!("a dial-up call, read off a recording   {BUILD}"))
                         .small()
-                        .color(Color32::from_rgb(140, 150, 165)),
+                        .color(crate::theme::ink(Color32::from_rgb(140, 150, 165))),
                 );
             });
             ui.add_space(3.0);
@@ -89,7 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "DialSnoop",
         options,
         move |cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // DialSnoop has no theme key: it stays dark, also on a light
+            // Windows theme (issue 100).
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             let mut pane = review::ReviewPane::default();
             if let Some(path) = &recording {
                 pane.open(path);

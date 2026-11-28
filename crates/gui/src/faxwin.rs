@@ -1838,8 +1838,8 @@ impl Fax {
     /// The far end, where the Scopes tab has V.8's: who it says it is, what
     /// it says it can do, and what the two ends have in common.
     pub fn far_panel(&self, ui: &mut egui::Ui) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
+        let dim = crate::theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = crate::theme::ink(Color32::from_rgb(220, 225, 235));
         ui.add_space(6.0);
         ui.label(RichText::new("the fax machine at the far end").strong());
         let Some(caps) = self.far.as_ref() else {
@@ -1849,7 +1849,7 @@ impl Fax {
                      seconds into the call.",
                 )
                 .small()
-                .color(dim),
+                .color(crate::theme::ink(dim)),
             );
             return;
         };
@@ -1858,8 +1858,8 @@ impl Fax {
             .spacing([10.0, 3.0])
             .show(ui, |ui| {
                 let row = |ui: &mut egui::Ui, k: &str, v: &str| {
-                    ui.label(RichText::new(k).monospace().size(12.0).color(dim));
-                    ui.label(RichText::new(v).monospace().size(12.0).color(bright));
+                    ui.label(RichText::new(k).monospace().size(12.0).color(crate::theme::ink(dim)));
+                    ui.label(RichText::new(v).monospace().size(12.0).color(crate::theme::ink(bright)));
                     ui.end_row();
                 };
                 if !self.far_identity.is_empty() {
@@ -1884,12 +1884,12 @@ impl Fax {
                         // The best coding there is, in its green, where the
                         // far end says it has it.
                         ("coding", Some((before, after))) => {
-                            ui.label(RichText::new(k).monospace().size(12.0).color(dim));
+                            ui.label(RichText::new(k).monospace().size(12.0).color(crate::theme::ink(dim)));
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label(RichText::new(before).monospace().size(12.0).color(bright));
-                                ui.label(RichText::new("JBIG").monospace().size(12.0).strong().color(BEST));
-                                ui.label(RichText::new(after).monospace().size(12.0).color(bright));
+                                ui.label(RichText::new(before).monospace().size(12.0).color(crate::theme::ink(bright)));
+                                ui.label(RichText::new("JBIG").monospace().size(12.0).strong().color(crate::theme::ink(BEST)));
+                                ui.label(RichText::new(after).monospace().size(12.0).color(crate::theme::ink(bright)));
                             });
                             ui.end_row();
                         }
@@ -1900,14 +1900,14 @@ impl Fax {
                     RichText::new(if self.sending { "both ends" } else { "this call" })
                         .monospace()
                         .size(12.0)
-                        .color(dim),
+                        .color(crate::theme::ink(dim)),
                 );
                 let shared = self.shared(caps);
                 ui.label(
                     RichText::new(shared.clone().unwrap_or_else(|| "nothing in common".to_owned()))
                         .monospace()
                         .size(12.0)
-                        .color(if shared.is_some() { BEST } else { Color32::from_rgb(235, 100, 90) }),
+                        .color(crate::theme::ink(if shared.is_some() { BEST } else { Color32::from_rgb(235, 100, 90) })),
                 );
                 ui.end_row();
             });
@@ -1933,8 +1933,8 @@ impl Fax {
     /// The page, large: the one going out, or the one arriving drawn a line
     /// at a time, or a page of an earlier call opened from the list.
     pub fn page_panel(&mut self, ui: &mut egui::Ui) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
+        let dim = crate::theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = crate::theme::ink(Color32::from_rgb(220, 225, 235));
         let shown = self.shown_view();
         ui.horizontal(|ui| {
             for (view, name) in [(View::Follow, "follow the call"), (View::Sending, "to send"), (View::Received, "received")] {
@@ -1944,7 +1944,7 @@ impl Fax {
             }
             ui.separator();
             if let Some(trouble) = &self.trouble {
-                ui.label(RichText::new(trouble).small().color(Color32::from_rgb(235, 100, 90)));
+                ui.label(RichText::new(trouble).small().color(crate::theme::ink(Color32::from_rgb(235, 100, 90))));
             }
         });
         match shown {
@@ -1969,7 +1969,7 @@ impl Fax {
                 if ui.add_enabled(self.showing > 0, egui::Button::new("<")).clicked() {
                     step = -1;
                 }
-                ui.label(RichText::new(format!("page {} of {count}", self.showing + 1)).monospace().color(bright));
+                ui.label(RichText::new(format!("page {} of {count}", self.showing + 1)).monospace().color(crate::theme::ink(bright)));
                 if ui.add_enabled(self.showing + 1 < count, egui::Button::new(">")).clicked() {
                     step = 1;
                 }
@@ -1984,7 +1984,7 @@ impl Fax {
                         page.coverage() * 100.0
                     ))
                     .monospace()
-                    .color(dim),
+                    .color(crate::theme::ink(dim)),
                 );
             }
             if let Some(toned) = self.toned.get(self.showing) {
@@ -1995,7 +1995,7 @@ impl Fax {
                         toned.picture.jpeg.len() as f64 / 1000.0
                     ))
                     .monospace()
-                    .color(TONE),
+                    .color(crate::theme::ink(TONE)),
                 )
                 .on_hover_text(
                     "The page is shown as it goes in JPEG, at 200 pels to 25.4 mm. A far end \
@@ -2013,7 +2013,7 @@ impl Fax {
             ui.label(
                 RichText::new("Nothing to send yet. Browse for a picture or a PDF on the right.")
                     .small()
-                    .color(dim),
+                    .color(crate::theme::ink(dim)),
             );
             return;
         };
@@ -2077,12 +2077,12 @@ impl Fax {
             let mut close = false;
             ui.horizontal(|ui| {
                 let far = self.calls.get(call).map_or("", |c| c.far.as_str());
-                ui.label(RichText::new(format!("from an earlier call, {far}")).color(dim));
+                ui.label(RichText::new(format!("from an earlier call, {far}")).color(crate::theme::ink(dim)));
                 if pages > 1 {
                     if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
                         step = -1;
                     }
-                    ui.label(RichText::new(format!("page {} of {pages}", at + 1)).monospace().color(bright));
+                    ui.label(RichText::new(format!("page {} of {pages}", at + 1)).monospace().color(crate::theme::ink(bright)));
                     if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
                         step = 1;
                     }
@@ -2118,7 +2118,7 @@ impl Fax {
                 (Some(scan), true) => format!("page {} arriving: {} lines", scan.sheet.max(1), scan.lines.len()),
                 (Some(scan), false) => format!("page {} received: {} lines", scan.sheet.max(1), scan.lines.len()),
             };
-            ui.label(RichText::new(heading).color(dim));
+            ui.label(RichText::new(heading).color(crate::theme::ink(dim)));
             if let Some(said) = self.tone_in_view() {
                 badge(ui, said, TONE, TONE_TIP);
             }
@@ -2126,7 +2126,7 @@ impl Fax {
                 if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
                     step = -1;
                 }
-                ui.label(RichText::new(format!("{} of {pages}", at + 1)).monospace().color(bright));
+                ui.label(RichText::new(format!("{} of {pages}", at + 1)).monospace().color(crate::theme::ink(bright)));
                 if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
                     step = 1;
                 }
@@ -2152,7 +2152,7 @@ impl Fax {
                     .clicked();
             }
             if let Some(saved) = &self.saved {
-                ui.label(RichText::new(saved).small().color(dim));
+                ui.label(RichText::new(saved).small().color(crate::theme::ink(dim)));
             }
         });
         let scan = match self.looking.as_mut() {
@@ -2168,7 +2168,7 @@ impl Fax {
                          page that arrives is drawn here a line at a time as it comes in.",
                     )
                     .small()
-                    .color(dim),
+                    .color(crate::theme::ink(dim)),
                 );
             }
         }
@@ -2220,18 +2220,18 @@ impl Fax {
     /// the call has got, how the last one went, the document, the rates and
     /// the calls so far. Returns what was asked of the modem.
     pub fn side_panel(&mut self, ui: &mut egui::Ui, on_hook: bool, number: &mut String) -> Option<Start> {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
+        let dim = crate::theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = crate::theme::ink(Color32::from_rgb(220, 225, 235));
         let now = ui.input(|i| i.time);
         let mut start = None;
 
         egui::Grid::new("fax-dial").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.label(RichText::new("fax number").color(dim)).on_hover_text(
+            ui.label(RichText::new("fax number").color(crate::theme::ink(dim))).on_hover_text(
                 "The dialler's number: the same one the Dial keypad edits, and what Send fax dials",
             );
             ui.add(egui::TextEdit::singleline(number).desired_width(180.0).hint_text("from the dialler"));
             ui.end_row();
-            ui.label(RichText::new("this end (TSI/CSI)").color(dim)).on_hover_text(
+            ui.label(RichText::new("this end (TSI/CSI)").color(crate::theme::ink(dim))).on_hover_text(
                 "What this end calls itself: sent as a TSI when sending and a CSI when \
                  receiving, and shown at the far end. Digits, spaces and a plus; blank is \
                  allowed, and plenty of machines send nothing",
@@ -2284,7 +2284,7 @@ impl Fax {
                 ui.label(
                     RichText::new("The modem is in fax class. The Modem key at the top right makes it a modem again.")
                         .small()
-                        .color(dim),
+                        .color(crate::theme::ink(dim)),
                 );
             }
         } else {
@@ -2294,11 +2294,11 @@ impl Fax {
             let (headline, colour) = call.headline();
             egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0, colour)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new("last call").small().color(dim));
+                ui.label(RichText::new("last call").small().color(crate::theme::ink(dim)));
                 ui.label(RichText::new(headline).strong().color(colour));
-                ui.label(RichText::new(call.details(now)).monospace().size(12.0).color(bright));
+                ui.label(RichText::new(call.details(now)).monospace().size(12.0).color(crate::theme::ink(bright)));
                 if !call.far.is_empty() {
-                    ui.label(RichText::new(format!("far end {}", call.far)).monospace().size(12.0).color(dim));
+                    ui.label(RichText::new(format!("far end {}", call.far)).monospace().size(12.0).color(crate::theme::ink(dim)));
                 }
             });
         }
@@ -2326,7 +2326,7 @@ impl Fax {
                 None => format!("{side}: {what}"),
             })
             .strong()
-            .color(bright),
+            .color(crate::theme::ink(bright)),
         );
         if let Some(c) = self.live().and_then(|call| call.carried) {
             ui.horizontal_wrapped(|ui| {
@@ -2403,7 +2403,7 @@ impl Fax {
             }
         }
         ui.add(egui::ProgressBar::new(fraction as f32).desired_height(16.0).show_percentage());
-        ui.label(RichText::new(said.join(" · ")).monospace().size(12.0).color(dim));
+        ui.label(RichText::new(said.join(" · ")).monospace().size(12.0).color(crate::theme::ink(dim)));
     }
 
     /// How far down page `page` the call has got once `fraction` of its bits
@@ -2462,7 +2462,7 @@ impl Fax {
             1 => "document: 1 page".to_owned(),
             n => format!("document: {n} pages"),
         };
-        egui::CollapsingHeader::new(RichText::new(heading).color(bright))
+        egui::CollapsingHeader::new(RichText::new(heading).color(crate::theme::ink(bright)))
             .id_salt("fax-document")
             .default_open(true)
             .show(ui, |ui| {
@@ -2486,12 +2486,12 @@ impl Fax {
                     let shown = std::path::Path::new(&self.path)
                         .file_name()
                         .map_or_else(|| "no picture or PDF".to_owned(), |n| n.to_string_lossy().into_owned());
-                    ui.add(egui::Label::new(RichText::new(shown).monospace().color(dim)).truncate())
+                    ui.add(egui::Label::new(RichText::new(shown).monospace().color(crate::theme::ink(dim))).truncate())
                         .on_hover_text(&self.path);
                 });
                 let mut again = false;
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("paper").monospace().color(dim));
+                    ui.label(RichText::new("paper").monospace().color(crate::theme::ink(dim)));
                     for r in [Resolution::Standard, Resolution::Fine] {
                         if ui.selectable_label(self.resolution == r, r.name()).clicked() {
                             self.resolution = r;
@@ -2500,7 +2500,7 @@ impl Fax {
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("tone ").monospace().color(dim));
+                    ui.label(RichText::new("tone ").monospace().color(crate::theme::ink(dim)));
                     for tone in [SendTone::Ink, SendTone::Greyscale, SendTone::Colour] {
                         if ui
                             .selectable_label(self.tone == tone, tone.name())
@@ -2518,7 +2518,7 @@ impl Fax {
                 });
                 if self.tone != SendTone::Ink {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("quality").monospace().color(dim));
+                        ui.label(RichText::new("quality").monospace().color(crate::theme::ink(dim)));
                         for quality in [Quality::Small, Quality::Normal, Quality::Best] {
                             if ui
                                 .selectable_label(self.quality == quality, quality.name())
@@ -2540,13 +2540,13 @@ impl Fax {
                                     clock(bits as f64 / f64::from(rate))
                                 ))
                                 .monospace()
-                                .color(TONE),
+                                .color(crate::theme::ink(TONE)),
                             );
                         }
                     });
                 }
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("ink  ").monospace().color(dim));
+                    ui.label(RichText::new("ink  ").monospace().color(crate::theme::ink(dim)));
                     for h in [Halftone::Threshold, Halftone::Diffuse] {
                         if ui.selectable_label(self.halftone == h, h.name()).clicked() {
                             self.halftone = h;
@@ -2554,11 +2554,11 @@ impl Fax {
                         }
                     }
                     if self.tone != SendTone::Ink {
-                        ui.label(RichText::new("if the far end has no JPEG").small().color(dim));
+                        ui.label(RichText::new("if the far end has no JPEG").small().color(crate::theme::ink(dim)));
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("offer").monospace().color(dim));
+                    ui.label(RichText::new("offer").monospace().color(crate::theme::ink(dim)));
                     ui.checkbox(&mut self.v27ter, "V.27ter").on_hover_text(
                         "2400 and 4800, and the one every fax has. Left unticked with nothing \
                          else ticked, it is offered anyway",
@@ -2599,7 +2599,7 @@ impl Fax {
                 if !self.pages.is_empty() {
                     let [mh, mr, mmr, jbig] = self.coded_bits;
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("coded").monospace().color(dim));
+                        ui.label(RichText::new("coded").monospace().color(crate::theme::ink(dim)));
                         for (name, bits) in [("MH", mh), ("MR", mr), ("MMR", mmr), ("JBIG", jbig)] {
                             ui.label(
                                 RichText::new(format!("{name} {}k", bits / 1000))
@@ -2622,7 +2622,7 @@ impl Fax {
         let packed = if self.jbig { jbig.min(mmr) } else { mmr };
         let best = if self.error_correction { packed } else { mr };
         let carried = self.live().and_then(|c| c.carried).or(self.carried);
-        ui.label(RichText::new("how long the document takes").color(bright)).on_hover_text(
+        ui.label(RichText::new("how long the document takes").color(crate::theme::ink(bright))).on_hover_text(
             "From the smallest coding this end will send at each rate -- JBIG or MMR under \
              error correction, MR without -- to MH, which every machine reads. Fastest first",
         );
@@ -2635,7 +2635,7 @@ impl Fax {
                     row.rate
                 };
                 let text = |s: String, colour: Color32| {
-                    let t = RichText::new(s).monospace().size(12.0).color(colour);
+                    let t = RichText::new(s).monospace().size(12.0).color(if lit { colour } else { crate::theme::ink(colour) });
                     if lit { t.strong().background_color(Color32::from_rgb(30, 70, 45)) } else { t }
                 };
                 ui.label(text(format!("{rate}"), if lit { BEST } else { dim }));
@@ -2656,21 +2656,21 @@ impl Fax {
 
     /// The calls since the window opened, newest first.
     fn session_list(&mut self, ui: &mut egui::Ui, now: f64, dim: Color32, bright: Color32) {
-        ui.label(RichText::new("calls this session").color(bright));
+        ui.label(RichText::new("calls this session").color(crate::theme::ink(bright)));
         if self.calls.is_empty() {
-            ui.label(RichText::new("None yet.").small().color(dim));
+            ui.label(RichText::new("None yet.").small().color(crate::theme::ink(dim)));
             return;
         }
         let (mut open, mut save) = (None, None);
         egui::Grid::new("fax-calls").num_columns(5).spacing([8.0, 3.0]).striped(true).show(ui, |ui| {
             for (i, call) in self.calls.iter().enumerate().rev().take(30) {
-                ui.label(RichText::new(ago(now - call.ended.unwrap_or(now))).size(12.0).color(dim));
+                ui.label(RichText::new(ago(now - call.ended.unwrap_or(now))).size(12.0).color(crate::theme::ink(dim)));
                 let far = if call.far.is_empty() { "?" } else { call.far.as_str() };
                 ui.label(
                     RichText::new(format!("{} {far}", if call.sending { "to" } else { "from" }))
                         .monospace()
                         .size(12.0)
-                        .color(bright),
+                        .color(crate::theme::ink(bright)),
                 )
                 .on_hover_text(call.details(now));
                 let (short, colour) = call.short();
@@ -2678,7 +2678,7 @@ impl Fax {
                     .on_hover_text(call.headline().0);
                 let pages = if call.sending { call.confirmed_pages() } else { call.received.len() };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(dim));
+                    ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(crate::theme::ink(dim)));
                     // A page with tone among them: the same badge as on the
                     // page, small.
                     let colour = call.pictures.iter().any(|(_, p)| p.is_colour());
@@ -2728,7 +2728,7 @@ impl Fax {
             self.saved = Some(save_pages(&pages, &chosen));
         }
         if let Some(saved) = &self.saved {
-            ui.label(RichText::new(saved).small().color(dim));
+            ui.label(RichText::new(saved).small().color(crate::theme::ink(dim)));
         }
     }
 

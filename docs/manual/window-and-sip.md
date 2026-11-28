@@ -27,6 +27,19 @@ found the reflection. On a two-wire pair the echo decides everything, and
 without the panel you cannot see it. A constellation full of noise looks the
 same if the noise is the line or the echo of this modem.
 
+### Dark and light
+
+The key at the right end of the tab strip sets the theme:
+
+- ◑ follows the Windows theme. This is the default.
+- 🌙 is always dark.
+- ☀ is always light.
+
+Click the key to go to the next theme. The window keeps the choice in
+`settings.txt` as `theme system`, `theme dark` or `theme light`. In the light
+theme, the faceplate, the readout, the scopes and the terminal stay dark.
+DialSnoop is always dark.
+
 ## The SIP caller
 
 BinModem now has a SIP caller. It is written as all other parts are: against
