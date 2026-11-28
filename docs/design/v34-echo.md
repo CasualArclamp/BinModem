@@ -28,7 +28,8 @@ The canceller is in `crates/datapump/src/v34/startup.rs`. It is the
 canceller of V.32 (`dsp::EchoCanceller`) with three additions.
 
 - **When it learns.** Each end sends its TRN of phase 3 for 1 s, and the far
-  end is silent then (V.34 11.3.1). The canceller learns only in that time.
+  end is silent then (V.34 11.3.1). On a network line the TRN is longer.
+  See "A network line". The canceller learns only in that time.
 - **Where the echo is.** The first run of taps covers 8 ms, for a hybrid. In
   the first half of the TRN, `dsp::EchoFinder` looks for a reflection that
   is farther away, and a second run of taps of 4 ms goes there. The search
@@ -70,6 +71,37 @@ receiver of the call modem hears its own phase 3 at full level, and it
 follows that signal. It then did not find the S of the answer modem in
 phase 4. The answer modem already hunts for S from nothing after its own
 TRN. Now the call modem does the same (`training.rs`).
+
+### A network line
+
+A round trip of 100 ms or more goes through a network (`NETWORK_ECHO` in
+`training.rs`). On a SIP trunk the round trip is about 1 s. This end has
+no hybrid, and the only echo is the hybrid of the far end, 1 s later.
+
+The echo of TRN comes back one round trip after TRN starts. Before this
+change, these faults stopped the canceller:
+
+1. The TRN was 1 s. Its echo started to come back when it ended.
+2. The search scored the first half of the TRN. That was the echo of the
+   signals before the TRN, or nothing.
+3. The canceller removed less than 1 dB, so its taps went back to zero.
+   The window showed "taking out -0.0 dB" and "reflection not found".
+
+Now, on a network line:
+
+- The TRN of phase 3 is the round trip plus 1 s, and 2 s at most. The two
+  real modems sent up to 1.9 s.
+- The search records what goes out from the start of the TRN. It scores
+  from one round trip (and the time of the J) after the start, for half of
+  the remaining TRN. The other half is for the far taps to learn.
+- The canceller keeps a round trip of what went out, so the far taps have
+  a history when they are placed (`EchoCanceller::remember`).
+
+On a line of 0.5 s each way with a far echo 16.5 dB down, both ends find
+the reflection at 1 s, the fit removes more than 100 dB, and the call
+connects at 33 600 bit/s. Before the change, neither end found it.
+
+V.32 had the same faults. PR 106 corrected them for V.32.
 
 ### A line with no echo
 
@@ -121,4 +153,5 @@ or phase 4 stopped.
 
 `crates/modem/tests/v34_two_wire.rs`: an echo as loud as the far end, an
 echo at other distances from the far end, one cable of 62 ms and of 178 ms,
-a faint echo, a hybrid, a line with no echo, and an echo that moves.
+a faint echo, a hybrid, a line with no echo, an echo that moves, and a far
+echo on a SIP trunk with a round trip of 1 s.

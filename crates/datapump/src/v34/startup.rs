@@ -223,6 +223,11 @@ impl Modem {
         let cleaned = self.echo.process(self.sent, line);
         if self.search_in > 0 {
             self.search_in -= 1;
+            // Not scored, but what goes out now is what the echo scored
+            // later is an echo of.
+            if let Some(finder) = self.finder.as_mut() {
+                finder.remember(self.sent);
+            }
         } else if let Some(finder) = self.finder.as_mut() {
             // What the near taps left, and not what arrived: see V.32's.
             finder.feed(self.sent, cleaned);
@@ -315,9 +320,20 @@ impl Modem {
         }
         let all = (training.training_echo_seconds() * self.fs) as usize;
         self.finder = Some(EchoFinder::new(first, last));
-        self.search_in = self.still_j().min(all / 4);
         self.searched = 0;
-        self.search_for = all / 2 - self.search_in;
+        if self.phase2.round_trip().unwrap_or(0.0) >= training::NETWORK_ECHO {
+            // On a network line the echo of TRN is a round trip behind its
+            // start. The search scores from then on, for half of what is
+            // left; the other half is for the far taps to learn. The far
+            // taps read what went out a round trip before they are placed,
+            // so the canceller keeps that much.
+            self.echo.remember(last);
+            self.search_in = self.still_j().min(all / 2);
+            self.search_for = (all - self.search_in) / 2;
+        } else {
+            self.search_in = self.still_j().min(all / 4);
+            self.search_for = all / 2 - self.search_in;
+        }
     }
 
     fn place_far_taps(&mut self) {
