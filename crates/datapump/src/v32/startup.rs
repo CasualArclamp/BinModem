@@ -777,7 +777,8 @@ mod timing {
     pub const HEARD_ANSWER_TONE: u64 = 2400;
     /// How long after the answering tone the calling modem waits for AC
     /// before it sends AA all the same: 2 s. An automode answerer's
-    /// unscrambled ones come in that time, and the automode ear takes them.
+    /// unscrambled ones come in that time. With automode on, the automode ear
+    /// takes them.
     pub const QUIET_AFTER_ANSWER: u64 = 4800;
     /// How long the calling modem must hear AC before it sends AA: 64
     /// symbols, 27 ms, the response delay of 5.4.1.
@@ -993,8 +994,6 @@ pub struct Startup {
     /// The round trip the first training measured, kept through retrains:
     /// see [`Startup::line_round_trip`].
     first_round_trip: Option<u64>,
-    /// Calling under V.32bis Annex A: wait for AC before AA. See `Modem::annex_a`.
-    annex_a: bool,
     /// Calling: the answering tone has been heard for long enough.
     answer_heard: bool,
     /// Calling: symbols since the answering tone stopped.
@@ -1128,7 +1127,6 @@ impl Startup {
             round_trip: 0,
             held: 0,
             first_round_trip: None,
-            annex_a: false,
             answer_heard: false,
             after_answer: 0,
             tone_run: 0,
@@ -1720,35 +1718,37 @@ impl Startup {
                 let standing =
                     sidebands > AUDIBLE && sidebands > self.listener.answer_amplitude();
                 let answering = heard == Heard::AnswerTone;
-                let go = if self.annex_a {
-                    // V.32bis Annex A, where V.8 sends a call that heard a
-                    // plain ANS. The answering tone alone is not the cue for
-                    // AA. An automode answerer (NIST's ACTS, for one) follows
-                    // its tone with 3 s of V.22bis's unscrambled ones, and
-                    // only then AC. It hears an AA sent over its tone, goes
-                    // to AC at once, and then never answers that AA with a
-                    // reversal: on four live calls it reversed only to an AA
-                    // that began after its AC. So this end waits for AC, held
-                    // for 64 symbols so that a click does not start AA early.
-                    // Only when the tone has stopped and the line has been
-                    // quiet for [`timing::QUIET_AFTER_ANSWER`] does it send AA, to
-                    // wake an answerer that waits for one.
-                    self.tone_run = if standing { self.tone_run + 1 } else { 0 };
-                    if self.hold(answering) >= timing::HEARD_ANSWER_TONE {
-                        self.answer_heard = true;
-                        self.after_answer = 0;
-                    } else if self.answer_heard && heard == Heard::Nothing {
-                        self.after_answer += 1;
-                    } else if !answering {
-                        // Something other than quiet: the automode ear's to
-                        // judge, so the quiet starts again.
-                        self.after_answer = 0;
-                    }
-                    self.tone_run >= timing::HEARD_TONES
-                        || (self.answer_heard && self.after_answer >= timing::QUIET_AFTER_ANSWER)
-                } else {
-                    standing || self.hold(answering) >= timing::HEARD_ANSWER_TONE
-                };
+                // The answering tone alone is not the cue for AA, although
+                // 5.4.1 lets a plain V.32 caller send AA after 1 s of it. Note
+                // 1 to 5.4.1 lets the caller start on AC alone, and this end
+                // does that. An automode answerer (NIST's ACTS, for one)
+                // follows its tone with 3 s of V.22bis's unscrambled ones, and
+                // only then AC. It hears an AA sent over its tone, goes to AC,
+                // and then never answers that AA with a reversal. On live
+                // calls it reversed only to an AA that began after its AC. On
+                // two calls with AA over its tone it sent AC, then its tone
+                // again, then AC, for 30 s, with no reversal, and hung up.
+                //
+                // So this end waits for AC, held for 64 symbols so that a
+                // click does not start AA early. A normal answerer sends AC
+                // straight after its tone, so this costs it nothing. Only when
+                // the tone has stopped and the line has been quiet for
+                // [`timing::QUIET_AFTER_ANSWER`] does it send AA, to wake an
+                // answerer that waits for one.
+                self.tone_run = if standing { self.tone_run + 1 } else { 0 };
+                if self.hold(answering) >= timing::HEARD_ANSWER_TONE {
+                    self.answer_heard = true;
+                    self.after_answer = 0;
+                } else if self.answer_heard && heard == Heard::Nothing {
+                    self.after_answer += 1;
+                } else if !answering {
+                    // Something other than quiet: the automode ear's to
+                    // judge, or an answerer on its way to AC, so the quiet
+                    // starts again.
+                    self.after_answer = 0;
+                }
+                let go = self.tone_run >= timing::HEARD_TONES
+                    || (self.answer_heard && self.after_answer >= timing::QUIET_AFTER_ANSWER);
                 if go {
                     self.enter(State::Aa);
                 }
@@ -2830,6 +2830,10 @@ const ECHO_SPAN_MS: f64 = 8.0;
 /// see [`EchoCanceller::hold_drift_rate`].
 const NETWORK_ECHO_MS: f64 = 100.0;
 
+/// How far past the measured round trip the search for a network reflection
+/// goes, in milliseconds: see [`Modem::begin_search`].
+const NETWORK_SEARCH_PAST_MS: f64 = 100.0;
+
 /// How much line the second run of taps covers, in milliseconds.
 ///
 /// A network reflection is one path among many rather than one impedance step,
@@ -2929,14 +2933,6 @@ impl Modem {
             self.tx.set_signal(Signal::AlternateAC);
             self.startup.state = State::Ac;
         }
-        self
-    }
-
-    /// A calling modem under V.32bis Annex A (automode, after a plain
-    /// ANS): it sends AA only once AC has started, not after 1 s of the
-    /// answering tone as 5.4.1 has a plain V.32 caller do. See `Listening`.
-    pub fn annex_a(mut self) -> Self {
-        self.startup.annex_a = true;
         self
     }
 
@@ -3070,8 +3066,16 @@ impl Modem {
     /// on one where the returning signal is weak enough to slow the detector
     /// down, which is the error the subtraction models least well.
     fn begin_search(&mut self) {
+        let network = (NETWORK_ECHO_MS * self.fs / 1000.0) as usize;
+        let line = (self.startup.line_round_trip() as f64 * self.fs / super::BAUD) as usize;
         let first = self.echo.span();
-        let last = self.round_trip_samples() + self.far_taps();
+        // On a network line the measurement can also err short. On a live
+        // call to NIST over SIP the echo came back at 958 ms. The round trip
+        // came out near that, and a few milliseconds less put the echo
+        // outside the search: "reflection not found". So the search goes
+        // [`NETWORK_SEARCH_PAST_MS`] past the measurement there.
+        let past = if line >= network { (NETWORK_SEARCH_PAST_MS * self.fs / 1000.0) as usize } else { 0 };
+        let last = self.round_trip_samples() + self.far_taps() + past;
         if last <= first {
             return;
         }
@@ -3081,8 +3085,6 @@ impl Modem {
         // can be back, for half of the segment it gets beyond its round
         // trip; the other half is for the taps placed then to converge. A
         // shorter line scores from the start, over half the segment.
-        let network = (NETWORK_ECHO_MS * self.fs / 1000.0) as usize;
-        let line = (self.startup.line_round_trip() as f64 * self.fs / super::BAUD) as usize;
         let (listen_from, scored) = if line >= network {
             // The far taps learn from the moment they are placed, from what
             // was sent up to `last` samples before: a second, on a SIP

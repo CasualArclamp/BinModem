@@ -4425,9 +4425,8 @@ impl Modem {
                     v32::startup::Rates::between(lowest, highest.min(ceiling)),
                 );
                 let modem = v32::startup::Modem::new(hs_role, offer, self.fs);
-                // With automode on, a calling V.32 pump is V.32bis Annex A's:
-                // it waits for AC before AA (see `automode`).
-                let modem = if role == Role::Calling && self.negotiates() { modem.annex_a() } else { modem };
+                // A calling V.32 pump waits for AC before AA, with or without
+                // automode (see `Listening` in `v32::startup`).
                 Pump::V32(Box::new(modem))
             }
             "B103" => {

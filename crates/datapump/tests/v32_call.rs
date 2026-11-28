@@ -666,7 +666,9 @@ fn answered_with(reversal_s: f64, am: bool, db: f64) -> (f64, &'static str) {
     let level = 0.3 * 10.0f64.powf(db / 20.0);
     let mut peak = 0.0f64;
     let mut phase = 0.0f64;
-    for i in 0..(FS * 4.0) as usize {
+    // V.25's 3.3 s of tone, and then nothing: the caller sends AA 2 s after
+    // the tone stops, but only if it heard the tone for a second.
+    for i in 0..(FS * 6.0) as usize {
         let t = i as f64 / FS;
         let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
         let sign = if flips % 2 == 0 { 1.0 } else { -1.0 };
@@ -676,9 +678,10 @@ fn answered_with(reversal_s: f64, am: bool, db: f64) -> (f64, &'static str) {
             1.0
         };
         phase += std::f64::consts::TAU * 2100.0 / FS;
-        let out = calling.step(level * envelope * sign * phase.sin());
-        // After the second 5.4.1 requires, and a little to spare.
-        if t > 1.5 {
+        let tone = if t < 3.3 { level * envelope * sign * phase.sin() } else { 0.0 };
+        let out = calling.step(tone);
+        // After the 2 s of quiet, and a little to spare.
+        if t > 5.5 {
             peak = peak.max(out.abs());
         }
     }
@@ -687,9 +690,9 @@ fn answered_with(reversal_s: f64, am: bool, db: f64) -> (f64, &'static str) {
 
 #[test]
 fn a_modern_answering_tone_still_gets_answered() {
-    // 5.4.1: having heard the answering tone for a second, the calling modem
-    // "shall repetitively transmit carrier state A". It starts talking off the
-    // answering tone alone, before any 600 or 3000 Hz tone has arrived.
+    // The calling modem must hear the answering tone for a second (5.4.1).
+    // It then waits for AC, and if the tone stops and nothing follows, it
+    // sends AA after 2 s of quiet. That AA needs the second of tone.
     //
     // V.25's answering tone is a plain 2100 Hz. V.8's -- which is what every
     // answering modem made since 1994 sends -- is the same tone with a phase
@@ -1314,11 +1317,11 @@ fn the_two_clocks_differ_by_the_one_wait_that_is_inside_only_one_of_them() {
     );
 }
 
-/// What a V.32bis Annex A caller (`Modem::annex_a`) sends to `far`, after
+/// What a V.32 caller sends to `far`, after
 /// `seconds`: the peak of its output after `from` seconds.
-fn annex_a_peak(far: impl Fn(f64) -> f64, seconds: f64, from: f64) -> f64 {
+fn caller_peak(far: impl Fn(f64) -> f64, seconds: f64, from: f64) -> f64 {
     let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
-    let mut calling = Modem::new(Role::Calling, offer, FS).annex_a();
+    let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut peak = 0.0f64;
     for i in 0..(FS * seconds) as usize {
         let t = i as f64 / FS;
@@ -1331,7 +1334,7 @@ fn annex_a_peak(far: impl Fn(f64) -> f64, seconds: f64, from: f64) -> f64 {
 }
 
 #[test]
-fn an_annex_a_caller_waits_for_ac_and_not_for_the_answering_tone() {
+fn a_caller_waits_for_ac_and_not_for_the_answering_tone() {
     use std::f64::consts::TAU;
     let ans = |t: f64| 0.3 * (TAU * 2100.0 * t).sin();
     let ones = |t: f64| 0.3 * (TAU * 2250.0 * t).sin();
@@ -1339,14 +1342,21 @@ fn an_annex_a_caller_waits_for_ac_and_not_for_the_answering_tone() {
 
     // NIST's ACTS: 3.3 s of ANS, 3 s of unscrambled ones. Silent all through.
     let acts = |t: f64| if t < 3.3 { ans(t) } else { ones(t) };
-    assert!(annex_a_peak(acts, 6.2, 0.0) < 1.0e-6, "AA over the answering tone or the ones");
+    assert!(caller_peak(acts, 6.2, 0.0) < 1.0e-6, "AA over the answering tone or the ones");
 
     // Then AC: AA follows it.
     let acts = |t: f64| if t < 3.3 { ans(t) } else if t < 6.3 { ones(t) } else { ac(t) };
-    assert!(annex_a_peak(acts, 7.0, 6.3) > 1.0e-3, "no AA to AC");
+    assert!(caller_peak(acts, 7.0, 6.3) > 1.0e-3, "no AA to AC");
+
+    // NIST on a live call on 2026-11-28: the answering tone and then AC at
+    // once. Silent over the tone, and AA only after AC starts.
+    let tone_then_ac = |t: f64| if t < 3.3 { ans(t) } else { ac(t) };
+    assert!(caller_peak(tone_then_ac, 3.3, 0.0) < 1.0e-6, "AA over the answering tone");
+    assert!(caller_peak(tone_then_ac, 4.0, 3.5) > 1.0e-3, "no AA to AC");
 
     // An answering tone and then nothing: AA after 2 s of quiet.
     let quiet = |t: f64| if t < 3.3 { ans(t) } else { 0.0 };
-    assert!(annex_a_peak(quiet, 5.0, 0.0) < 1.0e-6, "AA too soon after the tone");
-    assert!(annex_a_peak(quiet, 6.0, 5.4) > 1.0e-3, "no AA after the quiet");
+    assert!(caller_peak(quiet, 5.0, 0.0) < 1.0e-6, "AA too soon after the tone");
+    assert!(caller_peak(quiet, 6.0, 5.4) > 1.0e-3, "no AA after the quiet");
 }
+

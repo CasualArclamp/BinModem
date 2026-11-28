@@ -116,10 +116,6 @@ fn what_this_end_made_of_it() {
     println!("started at {from:.2} s into it\n");
 
     let mut modem = Modem::new(role, offer, FS);
-    // `V32_ANNEX_A=1` replays a caller in automode, which waits for AC before AA.
-    if std::env::var_os("V32_ANNEX_A").is_some() {
-        modem = modem.annex_a();
-    }
     let mut phase = "";
     let mut status = Status::Negotiating;
     let mut carrier = false;

@@ -5972,11 +5972,22 @@ impl ScopeApp {
                         ),
                         None => "reflection not found".into(),
                     };
+                    // In data the far end is in what arrives and in what is
+                    // left, so the live figure reads near 0 dB on a line
+                    // whose echo is far below the far end. What training
+                    // reached is the figure that means something then.
+                    let (shown, text) = match f.echo_trained_db {
+                        Some(trained) if f.bit_rate.is_some() => (
+                            trained,
+                            format!("took out {trained:.1} dB in training · now {db:.1} dB\n{found}"),
+                        ),
+                        _ => (db, format!("taking out {db:.1} dB\n{found}")),
+                    };
                     stage(
                         ui,
-                        if db >= 6.0 && f.echo_at.is_some() { theme::good() } else { theme::warn() },
+                        if shown >= 6.0 && f.echo_at.is_some() { theme::good() } else { theme::warn() },
                         "Echo canceller",
-                        format!("taking out {db:.1} dB\n{found}"),
+                        text,
                     );
                 }
 
