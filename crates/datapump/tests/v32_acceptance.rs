@@ -1036,14 +1036,32 @@ impl Call {
             if self.trace && (calling.phase(), answering.phase()) != phases {
                 phases = (calling.phase(), answering.phase());
                 println!(
-                    "{:8.3} s  calling {:>12} {:?}  answering {:>12} {:?}  reception {:.3} / {:.3}",
+                    "{:8.3} s  calling {:>12} {:?}  answering {:>12} {:?}  reception {:.3} / {:.3}  echo {:.1} / {:.1} dB  far {:?} / {:?}",
                     i as f64 / FS,
                     phases.0,
                     calling.status(),
                     phases.1,
                     answering.status(),
                     calling.residual_error() / calling.point_spacing(),
-                    answering.residual_error() / answering.point_spacing()
+                    answering.residual_error() / answering.point_spacing(),
+                    calling.echo_return_loss(),
+                    answering.echo_return_loss(),
+                    calling.reflection().map(|r| (r.delay, (r.strength * 100.0).round() / 100.0)),
+                    answering.reflection().map(|r| (r.delay, (r.strength * 100.0).round() / 100.0)),
+                );
+            }
+            if self.trace && i % (FS as usize) == 0 && std::env::var_os("V32_EVERY_SECOND").is_some() {
+                println!(
+                    "{:8.3} s  reception {:.3} / {:.3}  echo now {:.1} / {:.1} dB  drift {:.1} / {:.1} ppm  jumps {} / {}",
+                    i as f64 / FS,
+                    calling.residual_error() / calling.point_spacing(),
+                    answering.residual_error() / answering.point_spacing(),
+                    calling.echo_return_loss_now(),
+                    answering.echo_return_loss_now(),
+                    calling.echo_drift_ppm(),
+                    answering.echo_drift_ppm(),
+                    calling.echo_jumps(),
+                    answering.echo_jumps(),
                 );
             }
             let (to_calling, to_answering) = wiring.step(from_calling, from_answering);
@@ -1426,6 +1444,25 @@ fn every_row() -> Vec<Row> {
         }
     }
 
+    // NIST's time service: its AC measured 601.88 and 3000.28 Hz, which is
+    // 2398.4 baud, 670 ppm slow, on a carrier a hertz high. Far outside V.32
+    // 2.3's 100 ppm, and what a real old modem does.
+    for (k, speed) in [Speed::At4800, Speed::At9600T].into_iter().enumerate() {
+        let direction = |ppm, carrier_hz| Direction { ppm, carrier_hz, snr_db: Some(speed.working_snr()), ..Direction::default() };
+        let line = Line::TwoWire { to_calling: direction(-670.0, 1.0), to_answering: direction(0.0, 0.0), hybrid: None };
+        add("a_far_clock_670_ppm_slow", speed.name().into(), call(speed, line, 30.0, 0xD00 + k as u64), Pass::Clean(0.99));
+    }
+    // The same clocks over a SIP trunk, where the calling receiver is idle
+    // for 4.5 s between the far end's training and its rate signal.
+    for (k, speed) in [Speed::At9600T].into_iter().enumerate() {
+        for ppm in [-380.0, -670.0] {
+            let delay = (0.5 * FS) as usize;
+            let direction = |ppm, carrier_hz| Direction { ppm, carrier_hz, delay, snr_db: Some(speed.working_snr()), ..Direction::default() };
+            let line = Line::TwoWire { to_calling: direction(ppm, 1.0), to_answering: direction(0.0, 0.0), hybrid: Some(2 * delay) };
+            add("a_far_clock_670_ppm_slow", format!("SIP {ppm} ppm {}", speed.name()), call(speed, line, 30.0, 0xD10 + k as u64), Pass::Clean(0.99));
+        }
+    }
+
     // The far end's clock 200 ppm fast one way and 200 ppm slow the other.
     for (k, speed) in [Speed::At4800, Speed::At14400T].into_iter().enumerate() {
         let direction = |ppm| Direction { ppm, snr_db: Some(speed.working_snr()), ..Direction::default() };
@@ -1523,6 +1560,18 @@ fn every_row() -> Vec<Row> {
         add("rorys_voip_line", speed.name().into(), call(speed, line, 60.0, 0x900 + k as u64), Pass::Clean(0.95));
     }
 
+    // A SIP trunk to a modem on an analogue line, as to NIST's time service
+    // (+1 303 494 4774): 0.5 s each way, and the far hybrid's reflection of
+    // this end a whole second later, 16.5 dB down. Measured on that line on
+    // 2026-11-28: the V.32 round trip read 2378 symbols, and the echo of
+    // this end's data took the calling receiver from 9.5 dB down to 5.
+    for (k, speed) in [Speed::At14400T, Speed::At9600T].into_iter().enumerate() {
+        let delay = (0.5 * FS) as usize;
+        let direction = || Direction { delay, snr_db: Some(speed.working_snr()), ..Direction::default() };
+        let line = Line::TwoWire { to_calling: direction(), to_answering: direction(), hybrid: Some(2 * delay) };
+        add("sip_line_with_far_echo", format!("SIP {}", speed.name()), call(speed, line, 30.0, 0xC00 + k as u64), Pass::Clean(0.95));
+    }
+
     // `v32_call.rs`'s line with length -- a hybrid at each end, 20 ms each way,
     // the far hybrid's reflection a round trip later -- with the trunk
     // shifting the carrier 3 Hz and the two clocks 200 ppm apart.
@@ -1580,6 +1629,13 @@ fn every_rate_holds_at_its_working_snr() {
 #[test]
 fn seven_hertz_either_way() {
     check("seven_hertz_either_way");
+}
+
+/// A far modem whose clock is 670 ppm slow, as NIST's measured: 99 % of
+/// blocks clean.
+#[test]
+fn a_far_clock_670_ppm_slow() {
+    check("a_far_clock_670_ppm_slow");
 }
 
 /// Two hundred parts per million between the two ends' clocks, which is two
@@ -1646,6 +1702,14 @@ fn cable_with_slips() {
 #[test]
 fn rorys_voip_line() {
     check("rorys_voip_line");
+}
+
+/// A SIP trunk with a second of round trip and the far hybrid's reflection
+/// of this end coming back after it, at 14 400 and 9600: 95 % of blocks
+/// clean.
+#[test]
+fn sip_line_with_far_echo() {
+    check("sip_line_with_far_echo");
 }
 
 /// A hybrid at each end, a reflection off the far one, a trunk that shifts the
