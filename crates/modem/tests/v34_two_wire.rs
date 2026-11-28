@@ -82,6 +82,11 @@ struct Pair {
 
 impl Pair {
     fn new(echo: Echo) -> Self {
+        Self::over(echo, CROSSING)
+    }
+
+    /// Two modems a `crossing` apart, in samples.
+    fn over(echo: Echo, crossing: usize) -> Self {
         let mut caller = Modem::new(FS);
         let mut host = Modem::new(FS);
         for m in [&mut caller, &mut host] {
@@ -99,8 +104,8 @@ impl Pair {
         Self {
             caller,
             host,
-            to_host: VecDeque::from(vec![0.0; CROSSING]),
-            to_caller: VecDeque::from(vec![0.0; CROSSING]),
+            to_host: VecDeque::from(vec![0.0; crossing]),
+            to_caller: VecDeque::from(vec![0.0; crossing]),
             own_caller: Path::new(echo.clone()),
             own_host: Path::new(echo),
             last: (0.0, 0.0),
@@ -197,6 +202,58 @@ fn an_echo_at_another_distance_from_the_far_end_is_taken_out() {
         let found = pair.caller.reflection().map(|r| r.delay);
         assert!(found.is_some_and(|d| d.abs_diff(delay) < 4), "{what}: found at {found:?}");
     }
+}
+
+/// A SIP trunk: half a second each way, and no hybrid at this end. The
+/// only echo is the far hybrid's, 16.5 dB down and a second after it went
+/// out. This is the line of a live call that showed "reflection not found":
+/// the search scored the first half of a TRN of 1 s, and the echo of that
+/// TRN only comes back a second after it starts.
+#[test]
+fn a_far_echo_a_second_away_is_found() {
+    const ROUND_TRIP: usize = 2 * 8_000;
+    let mut pair = Pair::over(Echo::copy(ROUND_TRIP, 0.15), ROUND_TRIP / 2);
+    pair.connect_and_talk("a SIP trunk");
+    assert_eq!((pair.caller.rate(), pair.host.rate()), (Some(33_600), Some(33_600)));
+    for (who, modem) in [("caller", &pair.caller), ("host", &pair.host)] {
+        let found = modem.reflection().unwrap_or_else(|| panic!("{who}: no reflection found"));
+        assert!(found.delay.abs_diff(ROUND_TRIP) < 4, "{who}: found at {}", found.delay);
+        let trained = modem.echo_return_loss().unwrap_or(0.0);
+        assert!(trained > 20.0, "{who}: {trained:.1} dB taken out in training");
+    }
+}
+
+/// The SIP trunk of NIST's time service: the far echo is there while the
+/// far end is silent, and a canceller in the network takes it out once the
+/// far end talks. Taps held from training then put back an echo that is not
+/// on the line, 16.5 dB under the far end. The canceller scales them to the
+/// echo that is left, and the call holds its rate with no retrain.
+#[test]
+fn a_far_echo_that_goes_in_double_talk_is_not_put_back() {
+    const ROUND_TRIP: usize = 2 * 8_000;
+    let mut pair = Pair::over(Echo::copy(ROUND_TRIP, 0.15), ROUND_TRIP / 2);
+    for _ in 0..40 {
+        if pair.up() {
+            break;
+        }
+        pair.run(1.0);
+    }
+    assert!(pair.up(), "the caller stopped at {} and the host at {}", pair.caller.line_phase(), pair.host.line_phase());
+    let rates = (pair.caller.rate(), pair.host.rate());
+    let retrains = (pair.caller.retrains(), pair.host.retrains());
+    for path in [&mut pair.own_caller, &mut pair.own_host] {
+        path.echo.shape = vec![0.0];
+    }
+    pair.run(10.0);
+    assert!(pair.up(), "the caller is in {} and the host in {}", pair.caller.line_phase(), pair.host.line_phase());
+    assert_eq!((pair.caller.rate(), pair.host.rate()), rates, "the rates fell");
+    assert_eq!((pair.caller.retrains(), pair.host.retrains()), retrains, "the call retrained");
+    pair.at_caller.clear();
+    for b in b"still here" {
+        pair.host.feed_dte(*b);
+    }
+    pair.run(4.0);
+    assert_eq!(String::from_utf8_lossy(&pair.at_caller), "still here");
 }
 
 /// One cable, as `modem-loop` and two windows use it: both ends send into

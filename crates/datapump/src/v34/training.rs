@@ -135,6 +135,30 @@ const SILENCE_BEFORE_S: f64 = 0.070;
 /// is better served by more than the least.
 const PHASE3_TRN: f64 = 1.0;
 
+/// A round trip this long or longer goes through a network, and the echo
+/// canceller looks for a reflection from its far end, in seconds.
+pub const NETWORK_ECHO: f64 = 0.1;
+
+/// On a network line, how much longer than the round trip this end's TRN of
+/// phase 3 is, in seconds. The echo of TRN comes back one round trip after
+/// TRN starts, and the canceller can only find and learn it from then on. A
+/// TRN of 1 s on a SIP trunk with a round trip of 1 s gave it nothing.
+const PHASE3_TRN_PAST_ROUND_TRIP: f64 = 1.0;
+
+/// The longest TRN this end sends in phase 3, in seconds: the two real
+/// modems sent up to 1.9 s.
+const MOST_PHASE3_TRN: f64 = 2.0;
+
+/// How long this end sends TRN for in phase 3, in seconds, on a line with
+/// this round trip.
+fn phase3_trn(round_trip: f64) -> f64 {
+    if round_trip >= NETWORK_ECHO {
+        (round_trip + PHASE3_TRN_PAST_ROUND_TRIP).clamp(PHASE3_TRN, MOST_PHASE3_TRN)
+    } else {
+        PHASE3_TRN
+    }
+}
+
 /// The least TRN there is in either phase.
 const LEAST_TRN: usize = 512;
 
@@ -840,7 +864,7 @@ impl Modem {
             far_mode: far,
             md_until: None,
             md_waited: false,
-            trn_symbols: (PHASE3_TRN * settings.transmit.baud()) as usize,
+            trn_symbols: (phase3_trn(settings.round_trip) * settings.transmit.baud()) as usize,
             far_asked: None,
             phase3_snr: None,
             phase4_snr: None,
@@ -2219,8 +2243,10 @@ mod tests {
             caller.step(0.0);
         }
         assert_eq!(caller.status(), Status::Failed("no J from the answer modem"));
+        // On a round trip of 1 s the TRN of phase 3 is 2 s, and the wait
+        // for S starts after it.
         let mut answerer = Modem::new(settings(Role::Answer, 1.0), FS);
-        for _ in 0..(4.0 * FS) as usize {
+        for _ in 0..(5.0 * FS) as usize {
             answerer.step(0.0);
         }
         assert_eq!(answerer.status(), Status::Failed("no S from the call modem"));

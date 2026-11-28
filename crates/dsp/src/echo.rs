@@ -619,14 +619,26 @@ impl Drift {
     }
 }
 
-/// Samples the network echo's gain is measured over before it is moved:
-/// a tenth of a second. Its echo is 18 dB under the far end on a SIP trunk,
-/// and over this many samples the measurement still stands five times its
-/// noise when the echo the taps expect has gone.
+/// Samples the network echo's gain is measured over: a tenth of a second.
+/// Its echo is 18 dB under the far end on a SIP trunk, and over this many
+/// samples the measurement still stands five times its noise when the echo
+/// the taps expect has gone.
 const NETWORK_WINDOW: usize = 1_600;
 
-/// How far each measurement moves the gain: half way.
-const NETWORK_STEP: f64 = 0.5;
+/// How far a measurement must be from the gain in use to count against it.
+///
+/// One measurement has noise of 0.15 to 0.2 with the far end talking 16 dB
+/// over the echo, and more in V.34's phase 4, where MP repeats. A gain that
+/// moved by each measurement carried that noise into what it left: at
+/// V.34's 33 600 bit/s, signal to noise fell from 53 dB to between 28 and
+/// 48. An echo that has gone reads about one off.
+const NETWORK_OFF: f64 = 0.5;
+
+/// Measurements in a row, all off the same way, before the gain moves.
+const NETWORK_AGREE: u32 = 4;
+
+/// A new gain this close to nothing or to one is taken as that.
+const NETWORK_SNAP: f64 = 0.25;
 
 /// The network echo's gain: how much of what the taps learned is on the line
 /// now.
@@ -642,19 +654,28 @@ const NETWORK_STEP: f64 = 0.5;
 /// What is left holds the far end and the echo less the estimate. If the
 /// echo is `g` times the estimate, what is left set against the estimate,
 /// over the estimate's power, reads `g` less the gain in use; the far end,
-/// which has nothing to do with this end's signal, adds only noise. So the
-/// gain is moved by that reading, a tenth of a second at a time.
+/// which has nothing to do with this end's signal, adds only noise. That
+/// reading is taken a tenth of a second at a time. The gain holds still
+/// until [`NETWORK_AGREE`] readings in a row put the echo more than
+/// [`NETWORK_OFF`] from it on the same side, and then goes to their mean.
+/// It so changes in 0.4 s when the echo goes or comes back, and not for the
+/// noise of the far end.
 #[derive(Debug, Clone)]
 struct NetworkGain {
     gain: f64,
     score: f64,
     power: f64,
     count: usize,
+    /// Readings in a row that are off the same way, and their sum.
+    agree: u32,
+    readings: f64,
+    /// Which way they are off: up when the echo is more than the gain.
+    up: bool,
 }
 
 impl NetworkGain {
     fn new() -> Self {
-        Self { gain: 1.0, score: 0.0, power: 0.0, count: 0 }
+        Self { gain: 1.0, score: 0.0, power: 0.0, count: 0, agree: 0, readings: 0.0, up: false }
     }
 
     /// One sample of what is left and of the estimate, before the gain.
@@ -667,7 +688,29 @@ impl NetworkGain {
         }
         if self.power > 1e-12 {
             let off = self.score / self.power;
-            self.gain = (self.gain + NETWORK_STEP * off).clamp(0.0, 1.5);
+            if off.abs() > NETWORK_OFF {
+                let up = off > 0.0;
+                if self.agree == 0 || up != self.up {
+                    (self.agree, self.readings, self.up) = (0, 0.0, up);
+                }
+                self.agree += 1;
+                self.readings += self.gain + off;
+                if self.agree >= NETWORK_AGREE {
+                    let mean = self.readings / f64::from(self.agree);
+                    // The echo is on or off, as a rule, and the mean of a
+                    // few readings has noise of its own.
+                    self.gain = if mean < NETWORK_SNAP {
+                        0.0
+                    } else if (mean - 1.0).abs() < NETWORK_SNAP {
+                        1.0
+                    } else {
+                        mean.min(1.5)
+                    };
+                    (self.agree, self.readings) = (0, 0.0);
+                }
+            } else {
+                (self.agree, self.readings) = (0, 0.0);
+            }
         }
         self.score = 0.0;
         self.power = 0.0;
