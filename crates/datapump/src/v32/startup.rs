@@ -830,6 +830,13 @@ mod timing {
     /// of the start-up the far end is silent for. The shortest segment allowed
     /// is half a second, which is enough for one of those jobs.
     pub const SEGMENT_TRN_LONG: u64 = 4096;
+    /// How much of segment 3 a network line needs after its round trip, when
+    /// the echo of the segment is back: half for the search, half for the
+    /// far taps to converge.
+    pub const ECHO_AFTER_ROUND_TRIP: u64 = 3072;
+    /// Segment 3 at its longest (5.2.3). A line with a round trip longer
+    /// than this less [`SEGMENT_TRN_LONG`] gets less time for its far taps.
+    pub const SEGMENT_TRN_MAX: u64 = 8192;
     /// Scrambled ones before data may flow (5.4.1 e, 5.4.2).
     pub const SETTLE: u64 = 128;
     /// The latest an R3 could still be on its way, once the round trip is
@@ -943,6 +950,9 @@ pub struct Startup {
     since_conditioning: u64,
     /// Consecutive symbols the condition being waited for has held.
     held: u64,
+    /// The round trip the first training measured, kept through retrains:
+    /// see [`Startup::line_round_trip`].
+    first_round_trip: Option<u64>,
     /// Calling under V.32bis Annex A: wait for AC before AA. See `Modem::annex_a`.
     annex_a: bool,
     /// Calling: the answering tone has been heard for long enough.
@@ -1047,6 +1057,7 @@ impl Startup {
             since_conditioning: u64::MAX,
             round_trip: 0,
             held: 0,
+            first_round_trip: None,
             annex_a: false,
             answer_heard: false,
             after_answer: 0,
@@ -1226,7 +1237,21 @@ impl Startup {
     pub fn training_symbols(&self) -> u64 {
         let near = (ECHO_SPAN_MS * super::BAUD / 1000.0) as u64;
         if self.round_trip > near {
-            timing::SEGMENT_TRN_LONG
+            // The echo of the segment's first symbol is a round trip behind
+            // it, and the search and the taps both need the echo to work on.
+            // On a SIP trunk the round trip is a second, 2400 symbols, and a
+            // segment of 4096 left the far taps nothing but its last 0.7 s.
+            // So the round trip and [`timing::ECHO_AFTER_ROUND_TRIP`] more,
+            // never less than the 4096 and never more than 5.2.3's 8192.
+            //
+            // Only past 100 ms (see [`NETWORK_ECHO_MS`]). A shorter line keeps
+            // the 4096: its echo is back early in the segment anyway.
+            let network = (NETWORK_ECHO_MS * super::BAUD / 1000.0) as u64;
+            if self.line_round_trip() >= network {
+                (self.round_trip + timing::ECHO_AFTER_ROUND_TRIP).clamp(timing::SEGMENT_TRN_LONG, timing::SEGMENT_TRN_MAX)
+            } else {
+                timing::SEGMENT_TRN_LONG
+            }
         } else {
             timing::SEGMENT_TRN
         }
@@ -2267,6 +2292,18 @@ impl Startup {
         let overhead = response + latency.round() as u64 + 2 * super::SHAPING_DELAY;
         self.counted = self.timer.take().unwrap_or(0);
         self.round_trip = self.counted.saturating_sub(overhead);
+        self.first_round_trip.get_or_insert(self.round_trip);
+    }
+
+    /// The round trip of the line itself, in symbols: the smaller of this
+    /// training's reading and the first one's.
+    ///
+    /// A line does not get longer during a call, but a retrain's reading
+    /// can: on a line of a millisecond each way, the first training read 1
+    /// symbol and the retrain 677. What decides whether the line is a
+    /// network's (see [`NETWORK_ECHO_MS`]) takes this.
+    pub fn line_round_trip(&self) -> u64 {
+        self.first_round_trip.map_or(self.round_trip, |first| first.min(self.round_trip))
     }
 
     fn enter(&mut self, state: State) {
@@ -2310,6 +2347,10 @@ pub struct Modem {
     finder: Option<EchoFinder>,
     /// Samples spent looking, and how many to spend.
     searched: usize,
+    /// Samples into the search before what arrives can be the echo of the
+    /// training segment: the round trip. Until then the finder only
+    /// remembers what went out.
+    listen_from: usize,
     search_for: usize,
     /// What the search turned up, kept for diagnostics: the number is the
     /// difference between a canceller that works on a long line and one that
@@ -2332,6 +2373,11 @@ pub struct Modem {
 /// The reflection off a hybrid, which is immediate, and a little of what the
 /// network adds behind it.
 const ECHO_SPAN_MS: f64 = 8.0;
+
+/// A far reflection at least this far back, in milliseconds, is off the far
+/// end of a network rather than a sound card's cable (44 ms there and back):
+/// see [`EchoCanceller::hold_drift_rate`].
+const NETWORK_ECHO_MS: f64 = 100.0;
 
 /// How much line the second run of taps covers, in milliseconds.
 ///
@@ -2413,6 +2459,7 @@ impl Modem {
             echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, ECHO_STEP),
             finder: None,
             searched: 0,
+            listen_from: 0,
             search_for: 0,
             reflection: None,
             fs,
@@ -2476,7 +2523,11 @@ impl Modem {
             // it keeps both, and does not: the near echo is still in every
             // score as noise, and with nothing else on the line the largest of
             // them read 0.57. From what was left, that is 0.05.
-            finder.feed(sent, cleaned);
+            if self.searched < self.listen_from {
+                finder.remember(sent);
+            } else {
+                finder.feed(sent, cleaned);
+            }
             self.searched += 1;
             if self.searched >= self.search_for {
                 self.place_far_taps();
@@ -2527,6 +2578,12 @@ impl Modem {
             // the canceller carries on from the delay and rate it had, having
             // kept the delay moving at that rate while the taps learned again.
             self.echo.follow_drift(true);
+            // A reflection further back than any sound card's cable is off
+            // the far end of a network, whose echo does not drift by clocks:
+            // follow its jumps, and hold its rate at nothing.
+            if self.echo.far_echo().is_some_and(|(offset, _)| offset as f64 >= NETWORK_ECHO_MS * self.fs / 1000.0) {
+                self.echo.hold_drift_rate();
+            }
         }
         self.was_training = training;
         self.echo.set_adapting(training);
@@ -2569,8 +2626,23 @@ impl Modem {
         }
         self.finder = Some(EchoFinder::new(first, last));
         self.searched = 0;
-        self.search_for =
-            (self.startup.training_symbols() as f64 / 2.0 * self.fs / super::BAUD) as usize;
+        // On a network line, scored from the moment the echo of the segment
+        // can be back, for half of the segment it gets beyond its round
+        // trip; the other half is for the taps placed then to converge. A
+        // shorter line scores from the start, over half the segment.
+        let network = (NETWORK_ECHO_MS * self.fs / 1000.0) as usize;
+        let line = (self.startup.line_round_trip() as f64 * self.fs / super::BAUD) as usize;
+        let (listen_from, scored) = if line >= network {
+            // The far taps learn from the moment they are placed, from what
+            // was sent up to `last` samples before: a second, on a SIP
+            // trunk, which the canceller would otherwise not have kept.
+            self.echo.remember(last);
+            (self.round_trip_samples(), self.startup.training_symbols().saturating_sub(self.startup.round_trip()))
+        } else {
+            (0, self.startup.training_symbols())
+        };
+        self.listen_from = listen_from;
+        self.search_for = listen_from + (scored as f64 / 2.0 * self.fs / super::BAUD) as usize;
     }
 
     /// Put the second run of taps where the search says the reflection is.
