@@ -1313,3 +1313,40 @@ fn the_two_clocks_differ_by_the_one_wait_that_is_inside_only_one_of_them() {
          contains, so it cannot have measured the round trip at all"
     );
 }
+
+/// What a V.32bis Annex A caller (`Modem::annex_a`) sends to `far`, after
+/// `seconds`: the peak of its output after `from` seconds.
+fn annex_a_peak(far: impl Fn(f64) -> f64, seconds: f64, from: f64) -> f64 {
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer, FS).annex_a();
+    let mut peak = 0.0f64;
+    for i in 0..(FS * seconds) as usize {
+        let t = i as f64 / FS;
+        let out = calling.step(far(t));
+        if t > from {
+            peak = peak.max(out.abs());
+        }
+    }
+    peak
+}
+
+#[test]
+fn an_annex_a_caller_waits_for_ac_and_not_for_the_answering_tone() {
+    use std::f64::consts::TAU;
+    let ans = |t: f64| 0.3 * (TAU * 2100.0 * t).sin();
+    let ones = |t: f64| 0.3 * (TAU * 2250.0 * t).sin();
+    let ac = |t: f64| 0.15 * (TAU * 600.0 * t).sin() + 0.15 * (TAU * 3000.0 * t).sin();
+
+    // NIST's ACTS: 3.3 s of ANS, 3 s of unscrambled ones. Silent all through.
+    let acts = |t: f64| if t < 3.3 { ans(t) } else { ones(t) };
+    assert!(annex_a_peak(acts, 6.2, 0.0) < 1.0e-6, "AA over the answering tone or the ones");
+
+    // Then AC: AA follows it.
+    let acts = |t: f64| if t < 3.3 { ans(t) } else if t < 6.3 { ones(t) } else { ac(t) };
+    assert!(annex_a_peak(acts, 7.0, 6.3) > 1.0e-3, "no AA to AC");
+
+    // An answering tone and then nothing: AA after 2 s of quiet.
+    let quiet = |t: f64| if t < 3.3 { ans(t) } else { 0.0 };
+    assert!(annex_a_peak(quiet, 5.0, 0.0) < 1.0e-6, "AA too soon after the tone");
+    assert!(annex_a_peak(quiet, 6.0, 5.4) > 1.0e-3, "no AA after the quiet");
+}

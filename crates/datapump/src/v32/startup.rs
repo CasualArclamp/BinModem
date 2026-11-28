@@ -775,6 +775,13 @@ mod timing {
     /// in (5.4.1). Note 1 there lets it start on the tones alone, which is
     /// what makes this a minimum rather than a wait.
     pub const HEARD_ANSWER_TONE: u64 = 2400;
+    /// How long after the answering tone the calling modem waits for AC
+    /// before it sends AA all the same: 2 s. An automode answerer's
+    /// unscrambled ones come in that time, and the automode ear takes them.
+    pub const QUIET_AFTER_ANSWER: u64 = 4800;
+    /// How long the calling modem must hear AC before it sends AA: 64
+    /// symbols, 27 ms, the response delay of 5.4.1.
+    pub const HEARD_TONES: u64 = 64;
     /// The response delay both ends owe each other, 5.4.1 and 5.4.2: "64 plus
     /// or minus 2 symbol periods".
     pub const RESPONSE: u64 = 64;
@@ -936,6 +943,14 @@ pub struct Startup {
     since_conditioning: u64,
     /// Consecutive symbols the condition being waited for has held.
     held: u64,
+    /// Calling under V.32bis Annex A: wait for AC before AA. See `Modem::annex_a`.
+    annex_a: bool,
+    /// Calling: the answering tone has been heard for long enough.
+    answer_heard: bool,
+    /// Calling: symbols since the answering tone stopped.
+    after_answer: u64,
+    /// Calling: symbols the alternation (AC) has stood without a break.
+    tone_run: u64,
     /// Consecutive symbols reception has been unsatisfactory for (7).
     unsatisfactory: u64,
     /// Whether this call has ever been up, which is what makes going through
@@ -1032,6 +1047,10 @@ impl Startup {
             since_conditioning: u64::MAX,
             round_trip: 0,
             held: 0,
+            annex_a: false,
+            answer_heard: false,
+            after_answer: 0,
+            tone_run: 0,
             unsatisfactory: 0,
             connected_once: false,
             retrains: 0,
@@ -1523,11 +1542,39 @@ impl Startup {
                 // having: without this the calling modem hears the answer as
                 // its own cue and starts transmitting over it immediately.
                 let sidebands = self.listener.sideband_amplitude();
-                let tones =
+                let standing =
                     sidebands > AUDIBLE && sidebands > self.listener.answer_amplitude();
-                let heard_enough = self.hold(heard == Heard::AnswerTone)
-                    >= timing::HEARD_ANSWER_TONE;
-                if tones || heard_enough {
+                let answering = heard == Heard::AnswerTone;
+                let go = if self.annex_a {
+                    // V.32bis Annex A, where V.8 sends a call that heard a
+                    // plain ANS. The answering tone alone is not the cue for
+                    // AA. An automode answerer (NIST's ACTS, for one) follows
+                    // its tone with 3 s of V.22bis's unscrambled ones, and
+                    // only then AC. It hears an AA sent over its tone, goes
+                    // to AC at once, and then never answers that AA with a
+                    // reversal: on four live calls it reversed only to an AA
+                    // that began after its AC. So this end waits for AC, held
+                    // for 64 symbols so that a click does not start AA early.
+                    // Only when the tone has stopped and the line has been
+                    // quiet for [`timing::QUIET_AFTER_ANSWER`] does it send AA, to
+                    // wake an answerer that waits for one.
+                    self.tone_run = if standing { self.tone_run + 1 } else { 0 };
+                    if self.hold(answering) >= timing::HEARD_ANSWER_TONE {
+                        self.answer_heard = true;
+                        self.after_answer = 0;
+                    } else if self.answer_heard && heard == Heard::Nothing {
+                        self.after_answer += 1;
+                    } else if !answering {
+                        // Something other than quiet: the automode ear's to
+                        // judge, so the quiet starts again.
+                        self.after_answer = 0;
+                    }
+                    self.tone_run >= timing::HEARD_TONES
+                        || (self.answer_heard && self.after_answer >= timing::QUIET_AFTER_ANSWER)
+                } else {
+                    standing || self.hold(answering) >= timing::HEARD_ANSWER_TONE
+                };
+                if go {
                     self.enter(State::Aa);
                 }
             }
@@ -2384,6 +2431,14 @@ impl Modem {
             self.tx.set_signal(Signal::AlternateAC);
             self.startup.state = State::Ac;
         }
+        self
+    }
+
+    /// A calling modem under V.32bis Annex A (automode, after a plain
+    /// ANS): it sends AA only once AC has started, not after 1 s of the
+    /// answering tone as 5.4.1 has a plain V.32 caller do. See `Listening`.
+    pub fn annex_a(mut self) -> Self {
+        self.startup.annex_a = true;
         self
     }
 
