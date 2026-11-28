@@ -344,6 +344,16 @@ impl Session {
         self.events.pop_front()
     }
 
+    /// Ask for a retraining of the forward channel at its rate, with
+    /// attention 0x2R. The holder retrains once the attention is
+    /// acknowledged, from whichever end it was asked.
+    pub fn request_retrain(&mut self) {
+        if self.link.is_connected() && self.pending == Pending::None {
+            self.asked_ms = 0;
+            self.link.attention(0x20 | rate_code(self.rate));
+        }
+    }
+
     pub fn hang_up(&mut self) {
         self.link.disconnect(mnp::reason::USER);
     }
@@ -373,11 +383,10 @@ impl Session {
         self.events.push_back(Event::Holding(which));
     }
 
-    /// Retrain the forward channel at a new rate, from whichever end.
+    /// Retrain the forward channel at a rate, new or the same, from
+    /// whichever end.
     fn retrain(&mut self, rate: Rate) {
-        if rate != self.rate {
-            self.events.push_back(Event::Rate(rate));
-        }
+        self.events.push_back(Event::Rate(rate));
         self.rate = rate;
         match self.holding {
             Holding::Forward => {
@@ -569,6 +578,15 @@ impl Session {
         if !self.cfg.fallback || self.holding != Holding::Back || !self.link.is_connected() {
             return;
         }
+        // Not while a handover or retraining is under way: the receiver can
+        // stay in data a moment after the far carrier has gone, and its
+        // figures then are of nothing (issue 84). An attention asked here
+        // would go out after the handover, to a far end that waits for a
+        // training at its rate.
+        if self.pending != Pending::None {
+            self.in_data_ms = 0;
+            return;
+        }
         if !self.frx.in_data() {
             self.in_data_ms = 0;
             return;
@@ -580,12 +598,14 @@ impl Session {
         // yet listening for.
         if let Some(code) = self.link.attention_pending() {
             self.asked_ms = self.asked_ms.saturating_add(ms);
-            if code & 0xF0 == 0x30 && self.asked_ms >= ASSUME_MS
+            if self.asked_ms >= ASSUME_MS
                 && let Some(rate) = rate_from_code(code & 0x0F)
-                    && rate != self.rate {
-                        self.retrain(rate);
-                        self.in_data_ms = 0;
-                    }
+                && (code & 0xF0 == 0x20 || (code & 0xF0 == 0x30 && rate != self.rate))
+            {
+                self.asked_ms = 0;
+                self.retrain(rate);
+                self.in_data_ms = 0;
+            }
             return;
         }
         // Give the loops a second to settle after a training.
@@ -596,6 +616,14 @@ impl Session {
         let allowed = |r: Rate| self.agreed_rates & (1 << rate_code(r)) != 0;
         let ladder = [Rate::R7200, Rate::R9600, Rate::R12000, Rate::R14400];
         let here = ladder.iter().position(|&r| r == self.rate).unwrap_or(0);
+        let lowest = ladder.iter().copied().find(|&r| allowed(r)).unwrap_or(Rate::R7200);
+        if self.rate == lowest && snr < working_snr(lowest) - 6.0 {
+            // Nowhere slower to go and the receiver has lost the line:
+            // retrain at the same rate so it can lock on again.
+            self.asked_ms = 0;
+            self.link.attention(0x20 | rate_code(self.rate));
+            return;
+        }
         let target = if snr < working_snr(self.rate) - 2.0 {
             // Down as far as the line needs, at once.
             ladder[..here].iter().rev().copied().find(|&r| allowed(r) && working_snr(r) - 1.0 <= snr).or_else(|| ladder.first().copied())
@@ -642,11 +670,42 @@ impl Session {
                         self.pending = Pending::Retrain(rate, None);
                     }
             }
+            // The far end asks for a retraining at a rate, maybe the same.
+            MnpEvent::Attention(code) if code & 0xF0 == 0x20 && self.holding == Holding::Forward => {
+                if let Some(rate) = rate_from_code(code & 0x0F)
+                    && self.pending == Pending::None {
+                        self.pending = Pending::Retrain(rate, None);
+                    }
+            }
+            // The holder tells us it retrains at a rate: listen for it.
+            MnpEvent::Attention(code) if matches!(code & 0xF0, 0x20 | 0x30) && self.holding == Holding::Back => {
+                if let Some(rate) = rate_from_code(code & 0x0F)
+                    && self.pending == Pending::None {
+                        self.retrain(rate);
+                        self.in_data_ms = 0;
+                    }
+            }
             MnpEvent::AttentionAcked(code) if code & 0xF0 == 0x30 && self.holding == Holding::Back => {
                 if let Some(rate) = rate_from_code(code & 0x0F)
                     && rate != self.rate {
                         self.retrain(rate);
                         self.in_data_ms = 0;
+                    }
+            }
+            MnpEvent::AttentionAcked(code) if code & 0xF0 == 0x20 && self.holding == Holding::Back => {
+                if let Some(rate) = rate_from_code(code & 0x0F) {
+                    self.retrain(rate);
+                    self.in_data_ms = 0;
+                }
+            }
+            // Our own attention for a rate, acknowledged now that we hold the
+            // forward channel (it was asked before a handover or the
+            // watchdog): the far end waits for a training at that rate, so
+            // give it one (issue 84).
+            MnpEvent::AttentionAcked(code) if matches!(code & 0xF0, 0x20 | 0x30) && self.holding == Holding::Forward => {
+                if let Some(rate) = rate_from_code(code & 0x0F)
+                    && self.pending == Pending::None {
+                        self.pending = Pending::Retrain(rate, None);
                     }
             }
             MnpEvent::AttentionAcked(code) if code & 0xF0 == 0x10 && self.holding == Holding::Back => {
@@ -662,5 +721,198 @@ impl Session {
     /// Sample rate this session runs at.
     pub fn sample_rate(&self) -> f64 {
         self.fs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FS: f64 = 16_000.0;
+
+    /// Two ends on a two-wire line with loss, hybrid echo and noise, as in
+    /// `tests/hst_session.rs`.
+    struct Line {
+        answerer: Session,
+        caller: Session,
+        seed: u64,
+        noise: f64,
+        a_out: f64,
+        c_out: f64,
+        at_caller: Vec<u8>,
+        answerer_events: Vec<Event>,
+        caller_events: Vec<Event>,
+    }
+
+    impl Line {
+        fn new() -> Self {
+            Self {
+                answerer: Session::new(FS, Side::Answerer, Config::default()),
+                caller: Session::new(FS, Side::Caller, Config::default()),
+                seed: 0xCA11 | 1,
+                noise: 0.006,
+                a_out: 0.0,
+                c_out: 0.0,
+                at_caller: Vec::new(),
+                answerer_events: Vec::new(),
+                caller_events: Vec::new(),
+            }
+        }
+
+        fn unit(&mut self) -> f64 {
+            let mut x = self.seed;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.seed = x;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn gaussian(&mut self) -> f64 {
+            let u1 = self.unit().max(1e-18);
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * self.unit()).cos()
+        }
+
+        /// One sample each way.
+        fn step(&mut self) {
+            let to_caller = 0.3 * self.a_out + 0.5 * self.c_out + self.noise * self.gaussian();
+            let to_answerer = 0.3 * self.c_out + 0.5 * self.a_out + self.noise * self.gaussian();
+            self.caller.feed(to_caller);
+            self.answerer.feed(to_answerer);
+            self.a_out = self.answerer.next_sample();
+            self.c_out = self.caller.next_sample();
+        }
+
+        /// Run for `seconds`; `watch` sees both ends after each sample.
+        fn run(&mut self, seconds: f64, watch: &mut dyn FnMut(&Self)) {
+            for _ in 0..(seconds * FS) as usize {
+                self.step();
+                watch(self);
+            }
+            self.at_caller.extend(self.caller.read());
+            self.answerer.read();
+            self.answerer_events.extend(std::iter::from_fn(|| self.answerer.poll_event()));
+            self.caller_events.extend(std::iter::from_fn(|| self.caller.poll_event()));
+        }
+
+        fn run_until(&mut self, limit: f64, done: &dyn Fn(&Self) -> bool) -> bool {
+            let mut t = 0.0;
+            while t < limit {
+                self.run(0.5, &mut |_| {});
+                t += 0.5;
+                if done(self) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn connect(&mut self) {
+            assert!(self.run_until(10.0, &|l| l.answerer.is_connected() && l.caller.is_connected()), "no connection");
+            // The agreed rate trained, and the minimum hold run out.
+            self.run(4.0, &mut |_| {});
+        }
+    }
+
+    fn bytes(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 56) as u8
+            })
+            .collect()
+    }
+
+    /// Issue 84, part 1: while an end waits to take the forward channel, its
+    /// receiver can still be in data on the far carrier as it goes, and the
+    /// fallback must not ask for a rate off that.
+    #[test]
+    fn no_rate_is_asked_while_taking_the_forward_channel() {
+        let mut line = Line::new();
+        // Noise the agreed 14 400 cannot carry, so the fallback is busy.
+        line.noise = 0.035;
+        line.connect();
+        let mut asked_in_take = Vec::new();
+        let mut takes = 0;
+        for round in 0..3u64 {
+            // Upload: the caller takes the forward channel.
+            line.caller.send(&bytes(round + 1, 3000));
+            let mut was_take = false;
+            for _ in 0..40 {
+                line.run(0.5, &mut |l| {
+                    if let Pending::Take(..) = l.caller.pending {
+                        if !was_take {
+                            takes += 1;
+                        }
+                        was_take = true;
+                        if let Some(code) = l.caller.link.attention_pending()
+                            && code & 0xF0 == 0x30
+                            && !asked_in_take.contains(&code)
+                        {
+                            asked_in_take.push(code);
+                        }
+                    } else {
+                        was_take = false;
+                    }
+                });
+                if line.caller.backlog() == 0 && line.caller.holding() == Holding::Forward {
+                    break;
+                }
+            }
+            // Download: the answerer takes it back.
+            line.answerer.send(&bytes(round + 9, 3000));
+            line.run_until(20.0, &|l| l.answerer.backlog() == 0 && l.answerer.holding() == Holding::Forward);
+        }
+        println!("takes {takes}; rate asked in a take: {asked_in_take:x?}; caller events {:?}", line.caller_events);
+        assert!(takes >= 2, "the caller took the forward channel only {takes} times");
+        assert!(asked_in_take.is_empty(), "rate asked while taking the forward channel: {asked_in_take:x?}");
+    }
+
+    /// Issue 84, part 1, the other half: an attention for a rate that is
+    /// acknowledged while this end holds the forward channel is carried
+    /// out, so the far end, which follows it, is not left waiting.
+    #[test]
+    fn a_rate_acknowledged_while_holding_forward_is_trained() {
+        let mut line = Line::new();
+        line.connect();
+        assert_eq!(line.answerer.holding(), Holding::Forward);
+        assert_eq!(line.answerer.rate(), Rate::R14400);
+        line.answerer.link.attention(0x30 | rate_code(Rate::R12000));
+        let both = line.run_until(10.0, &|l| l.answerer.rate() == Rate::R12000 && l.caller.rate() == Rate::R12000);
+        println!("answerer events {:?}; caller events {:?}", line.answerer_events, line.caller_events);
+        assert!(both, "rates {:?} / {:?}", line.answerer.rate(), line.caller.rate());
+        let file = bytes(4, 4000);
+        line.answerer.send(&file);
+        assert!(line.run_until(20.0, &|l| l.at_caller.len() >= 4000), "no data after the retraining");
+        assert!(line.at_caller == file);
+    }
+
+    /// Issue 84, part 2: attention 0x2R retrains the forward channel at the
+    /// rate, whichever end asks for it.
+    #[test]
+    fn a_retrain_is_carried_out_whichever_end_asks() {
+        for asker in [Side::Caller, Side::Answerer] {
+            let mut line = Line::new();
+            line.connect();
+            let rate = line.answerer.rate();
+            let (a0, c0) = (line.answerer_events.len(), line.caller_events.len());
+            match asker {
+                Side::Caller => line.caller.request_retrain(),
+                Side::Answerer => line.answerer.request_retrain(),
+            }
+            let retrained = line.run_until(10.0, &|l| {
+                l.answerer_events[a0..].contains(&Event::Rate(rate)) && l.caller_events[c0..].contains(&Event::Rate(rate))
+            });
+            println!("{asker:?} asked: answerer {:?}; caller {:?}", &line.answerer_events[a0..], &line.caller_events[c0..]);
+            assert!(retrained, "{asker:?} asked and the forward channel did not retrain");
+            assert_eq!((line.answerer.rate(), line.caller.rate()), (rate, rate));
+            let file = bytes(6, 4000);
+            line.answerer.send(&file);
+            assert!(line.run_until(20.0, &|l| l.at_caller.len() >= 4000), "{asker:?}: no data after the retraining");
+            assert!(line.at_caller == file, "{asker:?}: data corrupted");
+        }
     }
 }
