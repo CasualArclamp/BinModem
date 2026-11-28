@@ -212,7 +212,7 @@ jobs:
 
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.WIN2K_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.WIN2K_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib -C link-arg=/FORCE:MULTIPLE"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
       - name: Patch PE Subsystem Version to 5.00
