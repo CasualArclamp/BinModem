@@ -63,13 +63,17 @@ pub enum Preamble {
     Alternating,
 }
 
-/// How far a symbol may land from one of the four states and still count as
-/// that state, at unit power.
+/// How far a symbol may land from the symbol before it (the same state), or
+/// from its negative (the opposite state), and still count, at unit power.
 ///
-/// The four states are on the unit circle, 1.41 apart, so 0.4 keeps each one
-/// well clear of its neighbours. It also refuses most of the points of a
-/// dense constellation, which do not sit on the states.
-const NEAR_A_STATE: f64 = 0.4;
+/// The four states are on the unit circle, 1.41 apart, so 0.5 keeps each one
+/// well clear of its neighbours, with the noise of two symbols in it.
+const NEAR_A_STATE: f64 = 0.5;
+
+/// How far from the unit circle a symbol may land and still be one of the
+/// four states. It refuses the inner and the outer points of a dense
+/// constellation.
+const OFF_THE_CIRCLE: f64 = 0.35;
 
 /// The symbols the watch looks back over.
 pub const PREAMBLE_WINDOW: u32 = 32;
@@ -85,10 +89,18 @@ pub const PREAMBLE_WINDOW: u32 = 32;
 /// Data cannot copy this for long. Scrambled data is a sequence of maximum
 /// length, and 28 symbols of one dibit pattern would repeat a window of 23
 /// bits, which such a sequence never does.
+///
+/// Each symbol is compared with the symbol before it, not with the four
+/// states. In data the carrier loop follows the decisions of a dense
+/// constellation, and a preamble can arrive turned from the states: 18
+/// degrees at 14 400 with noise at 20 dB. Then most symbols were more than
+/// 0.4 from every state, and the watch counted 12 of 32. A turn moves a
+/// symbol and the symbol before it together, so the comparison does not see
+/// it.
 #[derive(Debug, Clone, Default)]
 struct PreambleWatch {
-    /// The state the last symbol landed near, if it landed near one.
-    previous: Option<usize>,
+    /// The last symbol, if it landed on the unit circle.
+    previous: Option<Complex>,
     /// One bit for each symbol, newest lowest: the symbol was on the same
     /// state as the symbol before it.
     repeated: u64,
@@ -98,20 +110,14 @@ struct PreambleWatch {
 
 impl PreambleWatch {
     fn feed(&mut self, z: Complex) {
-        let (state, distance) = STATES
-            .iter()
-            .enumerate()
-            .map(|(i, &(x, y))| {
-                let s = Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS);
-                (i, (z - s).abs())
-            })
-            .fold((0, f64::MAX), |best, this| if this.1 < best.1 { this } else { best });
-        let near = distance < NEAR_A_STATE;
-        let same = near && self.previous == Some(state);
-        let opposite = near && self.previous == Some((state + 2) & 3);
+        let on_circle = (z.abs() - 1.0).abs() < OFF_THE_CIRCLE;
+        let (same, opposite) = match self.previous {
+            Some(p) if on_circle => ((z - p).abs() < NEAR_A_STATE, (z + p).abs() < NEAR_A_STATE),
+            _ => (false, false),
+        };
         self.repeated = (self.repeated << 1) | u64::from(same);
         self.alternating = (self.alternating << 1) | u64::from(opposite);
-        self.previous = near.then_some(state);
+        self.previous = on_circle.then_some(z);
     }
 
     fn count(&self, kind: Preamble) -> u32 {
@@ -719,6 +725,38 @@ mod tests {
             for _ in 0..50_000 {
                 let z = Complex::new(uniform(), uniform()).scale(4.0);
                 assert_eq!(table.nearest(z), table.nearest_exhaustive(z), "{} points at {z:?}", table.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_turned_preamble_is_still_a_preamble() {
+        // The four states at unit power, turned as a carrier loop locked on a
+        // dense constellation can leave them, with noise on each symbol.
+        let state = |i: usize| {
+            let (x, y) = STATES[i];
+            Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)
+        };
+        let mut noise = 0x2545_f491_4f6c_dd1du64;
+        let mut wobble = || {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            (noise % 2001) as f64 / 1000.0 - 1.0
+        };
+        for degrees in [0.0, 18.0, 30.0, -40.0] {
+            let turn = Complex::from_polar(1.0, f64::to_radians(degrees));
+            for (kind, other, pattern) in [
+                (Preamble::Repeated, Preamble::Alternating, [0, 0]),
+                (Preamble::Alternating, Preamble::Repeated, [0, 2]),
+            ] {
+                let mut watch = PreambleWatch::default();
+                for k in 0..PREAMBLE_WINDOW as usize {
+                    let n = Complex::new(wobble(), wobble()).scale(0.1);
+                    watch.feed(state(pattern[k % 2]) * turn + n);
+                }
+                assert!(watch.count(kind) >= PREAMBLE_WINDOW - 2, "{kind:?} at {degrees} degrees");
+                assert_eq!(watch.count(other), 0, "{other:?} at {degrees} degrees");
             }
         }
     }
