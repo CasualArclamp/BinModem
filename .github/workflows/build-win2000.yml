@@ -1,4 +1,4 @@
-name: Release (Windows 2000 32-bit {TESTING - PLEASE USE WIN XP BUILDER})
+name: Release (Windows 2000 32-bit)
 
 on:
   push:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   windows-x86:
-    name: binmodem-x86.exe and dialsnoop-x86.exe (Win2K)
+    name: binmodem-win2k.exe and dialsnoop-win2k.exe (Win2K)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +92,8 @@ jobs:
           $blockedFunctions = @(
             "SHGetKnownFolderPath",
             "GetSystemTimePreciseAsFileTime",
+            "GetVolumePathNamesForVolumeNameW",
+            "RtlCaptureContext",
             "InitializeConditionVariable",
             "SleepConditionVariableCS",
             "WakeAllConditionVariable",
@@ -171,14 +173,14 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           $sums = foreach ($pair in @(
-            @{ src = "binmodem.exe"; dst = "binmodem-x86.exe" },
-            @{ src = "dialsnoop.exe"; dst = "dialsnoop-x86.exe" }
+            @{ src = "binmodem.exe"; dst = "binmodem-win2k.exe" },
+            @{ src = "dialsnoop.exe"; dst = "dialsnoop-win2k.exe" }
           )) {
             Copy-Item "target/i686-pc-windows-msvc/release/$($pair.src)" "dist/$($pair.dst)"
             (Get-FileHash "dist/$($pair.dst)" -Algorithm SHA256).Hash.ToLower() + "  $($pair.dst)"
           }
-          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
-          Get-Content dist/SHA256SUMS-x86.txt
+          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-2k.txt
+          Get-Content dist/SHA256SUMS-2k.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -193,10 +195,10 @@ jobs:
         run: |
           if (gh release view "${{ github.ref_name }}" 2>$null) {
             gh release upload "${{ github.ref_name }}" `
-              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt --clobber
+              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-2k.txt --clobber
           } else {
             gh release create "${{ github.ref_name }}" `
-              dist/binmodem-x86.exe dist/dialsnoop-x86.exe dist/SHA256SUMS-x86.txt `
+              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-2k.txt `
               --title "${{ github.ref_name }}" `
               --notes-file .github/release-notes.md
           }
