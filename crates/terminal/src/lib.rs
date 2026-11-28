@@ -11,6 +11,9 @@
 //! against the former.
 
 pub mod cp437;
+pub mod format;
+
+pub use format::CharFormat;
 
 use std::collections::VecDeque;
 
@@ -208,6 +211,8 @@ pub struct Terminal {
     /// colour; stay silent and you get "Graphics Mode -> 0" and forty years
     /// of ASCII art you cannot see.
     reply: Vec<u8>,
+    /// How received octets are read: all eight bits, or seven.
+    format: CharFormat,
 }
 
 impl Default for Terminal {
@@ -245,6 +250,7 @@ impl Terminal {
             mouse_urxvt: false,
             mouse_cell: None,
             reply: Vec::new(),
+            format: CharFormat::default(),
         }
     }
 
@@ -284,7 +290,20 @@ impl Terminal {
         }
     }
 
+    /// Read received octets in this character format from now on.
+    ///
+    /// Only the reading. What is sent is the caller's to encode with
+    /// [`CharFormat::encode`], because the caller is what sends it.
+    pub fn set_format(&mut self, format: CharFormat) {
+        self.format = format;
+    }
+
+    pub fn format(&self) -> CharFormat {
+        self.format
+    }
+
     pub fn feed(&mut self, byte: u8) {
+        let byte = self.format.decode(byte);
         match self.state {
             State::Ground => self.ground(byte),
             State::Escape => self.escape(byte),

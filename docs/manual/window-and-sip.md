@@ -27,6 +27,24 @@ found the reflection. On a two-wire pair the echo decides everything, and
 without the panel you cannot see it. A constellation full of noise looks the
 same if the noise is the line or the echo of this modem.
 
+### The terminal: send menu and character format
+
+Hold Ctrl and right-click the terminal to open the send menu. A right click
+without Ctrl goes to the far end, as before. The menu has these items:
+
+- **Break (250 ms)** and **Hard break (3.5 s)**. On a V.42 call, the modem
+  sends a V.42 BRK message (8.13) with the length. On a call without error
+  control, the modem holds the line at space for the length. On Telnet, both
+  send `IAC BRK`. The transcript records how the modem sent the break.
+- **Control characters**: NUL to US, and DEL, with their names.
+- **Telnet commands** (Telnet only): IP, AO, AYT, EC, EL and NOP.
+
+The box after the font slider sets the character format: 8N1, 7N1, 7E1, 7O1,
+7M1 or 7S1. A 7-bit format removes the eighth bit from received characters.
+It also puts the parity bit in the eighth bit of sent characters. The window
+keeps the choice in `settings.txt` as `char_format`. 8E1 and 8O1 are not
+available, because they need 11 bits for each character.
+
 ### Dark and light
 
 The key at the right end of the tab strip sets the theme:
