@@ -1350,3 +1350,41 @@ fn an_annex_a_caller_waits_for_ac_and_not_for_the_answering_tone() {
     assert!(annex_a_peak(quiet, 5.0, 0.0) < 1.0e-6, "AA too soon after the tone");
     assert!(annex_a_peak(quiet, 6.0, 5.4) > 1.0e-3, "no AA after the quiet");
 }
+
+#[test]
+fn an_aa_that_gets_no_reversal_is_sent_again_after_ac() {
+    use std::f64::consts::TAU;
+    // NIST's ACTS to a caller without automode: 3.3 s of ANS, then AC that
+    // never reverses, because the AA started over the answering tone.
+    let far = |t: f64| {
+        if t < 3.3 {
+            0.3 * (TAU * 2100.0 * t).sin()
+        } else {
+            0.15 * (TAU * 600.0 * t).sin() + 0.15 * (TAU * 3000.0 * t).sin()
+        }
+    };
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    // The peak of the caller's output in each 10 ms.
+    let block = (FS / 100.0) as usize;
+    let mut peaks = Vec::new();
+    let mut peak = 0.0f64;
+    for i in 0..(FS * 9.0) as usize {
+        peak = peak.max(calling.step(far(i as f64 / FS)).abs());
+        if (i + 1) % block == 0 {
+            peaks.push(peak);
+            peak = 0.0;
+        }
+    }
+    let at = |s: f64| (s * 100.0) as usize;
+    // AA starts over the answering tone, as 5.4.1 lets it.
+    assert!(peaks[at(2.5)..at(3.3)].iter().all(|p| *p > 1.0e-3), "no AA over the answering tone");
+    // It goes quiet in the AC, and AA starts again after the quiet. With no
+    // reversal it does that again each 2.5 s, so look at the first quiet only.
+    let first = (at(3.3)..peaks.len()).find(|&b| peaks[b] < 1.0e-6).expect("AA never stopped");
+    let end = (first..peaks.len()).find(|&b| peaks[b] > 1.0e-3).expect("no AA after the quiet");
+    println!("quiet from {:.2} s to {:.2} s", first as f64 / 100.0, end as f64 / 100.0);
+    assert!(first > at(5.0), "AA stopped before an answerer had time to reverse");
+    assert!(end - first >= 15, "a quiet of {} ms is too short", (end - first) * 10);
+    assert!(peaks[end..end + at(2.0)].iter().all(|p| *p > 1.0e-3), "the new AA did not hold");
+}

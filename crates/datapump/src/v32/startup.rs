@@ -782,6 +782,19 @@ mod timing {
     /// How long the calling modem must hear AC before it sends AA: 64
     /// symbols, 27 ms, the response delay of 5.4.1.
     pub const HEARD_TONES: u64 = 64;
+    /// How long the calling modem sends AA against a steady AC with no
+    /// reversal before it stops and starts AA again: 2.5 s.
+    ///
+    /// An answerer such as NIST's ACTS reverses only to an AA that starts
+    /// after its AC. An AA that started over its answering tone gets no
+    /// reversal. Such an answerer sends AC for about 8 s. A normal answerer
+    /// reverses within 128 symbols of AA, and the round trip of a SIP trunk
+    /// adds about 1 s to that. So 2.5 s is longer than a normal answer, and
+    /// it leaves time for a second AA in the 8 s of AC.
+    pub const AA_IGNORED: u64 = 6000;
+    /// How long the calling modem is quiet between the AA that got no
+    /// reversal and the new AA: 0.2 s.
+    pub const AA_GAP: u64 = 480;
     /// The response delay both ends owe each other, 5.4.1 and 5.4.2: "64 plus
     /// or minus 2 symbol periods".
     pub const RESPONSE: u64 = 64;
@@ -1001,6 +1014,9 @@ pub struct Startup {
     after_answer: u64,
     /// Calling: symbols the alternation (AC) has stood without a break.
     tone_run: u64,
+    /// Calling: symbols of quiet still to go before AA starts again. See
+    /// [`timing::AA_IGNORED`].
+    aa_gap: u64,
     /// Consecutive symbols reception has been unsatisfactory for (7).
     unsatisfactory: u64,
     /// Whether this call has ever been up, which is what makes going through
@@ -1132,6 +1148,7 @@ impl Startup {
             answer_heard: false,
             after_answer: 0,
             tone_run: 0,
+            aa_gap: 0,
             unsatisfactory: 0,
             connected_once: false,
             retrains: 0,
@@ -1753,6 +1770,13 @@ impl Startup {
                     self.enter(State::Aa);
                 }
             }
+            State::Aa if self.aa_gap > 0 => {
+                // The quiet between an AA that got no reversal and the new
+                // AA. See [`timing::AA_IGNORED`].
+                tx.set_signal(Signal::Silent);
+                self.aa_gap -= 1;
+                self.held = 0;
+            }
             State::Aa => {
                 tx.set_signal(Signal::StateA);
                 // 6.1: "conditioned to detect one of two incoming tones at
@@ -1797,6 +1821,14 @@ impl Startup {
                     self.high_reversals.restart();
                 }
                 let steady = self.hold(standing) >= timing::HEARD_CARRIER;
+                if !self.connected_once && self.held >= timing::AA_IGNORED {
+                    // A steady AC and no reversal: the answerer did not
+                    // accept this AA. Stop, and start AA again after its AC.
+                    tx.set_signal(Signal::Silent);
+                    self.aa_gap = timing::AA_GAP;
+                    self.held = 0;
+                    return;
+                }
                 // The far end is alternating, so its reversal is in the
                 // sidebands. This end is repeating a state, which puts nothing
                 // there at all.
