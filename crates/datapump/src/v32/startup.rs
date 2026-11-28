@@ -14,7 +14,7 @@
 //! that comes back. What is left after taking off the 64 is the time the line
 //! adds, which is what the echo canceller needs to know how far back to look.
 
-use super::{Coding, Mode, Receiver, Signal, Transmitter};
+use super::{Coding, Mode, PREAMBLE_WINDOW, Preamble, Receiver, Signal, Transmitter};
 use dsp::{EchoCanceller, EchoFinder, ReversalDetector, ToneDetector};
 // Part of this module's surface: `Modem::reflection` hands one back, and what
 // is above a data pump should not have to reach past it to name the type.
@@ -858,7 +858,35 @@ mod timing {
     /// recommendation sets no overall limit; a modem that waits for ever is no
     /// use to whatever is waiting on it.
     pub const PATIENCE: u64 = 2400 * 60;
+    /// The first part of a clause 8 preamble, AA or AC: 56T.
+    pub const PREAMBLE_FIRST: u64 = 56;
+    /// The whole preamble, with its 8T of CC or CA.
+    pub const PREAMBLE: u64 = 64;
+    /// The least time R4 is sent for before E (8.1), and the time R5 is sent
+    /// for before E (8.2): 64T.
+    pub const PROPOSAL: u64 = 64;
+    /// B1 after E in a renegotiation: 24T of scrambled ones at the new rate
+    /// (8.1, 8.2).
+    pub const RENEGOTIATION_ONES: u64 = 24;
+    /// How long past the round trip a step of a renegotiation may take before
+    /// it is given up.
+    ///
+    /// Clause 8 sets no limits. Each step that is waited for is a preamble or
+    /// a rate signal to detect (under 64T each) and a preamble or 64T of R5 to
+    /// send, so 256T is twice what the far end needs. A renegotiation that
+    /// gets no answer is then a full retrain of clause 7, which costs ten
+    /// seconds and more on a long line, so the wait is short.
+    pub const RENEGOTIATION_STEP: u64 = 256;
 }
+
+/// How many of the last [`PREAMBLE_WINDOW`] symbols must look like the far
+/// end's preamble before it is believed.
+///
+/// 28 of 32 is 12 ms into a 27 ms preamble, so it is heard in its first part
+/// with room to spare, and four symbols lost to noise do not hide it. Random
+/// data at 4800 bit/s puts one in four symbols on the same state as the one
+/// before, and 28 of 32 such is less likely than one in 10^11.
+const PREAMBLE_HEARD: u32 = PREAMBLE_WINDOW - 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -904,6 +932,18 @@ enum State {
     SendEnd,
     /// Both: scrambled ones while the far end settles.
     Settling,
+
+    /// Both: the preamble of V.32bis clause 8, AA then CC from the calling
+    /// modem and AC then CA from the answering one.
+    Preamble,
+    /// Initiating a renegotiation: R4, until the far end has answered with
+    /// R5 and R4 has been sent for 64T (8.1).
+    SendR4,
+    /// Responding to a renegotiation: the far end's preamble heard, R4 not
+    /// yet (8.2).
+    AwaitingR4,
+    /// Responding to a renegotiation: R5, for 64T (8.2).
+    SendR5,
     Connected(u32),
     Failed,
 }
@@ -1014,6 +1054,36 @@ pub struct Startup {
     agreed: u32,
     /// The state the receiver was last told about: see [`Startup::cue`].
     cued: Option<State>,
+    /// Symbols the far end's retrain tone has held unbroken, in data and
+    /// through a renegotiation (7.1, 7.2).
+    ///
+    /// Not [`Self::held`], which each state starts again: a renegotiation
+    /// begins on the same tone, and only its length tells the two apart.
+    retrain_tone: u64,
+    /// The far end's last rate signal was V.32bis's, so it can take part in
+    /// a rate renegotiation (clause 8).
+    far_bis: bool,
+    /// A rate renegotiation is going on, and whether this end began it.
+    renegotiating: bool,
+    initiating: bool,
+    /// How many renegotiations this call has completed.
+    renegotiations: u32,
+    /// Set by [`Startup::renegotiate`] and taken by the next step.
+    asked_to_renegotiate: Option<u32>,
+    /// The rate signal this end sends in a renegotiation: R4 or R5.
+    proposal: u16,
+    /// The far end's: R5 or R4.
+    far_proposal: Option<u16>,
+    /// The far end's preamble has been heard in this renegotiation, and the
+    /// receiver is listening for its rate signal.
+    far_preamble: bool,
+    /// [`Self::total`] when the far end's preamble was heard.
+    clamped_at: u64,
+    /// The rate and coding the call ran at before the renegotiation.
+    before: (u32, Coding),
+    /// A rate, and the error measured at it, to stop offering once the
+    /// renegotiation in progress completes: see [`Self::stop_offering`].
+    give_up_on: Option<(u32, f64)>,
 }
 
 /// Symbols the receiver must have been lost for, when reception has been
@@ -1078,6 +1148,18 @@ impl Startup {
             coding: Coding::Uncoded,
             agreed: 0,
             cued: None,
+            retrain_tone: 0,
+            far_bis: false,
+            renegotiating: false,
+            initiating: false,
+            renegotiations: 0,
+            asked_to_renegotiate: None,
+            proposal: 0,
+            far_proposal: None,
+            far_preamble: false,
+            clamped_at: 0,
+            before: (4800, Coding::Uncoded),
+            give_up_on: None,
         }
     }
 
@@ -1282,6 +1364,10 @@ impl Startup {
             State::SendRate => "rate signal",
             State::SendEnd => "E",
             State::Settling => "settling",
+            State::Preamble => "preamble",
+            State::SendR4 => "R4",
+            State::AwaitingR4 => "awaiting R4",
+            State::SendR5 => "R5",
             State::Connected(_) => "connected",
             State::Failed => "failed",
         }
@@ -1305,6 +1391,60 @@ impl Startup {
     /// that cannot hold what the two ends keep agreeing on.
     pub fn retrains(&self) -> u32 {
         self.retrains
+    }
+
+    /// Ask for a rate renegotiation to `rate` (V.32bis clause 8).
+    ///
+    /// R4 then offers `rate` and every lower rate this end offers. The far
+    /// end answers with what it can do, and the call goes on at the highest
+    /// rate the two have in common. So a rate above the present one asks to
+    /// go up, if both ends still offer it.
+    ///
+    /// Takes effect at the next step, and only on a call that is up. A far end
+    /// that is not V.32bis has no renegotiation, and gets a full retrain of
+    /// clause 7 instead.
+    pub fn renegotiate(&mut self, rate: u32) {
+        if matches!(self.state, State::Connected(_)) {
+            self.asked_to_renegotiate = Some(rate);
+        }
+    }
+
+    /// How many rate renegotiations this call has completed.
+    pub fn renegotiations(&self) -> u32 {
+        self.renegotiations
+    }
+
+    /// Whether both ends are V.32bis, which clause 8 needs.
+    ///
+    /// Note 3 to clause 8 warns that a V.32 modem "uses B4 for other
+    /// purposes", so a far end whose rate signal was V.32's is not sent a
+    /// preamble.
+    fn can_renegotiate(&self) -> bool {
+        is_v32bis(self.offer) && self.far_bis
+    }
+
+    /// The preamble the far end sends: AA from a calling modem, AC from an
+    /// answering one.
+    fn far_preamble_kind(&self) -> Preamble {
+        match self.role {
+            Role::Calling => Preamble::Alternating,
+            Role::Answering => Preamble::Repeated,
+        }
+    }
+
+    /// Whether what the receiver makes goes up as data, rather than to the
+    /// rate detector.
+    ///
+    /// In a renegotiation, data goes on arriving until the far end's preamble
+    /// (8.1 clamps circuit 104 only then), and it starts again after the far
+    /// end's E: the far end sends data 24T after it, whatever this end is
+    /// still sending.
+    fn delivering(&self) -> bool {
+        match self.state {
+            State::Connected(_) | State::Failed => true,
+            _ if self.renegotiating => self.heard_end || (self.initiating && !self.far_preamble),
+            _ => false,
+        }
     }
 
     /// The 16-bit sequences the far end has sent, in order, without the
@@ -1357,7 +1497,7 @@ impl Startup {
         // agree; afterwards they are the caller's, as data.
         self.pending_carrier_reversal |= carrier;
         self.pending_sideband_reversal |= sidebands;
-        if !matches!(self.state, State::Connected(_) | State::Failed) {
+        if !self.delivering() {
             // Drained either way, so that nothing accumulates in the receiver
             // to be handed up as data later; fed to the detector only while
             // there is still a rate exchange going on.
@@ -1366,6 +1506,11 @@ impl Startup {
                     continue;
                 }
                 if let Some(s) = self.rates.feed(bit) {
+                    // Whether the far end can renegotiate is what its rate
+                    // signal in the start-up said.
+                    if is_rate_signal(s) && !self.renegotiating {
+                        self.far_bis = is_v32bis(s);
+                    }
                     if self.last_seen != Some(s) {
                         self.last_seen = Some(s);
                         self.seen.push(s);
@@ -1482,6 +1627,11 @@ impl Startup {
     fn expecting_end(&self) -> bool {
         if self.agreed == 0 {
             return false;
+        }
+        // Clause 8: each end sends its E once it has the far end's rate
+        // signal, so an E can come from the moment that rate signal is in.
+        if self.renegotiating {
+            return self.far_proposal.is_some();
         }
         match self.role {
             // 5.4.1: the calling modem answers R3 with an E of its own, and
@@ -2036,6 +2186,36 @@ impl Startup {
                     self.enter(State::Settling);
                 }
             }
+            State::Settling if self.renegotiating => {
+                // 8.1 and 8.2: 24T of scrambled ones at the new rate, and
+                // then data. This end's data can go: the transmitter takes it
+                // from here. What arrives goes up from the far end's E, so
+                // waiting for that E costs nothing, and the rate is not
+                // reported until the far end has said it too.
+                if self.symbols < timing::RENEGOTIATION_ONES {
+                    return;
+                }
+                let late = self.symbols >= self.counted + timing::RENEGOTIATION_STEP;
+                if !self.heard_end && !late {
+                    return;
+                }
+                if !self.heard_end {
+                    // The far end's E went unheard. Both ends computed the
+                    // same rate from the same two rate signals, so receive at
+                    // it.
+                    rx.set_data_rate(self.agreed);
+                    rx.set_coding(self.coding);
+                    self.heard_end = true;
+                }
+                self.renegotiating = false;
+                self.renegotiations += 1;
+                if let Some((rate, error)) = self.give_up_on.take() {
+                    self.stop_offering(rate, error);
+                }
+                self.unsatisfactory = 0;
+                self.retrain_tone = 0;
+                self.state = State::Connected(self.agreed);
+            }
             State::Settling => {
                 if let Some(s) = sequence.filter(|&s| is_end_signal(s) && self.agreed == 0) {
                     self.agreed = offered_rate(s);
@@ -2051,6 +2231,8 @@ impl Startup {
                     self.state = State::Connected(rate);
                     self.connected_once = true;
                     self.unsatisfactory = 0;
+                    self.retrain_tone = 0;
+                    rx.forget_preamble();
                 }
             }
             State::Connected(running_at) => {
@@ -2066,12 +2248,26 @@ impl Startup {
                 // one, which is what makes following the far end and deciding
                 // to go first the same piece of code: whichever happens, this
                 // end ends up sending its own opening signal.
-                let asking = match self.role {
-                    Role::Calling => heard == Heard::Alternation,
-                    Role::Answering => heard == Heard::Carrier,
-                };
-                if self.hold(asking) > timing::RETRAIN_TONE || self.asked_to_retrain {
+                if self.far_retraining(heard) || self.asked_to_retrain {
                     self.begin_retrain(tx, rx);
+                    return;
+                }
+                // V.32bis 8.2: "A modem shall be conditioned to detect an
+                // incoming preamble at any time while receiving data." The
+                // preamble is 64T of the same signal a retrain opens with, and
+                // a retrain is only believed after 128T, so the receiver's own
+                // symbols find it instead. A retrain is heard here too, and is
+                // told apart in AwaitingR4 by its length.
+                if is_v32bis(self.offer) && rx.preamble(self.far_preamble_kind()) >= PREAMBLE_HEARD {
+                    self.hear_preamble(running_at, rx);
+                    return;
+                }
+                if let Some(rate) = self.asked_to_renegotiate.take() {
+                    if self.can_renegotiate() {
+                        self.begin_renegotiation(running_at, rate, tx);
+                    } else {
+                        self.begin_retrain(tx, rx);
+                    }
                     return;
                 }
                 // "detection of unsatisfactory signal reception", which 7
@@ -2097,13 +2293,144 @@ impl Startup {
                     // connection there is.
                     //
                     // Unless what this receiver spent the second failing to
-                    // read was nothing at all. Lost for most of it, the
-                    // signal went away, and a rate the line did not get the
-                    // chance to carry has not been shown unreadable.
-                    if rx.lost_for() < LOST_NOT_UNREADABLE {
-                        self.stop_offering(running_at, rx.residual_error());
+                    // read was nothing at all. Lost for most of it, the signal
+                    // may have gone away, and a rate the line did not get the
+                    // chance to carry has not been shown unreadable. Or it may
+                    // be noise that a dense constellation cannot ride, which
+                    // the receiver also reads as lost. A renegotiation tells
+                    // the two apart: a far end that is still there answers
+                    // it. So the rate is given up only if one completes.
+                    let error = rx.residual_error();
+                    let lost = rx.lost_for() >= LOST_NOT_UNREADABLE;
+                    let lower = if lost {
+                        let lower = readable_below(self.offer, running_at, error).highest();
+                        self.give_up_on = Some((running_at, error));
+                        lower
+                    } else {
+                        self.stop_offering(running_at, error);
+                        offered_rate(self.offer)
+                    };
+                    // And V.32bis has a fast way down. Clause 8 changes the
+                    // rate "without retraining": a few hundred milliseconds
+                    // and a round trip, against ten seconds and more for 7's
+                    // retrain on a long line. A far end that hangs up thirty
+                    // seconds into a call cannot wait for the retrain.
+                    if self.can_renegotiate() && lower < running_at {
+                        self.begin_renegotiation(running_at, lower, tx);
+                    } else {
+                        self.give_up_on = None;
+                        self.begin_retrain(tx, rx);
                     }
+                }
+            }
+            State::Preamble => {
+                // Both ends may begin at once (8.1 allows for that): then the
+                // far end's preamble arrives during this one, and its R4 is
+                // this end's R5.
+                if !self.far_preamble && rx.preamble(self.far_preamble_kind()) >= PREAMBLE_HEARD {
+                    self.clamp(rx);
+                }
+                if self.far_retraining(heard) {
                     self.begin_retrain(tx, rx);
+                    return;
+                }
+                if self.symbols == timing::PREAMBLE_FIRST {
+                    // The second part. The change is a reversal whatever the
+                    // parity: see [`Transmitter::set_signal`].
+                    tx.set_signal(match self.role {
+                        Role::Calling => Signal::StateC,
+                        Role::Answering => Signal::AlternateCA,
+                    });
+                }
+                if self.symbols >= timing::PREAMBLE {
+                    // Clause 8: "The initial state of the scrambler shall be
+                    // all zeros and the differential encoder shall be
+                    // initialized using the final symbol of the transmitted
+                    // preamble." The transmitter's quadrant is that symbol.
+                    tx.set_signal(Signal::Rate(self.proposal));
+                    tx.restart_scrambler();
+                    self.enter(if self.initiating { State::SendR4 } else { State::SendR5 });
+                }
+            }
+            State::SendR4 => {
+                if self.far_retraining(heard) {
+                    self.begin_retrain(tx, rx);
+                    return;
+                }
+                // 8.1: "Following detection of the preamble ... the initiating
+                // modem shall clamp circuit 104 to binary one and condition
+                // its receiver to detect rate signal R5."
+                if !self.far_preamble {
+                    if rx.preamble(self.far_preamble_kind()) >= PREAMBLE_HEARD {
+                        self.clamp(rx);
+                    } else if self.symbols > self.counted + timing::RENEGOTIATION_STEP {
+                        // No answer. Note 3: the far end may be a V.32 modem
+                        // that reads B4 as something else. Clause 7 is what
+                        // is left, at the offer as it now stands.
+                        self.begin_retrain(tx, rx);
+                    }
+                    return;
+                }
+                if self.far_proposal.is_none() {
+                    if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
+                        if !self.accept_proposal(s) {
+                            return;
+                        }
+                    } else {
+                        if self.total - self.clamped_at > timing::PREAMBLE + timing::RENEGOTIATION_STEP {
+                            self.begin_retrain(tx, rx);
+                        }
+                        return;
+                    }
+                }
+                // "when R4 has been transmitted for a minimum of 64T, it
+                // shall complete the current 16-bit rate signal R4 and
+                // transmit sequence E ... indicating the highest data
+                // signalling rate common to R4 and R5". The transmitter
+                // completes the sequence (5.3.2).
+                if self.symbols >= timing::PROPOSAL {
+                    self.send_end(tx);
+                }
+            }
+            State::AwaitingR4 => {
+                // The same tone for longer than 128T is not a preamble but
+                // 7's retrain.
+                if self.far_retraining(heard) {
+                    self.begin_retrain(tx, rx);
+                    return;
+                }
+                // 8.2: "On detection of R4, the responding modem shall turn
+                // circuit 106 OFF and shall transmit the appropriate
+                // preamble."
+                if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
+                    if self.accept_proposal(s) {
+                        self.start_preamble(tx);
+                    }
+                    return;
+                }
+                if self.symbols > timing::PREAMBLE + timing::RENEGOTIATION_STEP {
+                    // No R4 came. Either the preamble was not one, or the
+                    // far end went on to something this end will hear in its
+                    // own time; data at the old rate is what to listen for.
+                    let (rate, coding) = self.before;
+                    rx.set_data_rate(rate);
+                    rx.set_coding(coding);
+                    rx.forget_preamble();
+                    self.renegotiating = false;
+                    self.heard_end = true;
+                    self.unsatisfactory = 0;
+                    self.state = State::Connected(rate);
+                }
+            }
+            State::SendR5 => {
+                if self.far_retraining(heard) {
+                    self.begin_retrain(tx, rx);
+                    return;
+                }
+                // 8.2: "After R5 has been transmitted for a period of 64T, the
+                // responding modem shall transmit sequence E".
+                if self.symbols >= timing::PROPOSAL {
+                    self.send_end(tx);
                 }
             }
             State::Failed => {}
@@ -2125,6 +2452,116 @@ impl Startup {
         // minute retrains straight into a timeout.
         self.total = 0;
         self.start_again(tx, rx);
+    }
+
+    /// Begin a rate renegotiation from this end (V.32bis 8.1), asking for
+    /// `rate`.
+    ///
+    /// "R4 shall indicate the desired rate in the initiating modem and all
+    /// lower data signalling rates at which the initiating modem is enabled
+    /// to operate."
+    fn begin_renegotiation(&mut self, running_at: u32, rate: u32, tx: &mut Transmitter) {
+        let mut rates = rates_offered(self.offer);
+        for &r in EVERY_RATE.iter() {
+            if r > rate {
+                rates.set(r, false);
+            }
+        }
+        if !rates.any() {
+            rates.set(4800, true);
+        }
+        self.prepare_renegotiation(running_at, true);
+        self.proposal = rate_signal(rates);
+        self.start_preamble(tx);
+    }
+
+    /// The far end's preamble has been heard in data (8.2).
+    ///
+    /// "When a preamble is detected, the responding modem shall clamp circuit
+    /// 104 to binary one and shall condition its receiver to detect rate
+    /// signal R4." The transmitter goes on with data until R4 is in.
+    ///
+    /// R5 is this end's whole offer, "irrespective of the rates indicated in
+    /// R4", so a far end that asks to go up can.
+    fn hear_preamble(&mut self, running_at: u32, rx: &mut Receiver) {
+        self.prepare_renegotiation(running_at, false);
+        self.proposal = self.offer;
+        self.clamp(rx);
+        self.enter(State::AwaitingR4);
+    }
+
+    /// What both ends of a renegotiation start from.
+    fn prepare_renegotiation(&mut self, running_at: u32, initiating: bool) {
+        self.renegotiating = true;
+        self.initiating = initiating;
+        self.asked_to_renegotiate = None;
+        self.far_proposal = None;
+        self.far_preamble = false;
+        self.agreed = 0;
+        self.unsatisfactory = 0;
+        self.before = (running_at, self.coding);
+        // PATIENCE is for one attempt, and the call has been up for longer
+        // than that.
+        self.total = 0;
+    }
+
+    /// Send this end's preamble, at the four states, as 5.3 has a rate
+    /// signal sent.
+    fn start_preamble(&mut self, tx: &mut Transmitter) {
+        tx.set_data_rate(4800);
+        tx.set_coding(Coding::Uncoded);
+        tx.set_signal(match self.role {
+            Role::Calling => Signal::StateA,
+            Role::Answering => Signal::AlternateAC,
+        });
+        self.enter(State::Preamble);
+    }
+
+    /// Stop receiving data and listen for the far end's rate signal, at four
+    /// states (5.3).
+    fn clamp(&mut self, rx: &mut Receiver) {
+        self.far_preamble = true;
+        self.clamped_at = self.total;
+        self.heard_end = false;
+        self.rates.reset();
+        self.pending_sequence = None;
+        rx.set_data_rate(4800);
+        rx.set_coding(Coding::Uncoded);
+        rx.forget_preamble();
+        // What came before is the preamble, demodulated as data.
+        let _ = rx.take_bits();
+    }
+
+    /// Take the far end's R4 or R5, and settle the rate: "the highest data
+    /// signalling rate common to R4 and R5". False if there is none, which
+    /// Note 2 makes a cleardown.
+    fn accept_proposal(&mut self, s: u16) -> bool {
+        let rate = usable_rate(s, self.proposal);
+        if rate == 0 {
+            self.state = State::Failed;
+            return false;
+        }
+        self.far_proposal = Some(s);
+        self.agreed = rate;
+        self.coding = agreed_coding(s, self.proposal, rate);
+        true
+    }
+
+    /// E, for the rate both ends now have (5.3.2).
+    fn send_end(&mut self, tx: &mut Transmitter) {
+        tx.set_signal(Signal::Rate(end_signal(rate_signal_for(self.agreed, self.coding, true))));
+        self.enter(State::SendEnd);
+    }
+
+    /// Count the far end's retrain tone, and say whether it has held for
+    /// more than 128T (7.1, 7.2).
+    fn far_retraining(&mut self, heard: Heard) -> bool {
+        let asking = match self.role {
+            Role::Calling => heard == Heard::Alternation,
+            Role::Answering => heard == Heard::Carrier,
+        };
+        self.retrain_tone = if asking { self.retrain_tone + 1 } else { 0 };
+        self.retrain_tone > timing::RETRAIN_TONE
     }
 
     /// Stop offering `rate`, and everything above the one the measured error
@@ -2164,21 +2601,7 @@ impl Startup {
     /// as a call to clear down -- which is a decision for whatever is above
     /// this and not for a receiver having a bad second.
     fn stop_offering(&mut self, rate: u32, error: f64) {
-        let coding = if offers_trellis(self.offer) {
-            Coding::Trellis
-        } else {
-            Coding::Uncoded
-        };
-        let mut rates = rates_offered(self.offer);
-        for &r in EVERY_RATE.iter() {
-            let room = UNSATISFACTORY_GAP * super::point_spacing_at(r, coding);
-            if r >= rate || error >= room {
-                rates.set(r, false);
-            }
-        }
-        if !rates.any() {
-            rates.set(4800, true);
-        }
+        let rates = readable_below(self.offer, rate, error);
         // In whichever of the two tables this end has been speaking. Table 6
         // and Table 5/V.32bis put the rates in different bits, and a modem
         // that answered in the other one would be offering something else
@@ -2229,6 +2652,13 @@ impl Startup {
         self.carrier_peak = 0.0;
         self.trained = false;
         self.heard_end = false;
+        self.renegotiating = false;
+        self.far_proposal = None;
+        self.far_preamble = false;
+        self.asked_to_renegotiate = None;
+        self.give_up_on = None;
+        self.retrain_tone = 0;
+        rx.forget_preamble();
         // The start-up is conducted in the four states whatever was agreed
         // (5.4), so both ends go back to two bits a symbol before either of
         // them sends anything.
@@ -2325,6 +2755,27 @@ impl Startup {
         }
         self.held
     }
+}
+
+/// What `offer` offers below `rate` whose room the measured `error` fits
+/// inside, and 4800 always: see [`Startup::stop_offering`].
+fn readable_below(offer: u16, rate: u32, error: f64) -> Rates {
+    let coding = if offers_trellis(offer) {
+        Coding::Trellis
+    } else {
+        Coding::Uncoded
+    };
+    let mut rates = rates_offered(offer);
+    for &r in EVERY_RATE.iter() {
+        let room = UNSATISFACTORY_GAP * super::point_spacing_at(r, coding);
+        if r >= rate || error >= room {
+            rates.set(r, false);
+        }
+    }
+    if !rates.any() {
+        rates.set(4800, true);
+    }
+    rates
 }
 
 /// A complete V.32 modem: one end of a call, on a two-wire line.
@@ -2707,6 +3158,17 @@ impl Modem {
     /// How many times this call has gone back through the start-up.
     pub fn retrains(&self) -> u32 {
         self.startup.retrains()
+    }
+
+    /// Ask for a rate renegotiation to `rate` (V.32bis clause 8): see
+    /// [`Startup::renegotiate`].
+    pub fn renegotiate(&mut self, rate: u32) {
+        self.startup.renegotiate(rate);
+    }
+
+    /// How many rate renegotiations this call has completed.
+    pub fn renegotiations(&self) -> u32 {
+        self.startup.renegotiations()
     }
 
     /// The rate sequences the far end has sent.

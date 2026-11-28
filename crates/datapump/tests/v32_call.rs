@@ -1256,8 +1256,9 @@ fn a_rate_that_cannot_be_read_is_given_up() {
     let first = first.expect("never connected at all");
     let (here, there, _) = settled.expect("never connected at all");
     println!(
-        "came up at {first}, ended at {here} after {} retrains, {:.3} of the gap",
+        "came up at {first}, ended at {here} after {} retrains and {} renegotiations, {:.3} of the gap",
         calling.retrains(),
+        calling.renegotiations(),
         calling.residual_error() / calling.point_spacing(),
     );
     assert_eq!(first, 14_400, "did not start at the rate that cannot be read");
@@ -1266,7 +1267,10 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         "stayed at {here} on a line it cannot read it on"
     );
     assert_eq!(here, there, "the two ends came back at different rates");
-    assert!(calling.retrains() >= 1, "went down without a retrain");
+    // Between two V.32bis modems the way down is clause 8's renegotiation,
+    // and a retrain only if that gets no answer.
+    let steps = calling.retrains() + calling.renegotiations();
+    assert!(steps >= 1, "went down without a retrain or a renegotiation");
     // And it is not still going down. A modem that steps once per second until
     // it runs out of rates is no better than one that never steps at all.
     assert!(
@@ -1274,11 +1278,7 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         "settled at {here} and is still not reading it: {:.3} of the gap",
         calling.residual_error() / calling.point_spacing(),
     );
-    assert!(
-        calling.retrains() <= 3,
-        "took {} retrains to find a rate it could read",
-        calling.retrains()
-    );
+    assert!(steps <= 3, "took {steps} steps to find a rate it could read");
 }
 
 #[test]
