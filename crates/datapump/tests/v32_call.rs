@@ -1256,8 +1256,9 @@ fn a_rate_that_cannot_be_read_is_given_up() {
     let first = first.expect("never connected at all");
     let (here, there, _) = settled.expect("never connected at all");
     println!(
-        "came up at {first}, ended at {here} after {} retrains, {:.3} of the gap",
+        "came up at {first}, ended at {here} after {} retrains and {} renegotiations, {:.3} of the gap",
         calling.retrains(),
+        calling.renegotiations(),
         calling.residual_error() / calling.point_spacing(),
     );
     assert_eq!(first, 14_400, "did not start at the rate that cannot be read");
@@ -1266,7 +1267,10 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         "stayed at {here} on a line it cannot read it on"
     );
     assert_eq!(here, there, "the two ends came back at different rates");
-    assert!(calling.retrains() >= 1, "went down without a retrain");
+    // Between two V.32bis modems the way down is clause 8's renegotiation,
+    // and a retrain only if that gets no answer.
+    let steps = calling.retrains() + calling.renegotiations();
+    assert!(steps >= 1, "went down without a retrain or a renegotiation");
     // And it is not still going down. A modem that steps once per second until
     // it runs out of rates is no better than one that never steps at all.
     assert!(
@@ -1274,11 +1278,7 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         "settled at {here} and is still not reading it: {:.3} of the gap",
         calling.residual_error() / calling.point_spacing(),
     );
-    assert!(
-        calling.retrains() <= 3,
-        "took {} retrains to find a rate it could read",
-        calling.retrains()
-    );
+    assert!(steps <= 3, "took {steps} steps to find a rate it could read");
 }
 
 #[test]
@@ -1312,4 +1312,41 @@ fn the_two_clocks_differ_by_the_one_wait_that_is_inside_only_one_of_them() {
         "MT of {mt} is under the {trip:.0} symbols of line plus the wait it \
          contains, so it cannot have measured the round trip at all"
     );
+}
+
+/// What a V.32bis Annex A caller (`Modem::annex_a`) sends to `far`, after
+/// `seconds`: the peak of its output after `from` seconds.
+fn annex_a_peak(far: impl Fn(f64) -> f64, seconds: f64, from: f64) -> f64 {
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer, FS).annex_a();
+    let mut peak = 0.0f64;
+    for i in 0..(FS * seconds) as usize {
+        let t = i as f64 / FS;
+        let out = calling.step(far(t));
+        if t > from {
+            peak = peak.max(out.abs());
+        }
+    }
+    peak
+}
+
+#[test]
+fn an_annex_a_caller_waits_for_ac_and_not_for_the_answering_tone() {
+    use std::f64::consts::TAU;
+    let ans = |t: f64| 0.3 * (TAU * 2100.0 * t).sin();
+    let ones = |t: f64| 0.3 * (TAU * 2250.0 * t).sin();
+    let ac = |t: f64| 0.15 * (TAU * 600.0 * t).sin() + 0.15 * (TAU * 3000.0 * t).sin();
+
+    // NIST's ACTS: 3.3 s of ANS, 3 s of unscrambled ones. Silent all through.
+    let acts = |t: f64| if t < 3.3 { ans(t) } else { ones(t) };
+    assert!(annex_a_peak(acts, 6.2, 0.0) < 1.0e-6, "AA over the answering tone or the ones");
+
+    // Then AC: AA follows it.
+    let acts = |t: f64| if t < 3.3 { ans(t) } else if t < 6.3 { ones(t) } else { ac(t) };
+    assert!(annex_a_peak(acts, 7.0, 6.3) > 1.0e-3, "no AA to AC");
+
+    // An answering tone and then nothing: AA after 2 s of quiet.
+    let quiet = |t: f64| if t < 3.3 { ans(t) } else { 0.0 };
+    assert!(annex_a_peak(quiet, 5.0, 0.0) < 1.0e-6, "AA too soon after the tone");
+    assert!(annex_a_peak(quiet, 6.0, 5.4) > 1.0e-3, "no AA after the quiet");
 }

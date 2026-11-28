@@ -112,6 +112,26 @@ ends exchange call menus over V.21 and both go into the same modulation. No
 end guesses. `AT+MS=V22B,0` turns it off, and then the command means what it
 says.
 
+A far end with no V.8 answers with a plain answer tone. Then the calling
+modem listens, as V.32bis Annex A tells it to:
+
+- 2250 Hz (unscrambled ones) is V.22bis. 2225 Hz is Bell 212A. 1650 Hz is
+  V.21.
+- 600 and 3000 Hz together (AC) is V.32 or V.32bis.
+
+The calling modem does not send V.32's AA over the answer tone. It sends AA
+only when AC starts, or 2 s after the answer tone stops if nothing follows.
+Some automode answerers send AC only after their V.22bis offer. These
+answerers do not reply to an AA that started before their AC. NIST's time
+service (`ATD` +1 303 494 4774) is one of them. It now connects at V.22bis
+2400 with V.42.
+
+A V.22bis caller measures the round trip of the line in its handshake. V.42
+adds it to the 750 ms of T400. Without it, the far end's answer to the ODP
+came back too late on a SIP line with a 1 s round trip.
+
+Plain V.32 (automode off) keeps V.32 5.4.1: AA after 1 s of answer tone.
+
 **Advanced** adjacent to the modulation box opens the other parts of `AT+MS`.
 These are the other three subparameters of V.250 6.4.1, as toggles and boxes
 that you do not type. It is mode aware: the line-rate boxes offer only the

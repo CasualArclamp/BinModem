@@ -12,6 +12,7 @@ use crate::engine::{Control, FFT_SIZE, SCOPE_LEN, SPECTRUM_BINS};
 use crate::live;
 use crate::net;
 use crate::scopes::{self, Waterfall};
+use crate::theme;
 use crate::speed;
 use proxy::Route;
 
@@ -58,6 +59,20 @@ impl Source {
         }
     }
 }
+
+/// What the terminal's Ctrl + right-click menu sends.
+enum Send {
+    Bytes(Vec<u8>),
+    /// A break, this many milliseconds long.
+    Break(u32),
+    /// A Telnet command, after an IAC.
+    Telnet(u8),
+}
+
+/// A break as the BREAK key of a terminal sends it.
+const BREAK_MS: u32 = 250;
+/// A long ("hard") break, for equipment that ignores a short one.
+const HARD_BREAK_MS: u32 = 3500;
 
 /// The subparameters of `AT+MS`, as V.250 6.4.1 defines them.
 ///
@@ -303,11 +318,6 @@ enum Tab {
 }
 
 /// The colours of the faceplate, said once.
-const DIM: Color32 = Color32::from_rgb(140, 150, 165);
-const BRIGHT: Color32 = Color32::from_rgb(220, 225, 235);
-const GOOD: Color32 = Color32::from_rgb(90, 220, 130);
-const BAD: Color32 = Color32::from_rgb(235, 100, 90);
-const WARN: Color32 = Color32::from_rgb(240, 180, 90);
 const PLATE: Color32 = Color32::from_rgb(35, 38, 45);
 const BEZEL: Color32 = Color32::from_rgb(58, 62, 72);
 const READOUT: Color32 = Color32::from_rgb(7, 11, 8);
@@ -517,6 +527,14 @@ pub struct ScopeApp {
     host: String,
     tab: Tab,
     font_size: f32,
+    /// How the terminal reads and sends characters: 8N1, 7E1 and so on.
+    char_format: terminal::CharFormat,
+    /// Whether XON and XOFF from the far end are obeyed.
+    flow: terminal::Flow,
+    /// What was typed while the far end had sent XOFF, to go at its XON.
+    held: Vec<u8>,
+    /// Whether the character format panel is open.
+    format_open: bool,
     last_repaint: std::time::Instant,
     /// The highest each spectrum bin has been lately, falling slowly.
     hold: Vec<f32>,
@@ -568,6 +586,9 @@ pub struct ScopeApp {
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
+    /// Dark, light, or as Windows is; and the one egui was last told.
+    theme: theme::Choice,
+    theme_set: Option<theme::Choice>,
     /// The Review tab: a recording of a call, read.
     review: crate::review::ReviewPane,
 }
@@ -596,11 +617,20 @@ struct Calm {
     /// Where the strongest bin was last said to be.
     peak_hz: f64,
     hz_per_bin: f64,
+    /// The receiver's signal to noise and how far it misses by, as the
+    /// call card's bar shows them: averaged a little, so the bar does not
+    /// flicker with each symbol.
+    snr_db: Option<f32>,
+    reception: Option<f64>,
 }
 
 impl Calm {
     /// Seconds a figure takes to come most of the way to a new value.
     const SECONDS: f32 = 1.0;
+
+    /// The same for the call card's bar, which has to keep up with a call
+    /// going bad: a small amount of averaging only.
+    const BAR_SECONDS: f32 = 0.4;
 
     /// Take a frame in; what the averaged spectrum says of itself.
     fn update(&mut self, f: &Frame, dt: f32) -> Option<scopes::Measured> {
@@ -613,6 +643,18 @@ impl Calm {
             *was = if fresh || (now - *was).abs() > 10.0 { now } else { *was + (now - *was) * share };
         };
         follow(&mut self.level_db, f.rx_level_db, fresh);
+        // A reading that comes or goes starts again from the new one.
+        let bar = 1.0 - (-dt / Self::BAR_SECONDS).exp();
+        self.snr_db = match (self.snr_db, f.snr_db) {
+            (Some(was), Some(now)) if now.is_finite() && was.is_finite() => Some(was + (now - was) * bar),
+            (_, now) => now,
+        };
+        self.reception = match (self.reception, f.reception) {
+            (Some(was), Some(now)) if now.is_finite() && was.is_finite() => {
+                Some(was + (now - was) * f64::from(bar))
+            }
+            (_, now) => now,
+        };
         if let Some(wave) = scopes::wave(&f.waveform) {
             follow(&mut self.rms_db, wave.rms_db, fresh);
             follow(&mut self.peak_db, wave.peak_db, fresh);
@@ -754,6 +796,10 @@ impl ScopeApp {
             receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
             font_size: 14.0,
+            char_format: terminal::CharFormat::default(),
+            flow: terminal::Flow::default(),
+            held: Vec::new(),
+            format_open: false,
             last_repaint: std::time::Instant::now(),
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
@@ -785,6 +831,8 @@ impl ScopeApp {
             fit: true,
             step_at: [None; 6],
             remembered: String::new(),
+            theme: theme::Choice::default(),
+            theme_set: None,
             review: crate::review::ReviewPane::default(),
         };
         // Before anything is drawn, so the first frame shows what the modem
@@ -879,10 +927,47 @@ impl ScopeApp {
     }
 
     fn terminal_pane(&mut self, ui: &mut egui::Ui) {
+        self.console.term.set_format(self.char_format);
+        self.console.term.set_flow(self.flow);
+        if !self.console.term.stopped() && !self.held.is_empty() {
+            let held = std::mem::take(&mut self.held);
+            self.type_into_terminal(&held);
+        }
         let view = console::view(ui, &self.console.term, self.font_size);
         let response = view.response;
         if response.clicked() {
             response.request_focus();
+        }
+        // Ctrl and the right button: the menu of what the keyboard cannot
+        // type. A right click without Ctrl stays the far end's, for a board
+        // that reads the mouse.
+        let ctrl = ui.input(|i| i.modifiers.ctrl);
+        let open = if response.secondary_clicked() && ctrl {
+            Some(egui::SetOpenCommand::Bool(true))
+        } else if response.clicked() {
+            Some(egui::SetOpenCommand::Bool(false))
+        } else {
+            None
+        };
+        let mut chosen: Option<Send> = None;
+        egui::Popup::context_menu(&response).open_memory(open).show(|ui| {
+            chosen = self.send_menu(ui);
+        });
+        if let Some(chosen) = chosen {
+            response.request_focus();
+            match chosen {
+                Send::Bytes(bytes) => self.type_into_terminal(&bytes),
+                Send::Break(ms) => match &self.source {
+                    Source::Live(session) => session.send_break(ms),
+                    Source::Telnet(session) => session.send_command(telnet::BRK),
+                    Source::Capture => {}
+                },
+                Send::Telnet(command) => {
+                    if let Source::Telnet(session) = &self.source {
+                        session.send_command(command);
+                    }
+                }
+            }
         }
         // Straight into the terminal, which knows which of these the far end
         // asked for and drops the rest. What it decides to report joins the
@@ -890,6 +975,9 @@ impl ScopeApp {
         // board hears about the mouse over a call exactly as it does over a
         // socket.
         for event in view.mouse {
+            if ctrl && event.button == Some(terminal::Button::Right) {
+                continue;
+            }
             self.console.term.mouse(event);
         }
         if response.has_focus() {
@@ -912,7 +1000,84 @@ impl ScopeApp {
                 );
             });
             let typed = console::keys_to_bytes(ui);
+            self.type_into_terminal(&typed);
+        }
+    }
+
+    /// The Ctrl + right-click menu. Returns what was chosen, if anything.
+    fn send_menu(&self, ui: &mut egui::Ui) -> Option<Send> {
+        let mut chosen = None;
+        let live = self.source.is_live();
+        let telnet = self.source.is_telnet();
+        ui.label(RichText::new("Send").strong());
+        let can_break = live || telnet;
+        let why = if telnet {
+            "Telnet IAC BRK"
+        } else {
+            "On a V.42 call a BRK message, otherwise the line held at space"
+        };
+        if ui
+            .add_enabled(can_break, egui::Button::new("Break (250 ms)"))
+            .on_hover_text(why)
+            .clicked()
+        {
+            chosen = Some(Send::Break(BREAK_MS));
+        }
+        if ui
+            .add_enabled(can_break, egui::Button::new("Hard break (3.5 s)"))
+            .on_hover_text(why)
+            .clicked()
+        {
+            chosen = Some(Send::Break(HARD_BREAK_MS));
+        }
+        ui.separator();
+        ui.menu_button("Control characters", |ui| {
+            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                for (byte, caret, name, what) in console::CONTROL_CHARACTERS {
+                    let label = format!("{caret:<3} {name:<4} {what}");
+                    if ui.button(RichText::new(label).monospace()).clicked() {
+                        chosen = Some(Send::Bytes(vec![byte]));
+                    }
+                }
+            });
+        });
+        if telnet {
+            ui.menu_button("Telnet commands", |ui| {
+                for (command, label) in [
+                    (telnet::IP, "IP   interrupt process"),
+                    (telnet::AO, "AO   abort output"),
+                    (telnet::AYT, "AYT  are you there"),
+                    (telnet::EC, "EC   erase character"),
+                    (telnet::EL, "EL   erase line"),
+                    (telnet::NOP, "NOP  no operation"),
+                ] {
+                    if ui.button(RichText::new(label).monospace()).clicked() {
+                        chosen = Some(Send::Telnet(command));
+                    }
+                }
+            });
+        }
+        chosen
+    }
+
+    /// Bytes typed at the terminal, or chosen from its menu, to wherever they
+    /// go.
+    fn type_into_terminal(&mut self, typed: &[u8]) {
+        // The far end said XOFF: hold it all until XON.
+        let line = self.source.is_live() || self.source.is_telnet();
+        if line && self.console.term.stopped() {
+            self.held.extend_from_slice(typed);
+            return;
+        }
+        {
             if !typed.is_empty() {
+                // The parity of the character format, on everything that
+                // goes down a line. A capture has no line.
+                let typed: Vec<u8> = if self.source.is_live() || self.source.is_telnet() {
+                    typed.iter().map(|&b| self.char_format.encode(b)).collect()
+                } else {
+                    typed.to_vec()
+                };
                 match &self.source {
                     // Straight to the modem, which has an AT interpreter of
                     // its own and will echo, answer, and decide for itself
@@ -1045,7 +1210,7 @@ impl ScopeApp {
         let Source::Telnet(session) = &self.source else { return };
         let session = Arc::clone(session);
         let state = session.state();
-        let dim = Color32::from_rgb(140, 150, 165);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("host").monospace().color(dim));
@@ -1093,7 +1258,7 @@ impl ScopeApp {
                 ui.label(
                     RichText::new(format!("connected to {}", state.peer))
                         .monospace()
-                        .color(Color32::from_rgb(90, 220, 130)),
+                        .color(theme::ink(Color32::from_rgb(90, 220, 130))),
                 );
                 // The two options that decide whether anything looks right.
                 // Without eight-bit data the art loses its top bits and every
@@ -1105,13 +1270,13 @@ impl ScopeApp {
                     } else {
                         RichText::new(no.to_owned())
                             .monospace()
-                            .color(Color32::from_rgb(240, 180, 90))
+                            .color(theme::ink(Color32::from_rgb(240, 180, 90)))
                     }
                 };
                 ui.label(flag(state.binary, "8-bit", "7-bit!"));
                 ui.label(flag(state.echo, "remote echo", "local echo"));
             } else if let Some(e) = &state.error {
-                ui.label(RichText::new(e).monospace().color(Color32::from_rgb(240, 120, 120)));
+                ui.label(RichText::new(e).monospace().color(theme::ink(Color32::from_rgb(240, 120, 120))));
             } else {
                 ui.label(RichText::new("not connected").monospace().color(dim));
             }
@@ -1227,7 +1392,7 @@ impl ScopeApp {
         let show_setup = self.setup_open || !state.open || state.error.is_some();
         if show_setup {
         ui.horizontal_wrapped(|ui| {
-            let dim = Color32::from_rgb(140, 150, 165);
+            let dim = theme::ink(Color32::from_rgb(140, 150, 165));
             ui.label(RichText::new("line").monospace().color(dim));
 
             // Which kind of line. A sound card is two devices that between
@@ -1432,8 +1597,8 @@ impl ScopeApp {
                     // is actually sending. A modem that will not train on a
                     // line that is not registered is not a modem fault.
                     Some(progress) => {
-                        let good = Color32::from_rgb(120, 200, 130);
-                        let bad = Color32::from_rgb(235, 100, 90);
+                        let good = theme::ink(Color32::from_rgb(120, 200, 130));
+                        let bad = theme::ink(Color32::from_rgb(235, 100, 90));
                         // EasySip has nobody to register with, and that is
                         // not a fault to be shown in red.
                         let direct = progress.account.starts_with(live::EASY_SIP);
@@ -1514,7 +1679,7 @@ impl ScopeApp {
                     ui.label(
                         RichText::new(format!("{gaps} gaps sent"))
                             .monospace()
-                            .color(Color32::from_rgb(235, 100, 90)),
+                            .color(theme::ink(Color32::from_rgb(235, 100, 90))),
                     )
                     .on_hover_text(match of_total {
                         Some(total) => format!(
@@ -1535,7 +1700,7 @@ impl ScopeApp {
                             state.framing_errors, state.framing_errors_per_second
                         ))
                         .monospace()
-                        .color(Color32::from_rgb(230, 180, 90)),
+                        .color(theme::ink(Color32::from_rgb(230, 180, 90))),
                     )
                     .on_hover_text(
                         "Characters whose stop bit was in the wrong place. A few a second is noise on the line; dozens at once with quiet in between is a network dropping packets, which only error control hides",
@@ -1548,18 +1713,18 @@ impl ScopeApp {
                     ui.label(
                         RichText::new(format!("{} samples lost", state.dropped))
                             .monospace()
-                            .color(Color32::from_rgb(235, 100, 90)),
+                            .color(theme::ink(Color32::from_rgb(235, 100, 90))),
                     );
                 }
             }
             if let Some(err) = &state.error {
-                ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
+                ui.label(RichText::new(err).color(theme::ink(Color32::from_rgb(235, 100, 90))));
             }
             if let Some(path) = &state.recorded_to {
                 ui.label(
                     RichText::new(path)
                         .monospace()
-                        .color(Color32::from_rgb(120, 200, 150)),
+                        .color(theme::ink(Color32::from_rgb(120, 200, 150))),
                 );
             }
 
@@ -1590,9 +1755,9 @@ impl ScopeApp {
                     RichText::new(format!("peak {peak_db:>5.1} dBFS"))
                         .monospace()
                         .color(if hot {
-                            Color32::from_rgb(235, 100, 90)
+                            theme::ink(Color32::from_rgb(235, 100, 90))
                         } else {
-                            Color32::from_rgb(140, 150, 165)
+                            theme::ink(Color32::from_rgb(140, 150, 165))
                         }),
                 )
                 .on_hover_text(
@@ -1620,9 +1785,9 @@ impl ScopeApp {
                         RichText::new(format!("{over:+5.1} dB vs far end"))
                             .monospace()
                             .color(if wrong {
-                                Color32::from_rgb(235, 100, 90)
+                                theme::ink(Color32::from_rgb(235, 100, 90))
                             } else {
-                                Color32::from_rgb(140, 150, 165)
+                                theme::ink(Color32::from_rgb(140, 150, 165))
                             }),
                     )
                     .on_hover_text(
@@ -1796,7 +1961,7 @@ impl ScopeApp {
                 let fax = egui::Button::new(RichText::new("Fax").size(17.0).strong().color(if fax_class {
                     Color32::from_rgb(40, 26, 4)
                 } else {
-                    DIM
+                    theme::DIM
                 }))
                 .min_size(CLASS_KEY)
                 .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })
@@ -1815,13 +1980,13 @@ impl ScopeApp {
                     self.tab = Tab::Fax;
                 }
                 let modem = egui::Button::new(RichText::new("Modem").size(17.0).strong().color(if fax_class {
-                    DIM
+                    theme::DIM
                 } else {
                     Color32::from_rgb(8, 30, 14)
                 }))
                 .min_size(CLASS_KEY)
                 .corner_radius(egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 })
-                .fill(if fax_class { PLATE } else { GOOD });
+                .fill(if fax_class { PLATE } else { theme::GOOD });
                 if ui
                     .add_enabled(on_hook || !fax_class, modem)
                     .on_hover_text(
@@ -2153,7 +2318,7 @@ impl ScopeApp {
                     ui.label(
                         RichText::new(format!("0 - {:.0} Hz · newest at the top", self.frame.display_hz))
                             .small()
-                            .color(DIM),
+                            .color(theme::dim()),
                     );
                 });
                 self.waterfall.paint(ui, WATERFALL, self.frame.modulation, self.row_secs);
@@ -2184,10 +2349,10 @@ impl ScopeApp {
     /// Above them, who is calling: the account this end logs in with, and
     /// whether a call it answers gets a login prompt first.
     fn network_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let good = Color32::from_rgb(90, 220, 130);
-        let bad = Color32::from_rgb(235, 100, 90);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = theme::ink(Color32::from_rgb(220, 225, 235));
+        let good = theme::ink(Color32::from_rgb(90, 220, 130));
+        let bad = theme::ink(Color32::from_rgb(235, 100, 90));
         // The line thread reads these when a call arrives or a link starts,
         // which may be long after they were last touched here.
         if self.dialin_sent.as_ref() != Some(&self.dialin) {
@@ -2510,7 +2675,7 @@ impl ScopeApp {
                     .monospace()
                     .small()
                     .color(if s.lost > 0 {
-                        Color32::from_rgb(240, 200, 120)
+                        theme::ink(Color32::from_rgb(240, 200, 120))
                     } else {
                         dim
                     }),
@@ -2560,10 +2725,10 @@ impl ScopeApp {
         session: &Arc<live::Session>,
         state: &live::LineState,
     ) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let good = Color32::from_rgb(90, 220, 130);
-        let bad = Color32::from_rgb(235, 100, 90);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = theme::ink(Color32::from_rgb(220, 225, 235));
+        let good = theme::ink(Color32::from_rgb(90, 220, 130));
+        let bad = theme::ink(Color32::from_rgb(235, 100, 90));
         let line = state.sip.as_ref();
 
         // A call on its way up counts as a call. `is_a_call` is false for one
@@ -3047,9 +3212,9 @@ impl ScopeApp {
         session: &Arc<live::Session>,
         line: Option<&sip::Progress>,
     ) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let good = Color32::from_rgb(90, 220, 130);
-        let bad = Color32::from_rgb(235, 100, 90);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
+        let good = theme::ink(Color32::from_rgb(90, 220, 130));
+        let bad = theme::ink(Color32::from_rgb(235, 100, 90));
         let mut open = self.sip_open;
         egui::Window::new("SIP - credentials")
             .open(&mut open)
@@ -3230,9 +3395,9 @@ impl ScopeApp {
     /// frames arriving broken, datagrams for somebody else, a router saying
     /// an address is unreachable, or a connection resending into silence.
     fn link_monitor(ui: &mut egui::Ui, view: &crate::network::View, client: Option<&proxy::View>) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let warn = Color32::from_rgb(240, 200, 120);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = theme::ink(Color32::from_rgb(220, 225, 235));
+        let warn = theme::ink(Color32::from_rgb(240, 200, 120));
         egui::CollapsingHeader::new("link and IP").id_salt("ppp link monitor").show(ui, |ui| {
             egui::Grid::new("ppp link").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
                 let mut row = |k: &str, v: String, trouble: bool| {
@@ -3315,7 +3480,7 @@ impl ScopeApp {
     /// from what the terminal sees the moment either changed. The command being
     /// composed is on the face of the window, so nothing here is hidden.
     fn advanced_modulation(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
-        let dim = Color32::from_rgb(140, 150, 165);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
         // Copied out because the window's own close button wants `&mut bool`
         // and so does everything inside it.
         let mut open = self.advanced;
@@ -3507,7 +3672,7 @@ impl ScopeApp {
                             self.modulation.max_rate
                         ))
                         .small()
-                        .color(Color32::from_rgb(240, 200, 120)),
+                        .color(theme::ink(Color32::from_rgb(240, 200, 120))),
                     );
                 } else {
                     ui.label(
@@ -3525,7 +3690,7 @@ impl ScopeApp {
                     ui.label(
                         RichText::new(&command)
                             .monospace()
-                            .color(Color32::from_rgb(220, 225, 235)),
+                            .color(theme::ink(Color32::from_rgb(220, 225, 235))),
                     );
                     if ui
                         .button("Send")
@@ -3577,6 +3742,15 @@ impl ScopeApp {
         if let Some(coding) = loaded.text("easysip_coding") {
             self.easy_coding = live::easy_sip_coding(&live::easy_sip_name("x", 0, coding, false));
         }
+        if let Some(choice) = loaded.text("theme").and_then(theme::Choice::parse) {
+            self.theme = choice;
+        }
+        if let Some(format) = loaded.text("char_format").and_then(terminal::CharFormat::parse) {
+            self.char_format = format;
+        }
+        if let Some(flow) = loaded.text("flow_control").and_then(terminal::Flow::parse) {
+            self.flow = flow;
+        }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
             + &self.line_fingerprint();
@@ -3584,7 +3758,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
+        format!("\u{1}{}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", self.char_format.name(), self.flow.name(), self.theme.name(), self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3624,6 +3798,9 @@ impl ScopeApp {
             r.set("easysip_port", self.easy_port);
             r.set("easysip_coding", self.easy_coding);
             r.set("easysip_upnp", u8::from(self.easy_upnp));
+            r.set("theme", self.theme.name());
+            r.set("char_format", self.char_format.name());
+            r.set("flow_control", self.flow.name());
             r.save();
         }
     }
@@ -3721,7 +3898,7 @@ impl ScopeApp {
 
     /// Sending a file, or taking one.
     fn transfer_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
-        let dim = Color32::from_rgb(140, 150, 165);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
         let mut open = self.transfer_open;
         let running = session.transfer();
         egui::Window::new("ZMODEM - files")
@@ -3806,7 +3983,7 @@ impl ScopeApp {
 
                 let Some(t) = running else { return };
                 ui.separator();
-                let bright = Color32::from_rgb(220, 225, 235);
+                let bright = theme::ink(Color32::from_rgb(220, 225, 235));
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if t.sending { "sending" } else { "receiving" })
@@ -3900,7 +4077,7 @@ impl ScopeApp {
                 ui.horizontal(|ui| {
                     let stat = |ui: &mut egui::Ui, text: String, warn: bool| {
                         ui.label(RichText::new(text).monospace().small().color(if warn {
-                            Color32::from_rgb(240, 200, 120)
+                            theme::ink(Color32::from_rgb(240, 200, 120))
                         } else {
                             dim
                         }));
@@ -3926,9 +4103,9 @@ impl ScopeApp {
                         RichText::new(&t.outcome)
                             .monospace()
                             .color(if t.finished && t.outcome == "done" {
-                                Color32::from_rgb(90, 220, 130)
+                                theme::ink(Color32::from_rgb(90, 220, 130))
                             } else if t.finished {
-                                Color32::from_rgb(235, 100, 90)
+                                theme::ink(Color32::from_rgb(235, 100, 90))
                             } else {
                                 dim
                             }),
@@ -3953,7 +4130,7 @@ impl ScopeApp {
 
     /// `AT+ES` and `AT+DS`, and the two parameters that report on them.
     fn advanced_protection(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
-        let dim = Color32::from_rgb(140, 150, 165);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
         let mut open = self.protection_open;
         egui::Window::new("AT+ES / AT+DS - error control")
             .open(&mut open)
@@ -4135,7 +4312,7 @@ impl ScopeApp {
                 ui.label(RichText::new(note).small().color(if p.wants_error_control() {
                     dim
                 } else {
-                    Color32::from_rgb(240, 200, 120)
+                    theme::ink(Color32::from_rgb(240, 200, 120))
                 }));
 
                 ui.separator();
@@ -4144,7 +4321,7 @@ impl ScopeApp {
                         ui.label(
                             RichText::new(&command)
                                 .monospace()
-                                .color(Color32::from_rgb(220, 225, 235)),
+                                .color(theme::ink(Color32::from_rgb(220, 225, 235))),
                         );
                         if ui
                             .button("Send")
@@ -4196,18 +4373,18 @@ impl ScopeApp {
     /// brings the rest back.
     fn masthead(&mut self, ui: &mut egui::Ui, state: Option<&live::LineState>) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(BRIGHT));
-            ui.label(RichText::new("56K softmodem").monospace().color(DIM));
+            ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(theme::bright()));
+            ui.label(RichText::new("56K softmodem").monospace().color(theme::dim()));
             // Which build: two windows that will not talk are often two
             // builds, one of them left open from before a change.
-            ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(DIM))
+            ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(theme::dim()))
                 .on_hover_text(
                     "The commit this program was built from and when that commit was made. \
                      Both ends of a V.ARC call have to be the same build.",
                 );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(state) = state else {
-                    ui.label(RichText::new("a capture, replayed").monospace().color(DIM));
+                    ui.label(RichText::new("a capture, replayed").monospace().color(theme::dim()));
                     return;
                 };
                 if ui
@@ -4222,7 +4399,7 @@ impl ScopeApp {
                 }
                 // Right to left, so the last thing added is the first read.
                 let (what, how, colour) = match (&state.sip, state.open) {
-                    (_, false) => (String::new(), "no line open", WARN),
+                    (_, false) => (String::new(), "no line open", theme::warn()),
                     (Some(progress), true) if progress.account.starts_with(live::EASY_SIP) => (
                         format!(
                             "EasySip to {}{}",
@@ -4230,20 +4407,20 @@ impl ScopeApp {
                             coding_of(progress)
                         ),
                         "direct",
-                        GOOD,
+                        theme::good(),
                     ),
                     (Some(progress), true) => (
                         format!("SIP {}{}", progress.account, coding_of(progress)),
                         if progress.registered { "registered" } else { "not registered" },
-                        if progress.registered { GOOD } else { BAD },
+                        if progress.registered { theme::good() } else { theme::bad() },
                     ),
-                    (None, true) => ("sound card".to_owned(), "open", GOOD),
+                    (None, true) => ("sound card".to_owned(), "open", theme::good()),
                 };
                 ui.label(RichText::new(how).monospace().color(colour));
                 if !what.is_empty() {
-                    ui.label(RichText::new(what).monospace().color(BRIGHT));
+                    ui.label(RichText::new(what).monospace().color(theme::bright()));
                 }
-                ui.label(RichText::new("line").monospace().color(DIM));
+                ui.label(RichText::new("line").monospace().color(theme::dim()));
             });
         });
     }
@@ -4283,7 +4460,7 @@ impl ScopeApp {
                             } else {
                                 scopes::faceplate(ui, &self.frame.leds);
                                 ui.add_space(6.0);
-                                ui.label(RichText::new("receive level").monospace().small().color(DIM));
+                                ui.label(RichText::new("receive level").monospace().small().color(theme::DIM));
                                 scopes::level_meter(ui, self.frame.rx_level_db);
                             }
                         });
@@ -4370,7 +4547,7 @@ impl ScopeApp {
     /// for their floor and ceiling. Set once, so under Setup with the line.
     fn monitor_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("monitor").monospace().color(DIM));
+            ui.label(RichText::new("monitor").monospace().color(theme::dim()));
             self.audio_controls(ui);
             ui.separator();
             self.scope_range(ui);
@@ -4426,7 +4603,7 @@ impl ScopeApp {
                 let caption = |ui: &mut egui::Ui, name: &str, about: String| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(name).strong());
-                        ui.label(RichText::new(about).small().color(DIM));
+                        ui.label(RichText::new(about).small().color(theme::dim()));
                     });
                 };
                 caption(
@@ -4476,7 +4653,7 @@ impl ScopeApp {
         // everything: which is wanted depends on the question.
         if self.frame.symbol_label == "PCM" {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("PCM drawn as").size(12.0).color(DIM));
+                ui.label(RichText::new("PCM drawn as").size(12.0).color(theme::dim()));
                 egui::ComboBox::from_id_salt("pcm-view")
                     .width(120.0)
                     .selected_text(self.pcm_view.name())
@@ -4573,7 +4750,7 @@ impl ScopeApp {
             ui.label(
                 RichText::new(format!("{} Hz", monitor.sample_rate))
                     .monospace()
-                    .color(Color32::from_rgb(140, 150, 165)),
+                    .color(theme::ink(Color32::from_rgb(140, 150, 165))),
             );
         }
 
@@ -4589,7 +4766,7 @@ impl ScopeApp {
             self.sink.set_volume(volume);
         }
         if let Some(err) = &self.audio_error {
-            ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
+            ui.label(RichText::new(err).color(theme::ink(Color32::from_rgb(235, 100, 90))));
         }
     }
 
@@ -4698,6 +4875,121 @@ impl ScopeApp {
         self.script.pop_front();
     }
 
+    /// The character format and flow control: a button that names the
+    /// format, and a panel of four rows under it.
+    fn format_button(&mut self, ui: &mut egui::Ui) {
+        use terminal::{CharFormat, Flow, Parity};
+        let mut label = self.char_format.name();
+        if self.flow == Flow::XonXoff {
+            label.push_str(" XON");
+        }
+        let button = ui
+            .button(format!("{label} \u{23f7}"))
+            .on_hover_text("Data bits, stop bits, parity and flow control");
+        // Open and shut by this window, not by egui's memory of popups.
+        // egui keeps one popup open at a time, so the list of a box in the
+        // panel shut the panel when it opened, and the choice was lost.
+        //
+        // Read before anything below can open a list: a click that shuts a
+        // list is a click on the list, not a click away from the panel.
+        let list_was_open = egui::Popup::is_any_open(ui.ctx());
+        if button.clicked() {
+            self.format_open = !self.format_open;
+        }
+        let mut open = self.format_open;
+        let shown = egui::Popup::menu(&button)
+            .open_bool(&mut open)
+            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+            .show(|ui| {
+                // A menu draws its buttons without frames or fill. These are
+                // boxes to choose from, so they get the window's own style.
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                let mut f = self.char_format;
+                egui::Grid::new("char_format_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        let width = 130.0;
+                        ui.label("Data bits");
+                        egui::ComboBox::from_id_salt("data_bits")
+                            .selected_text(f.data_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::DATA_BITS {
+                                    let fits = CharFormat { data_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.data_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Stop bits");
+                        egui::ComboBox::from_id_salt("stop_bits")
+                            .selected_text(f.stop_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::STOP_BITS {
+                                    let fits = CharFormat { stop_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.stop_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Parity");
+                        egui::ComboBox::from_id_salt("parity")
+                            .selected_text(f.parity.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for parity in Parity::ALL {
+                                    let fits = CharFormat { parity, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.parity, parity, parity.name());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Flow control");
+                        egui::ComboBox::from_id_salt("flow_control")
+                            .selected_text(self.flow.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for flow in Flow::ALL {
+                                    ui.selectable_value(&mut self.flow, flow, flow.name());
+                                }
+                            });
+                        ui.end_row();
+                    });
+                if f.carried() {
+                    self.char_format = f;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Greyed choices need 11 bits for each character,\n\
+                         and the line carries 8.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        // A click away from the panel shuts it. A click on the button has
+        // already toggled it, and a click on an open list only shuts the list.
+        if let Some(panel) = shown {
+            let clicked_away = ui.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer.interact_pos().is_some_and(|p| !panel.response.rect.contains(p))
+            });
+            if clicked_away && !list_was_open && !button.clicked() {
+                open = false;
+            }
+        }
+        self.format_open = open;
+    }
+
     /// The type's size: fitted to the room, or set by hand.
     fn font_controls(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.fit, "fit")
@@ -4706,6 +4998,7 @@ impl ScopeApp {
             !self.fit,
             egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
         );
+        self.format_button(ui);
     }
 
     /// How far the call has got, as the timeline numbers it: on hook, off
@@ -4737,7 +5030,7 @@ impl ScopeApp {
         use telemetry::CallState as S;
         let f = &self.frame;
         let step = self.step();
-        let grey = Color32::from_rgb(110, 115, 130);
+        let grey = theme::ink(Color32::from_rgb(110, 115, 130));
         let now = std::time::Instant::now();
         let phase = if f.line_phase == "-" { "" } else { f.line_phase };
 
@@ -4793,9 +5086,9 @@ impl ScopeApp {
             let done = step > k || (k >= 4 && step == k);
             let current = step == k && !done;
             let colour = if done {
-                GOOD
+                theme::good()
             } else if current {
-                WARN
+                theme::warn()
             } else {
                 grey
             };
@@ -4803,7 +5096,7 @@ impl ScopeApp {
             if i + 1 < steps.len() {
                 painter.line_segment(
                     [egui::pos2(dot_x(i) + 9.0, y), egui::pos2(dot_x(i + 1) - 9.0, y)],
-                    egui::Stroke::new(2.0, if step > k { GOOD.gamma_multiply(0.6) } else { BEZEL }),
+                    egui::Stroke::new(2.0, if step > k { theme::good().gamma_multiply(0.6) } else { BEZEL }),
                 );
             }
             let centre = egui::pos2(dot_x(i), y);
@@ -4843,14 +5136,14 @@ impl ScopeApp {
                 egui::Align2::LEFT_TOP,
                 title,
                 FontId::proportional(13.0),
-                if done || current { BRIGHT } else { grey },
+                if done || current { theme::bright() } else { grey },
             );
             inside.text(
                 egui::pos2(centre.x - 6.0, y + 29.0),
                 egui::Align2::LEFT_TOP,
                 about,
                 FontId::proportional(11.5),
-                if done || current { DIM } else { grey.gamma_multiply(0.7) },
+                if done || current { theme::dim() } else { grey.gamma_multiply(0.7) },
             );
         }
     }
@@ -4988,6 +5281,7 @@ impl ScopeApp {
             if self.frame.state == telemetry::CallState::Connected {
                 let reply = self.console.term.take_reply();
                 if !reply.is_empty() {
+                    let reply: Vec<u8> = reply.into_iter().map(|b| self.char_format.encode(b)).collect();
                     self.source.send(&reply);
                 }
             }
@@ -5117,7 +5411,7 @@ impl ScopeApp {
     fn call_settings(&mut self, ui: &mut egui::Ui) {
         let Source::Live(session) = &self.source else { return };
         let session = Arc::clone(session);
-        let dim = Color32::from_rgb(140, 150, 165);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
 
         ui.vertical(|ui| {
             ui.label(RichText::new("modulation").monospace().color(dim));
@@ -5277,13 +5571,14 @@ impl ScopeApp {
     /// chain, a line a stage with a health dot, on a rule down the left.
     fn call_card(&self, ui: &mut egui::Ui, measured: Option<scopes::Measured>) {
         let f = &self.frame;
-        let grey = Color32::from_rgb(110, 115, 130);
+        let grey = theme::ink(Color32::from_rgb(110, 115, 130));
         let connected = f.state == telemetry::CallState::Connected;
         let coming_up = matches!(
             f.state,
             telemetry::CallState::Negotiating | telemetry::CallState::Training
         );
         let (standard, baud, about) = family(f.modulation);
+        let standard = theme::ink(standard);
         let colour = match f.state {
             telemetry::CallState::Connected => standard,
             telemetry::CallState::Idle => grey,
@@ -5304,18 +5599,18 @@ impl ScopeApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(title).monospace().size(14.0).strong().color(colour));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("bit/s").size(11.0).color(DIM));
+                        ui.label(RichText::new("bit/s").size(11.0).color(theme::dim()));
                         ui.label(
                             RichText::new(f.bit_rate.map_or("–".to_owned(), |r| r.to_string()))
                                 .monospace()
                                 .size(20.0)
-                                .color(BRIGHT),
+                                .color(theme::bright()),
                         );
                         if let Some(baud) = baud {
                             ui.add_space(10.0);
-                            ui.label(RichText::new("Bd").size(11.0).color(DIM));
+                            ui.label(RichText::new("Bd").size(11.0).color(theme::dim()));
                             ui.label(
-                                RichText::new(baud.to_string()).monospace().size(16.0).color(BRIGHT),
+                                RichText::new(baud.to_string()).monospace().size(16.0).color(theme::bright()),
                             );
                         }
                     });
@@ -5360,7 +5655,9 @@ impl ScopeApp {
         // be sent at, the downstream's ladder for a caller and the upstream's
         // for a server.
         let v92 = f.pcm.filter(|_| f.modulation == "V.92").zip(f.bit_rate);
-        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+        // The bar's two readings, averaged a little (see `Calm`).
+        let (reception, snr_db) = (self.calm.reception, self.calm.snr_db);
+        let (merit, merit_colour, fill, tick, left, right) = match (reception, f.symbol_quality()) {
             _ if v92.is_some() => {
                 let (levels, rate) = v92.unwrap_or_default();
                 let along = (rate.saturating_sub(levels.slowest) as f32
@@ -5369,7 +5666,7 @@ impl ScopeApp {
                 let top = rate >= levels.fastest;
                 (
                     Some(if top { "top rate" } else { "PCM" }.to_owned()),
-                    GOOD,
+                    theme::good(),
                     along,
                     None,
                     format!("{rate} of {} - {} bit/s", levels.slowest, levels.fastest),
@@ -5384,9 +5681,9 @@ impl ScopeApp {
                         .clamp(0.0, 1.0)
                 };
                 let (word, c) = match (outlook, clean) {
-                    (Outlook::Good, Some(clean)) if clean > rate => ("room above", GOOD),
-                    (Outlook::Good, _) => ("clean", GOOD),
-                    _ => ("tight", WARN),
+                    (Outlook::Good, Some(clean)) if clean > rate => ("room above", theme::good()),
+                    (Outlook::Good, _) => ("clean", theme::good()),
+                    _ => ("tight", theme::warn()),
                 };
                 (
                     Some(word.to_owned()),
@@ -5402,13 +5699,7 @@ impl ScopeApp {
             }
             (Some(miss), _) if miss > 0.0 => {
                 let db = 20.0 * (0.25 / miss).log10();
-                let c = if db < 0.0 {
-                    BAD
-                } else if db < 3.0 {
-                    WARN
-                } else {
-                    GOOD
-                };
+                let c = margin_colour(db as f32);
                 (
                     Some(format!("{db:+5.1} dB")),
                     c,
@@ -5420,11 +5711,11 @@ impl ScopeApp {
             }
             (_, Some(q)) => {
                 let c = if q >= 80 {
-                    GOOD
+                    theme::good()
                 } else if q >= 50 {
-                    WARN
+                    theme::warn()
                 } else {
-                    BAD
+                    theme::bad()
                 };
                 (
                     Some(format!("Q {q}")),
@@ -5441,40 +5732,52 @@ impl ScopeApp {
             // of its grids can use, which is 80 dB for sixteen million
             // points. How good is good depends on the grid, so the colour
             // only says whether there is a line at all.
-            _ if f.snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
-                let db = f.snr_db.unwrap_or(0.0);
-                let c = if db >= 12.0 {
-                    GOOD
-                } else if db >= 6.0 {
-                    WARN
-                } else {
-                    BAD
+            // Both of these have a margin point when the grid is a QAM one:
+            // the tick, and the colour is the room above it.
+            _ if snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
+                let db = snr_db.unwrap_or(0.0);
+                let point = margin_point_db(f.tones);
+                let c = match point {
+                    Some(point) => margin_colour(db - point),
+                    None if db >= 12.0 => theme::good(),
+                    None if db >= 6.0 => theme::warn(),
+                    None => theme::bad(),
                 };
                 (
                     Some(format!("{db:.1} dB")),
                     c,
                     (db / 80.0).clamp(0.0, 1.0),
-                    None,
-                    format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
-                    "scale 0 - 80 dB",
+                    point.map(|p| (p / 80.0).clamp(0.0, 1.0)),
+                    match point {
+                        Some(point) => over_the_margin_point(db - point),
+                        None => format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
+                    },
+                    if point.is_some() { "tick: margin point" } else { "scale 0 - 80 dB" },
                 )
             }
-            _ if f.snr_db.is_some() => {
-                let db = f.snr_db.unwrap_or(0.0);
-                let c = if db >= 20.0 {
-                    GOOD
-                } else if db >= 12.0 {
-                    WARN
-                } else {
-                    BAD
+            _ if snr_db.is_some() => {
+                let db = snr_db.unwrap_or(0.0);
+                // A bare "QAM" is V.34's data mode, and V.90's V.34 upstream:
+                // always trellis coded, so its margin point is lower by what
+                // the code gives.
+                let trellis = if f.symbol_label == "QAM" { V34_TRELLIS_DB } else { 0.0 };
+                let point = margin_point_db(f.tones).filter(|_| f.symbol_label != "2FSK").map(|p| p - trellis);
+                let c = match point {
+                    Some(point) => margin_colour(db - point),
+                    None if db >= 20.0 => theme::good(),
+                    None if db >= 12.0 => theme::warn(),
+                    None => theme::bad(),
                 };
                 (
                     Some(format!("{db:.1} dB")),
                     c,
                     (db / 60.0).clamp(0.0, 1.0),
-                    None,
-                    format!("decisions {db:.1} dB clear of the error"),
-                    "scale 0 - 60 dB",
+                    point.map(|p| (p / 60.0).clamp(0.0, 1.0)),
+                    match point {
+                        Some(point) => over_the_margin_point(db - point),
+                        None => format!("decisions {db:.1} dB clear of the error"),
+                    },
+                    if point.is_some() { "tick: margin point" } else { "scale 0 - 60 dB" },
                 )
             }
             _ => {
@@ -5525,7 +5828,10 @@ impl ScopeApp {
             "Left: what the receiver is slicing. Right: what it has in hand. On a \
              constellation that is the margin: how far it misses by, against the quarter \
              of the gap between points at which this modem gives the rate up, in decibels. \
-             Under 0 dB it retrains; within 3 dB a burst of noise will make it.",
+             Under 0 dB it retrains; within 3 dB a burst of noise will make it. Where the \
+             receiver gives a signal to noise instead, the tick is the margin point: the \
+             ratio at which the error is that same quarter of the gap, for this many points, \
+             less what V.34's trellis code gives (6 dB) on a V.34 data call.",
         );
 
         let (rect, _) =
@@ -5547,13 +5853,13 @@ impl ScopeApp {
                     egui::pos2(x + 1.0, rect.bottom() + 3.0),
                 ),
                 0.0,
-                BRIGHT,
+                theme::bright(),
             );
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(left).size(12.0).color(DIM));
+            ui.label(RichText::new(left).size(12.0).color(theme::dim()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(right).size(12.0).color(DIM));
+                ui.label(RichText::new(right).size(12.0).color(theme::dim()));
             });
         });
 
@@ -5579,18 +5885,18 @@ impl ScopeApp {
                 }
                 let health = if clipped > 0 {
                     text.push_str(&format!(" · {clipped} clipped"));
-                    BAD
+                    theme::bad()
                 } else if level > -3.0 {
                     text.push_str(" · too hot");
-                    BAD
+                    theme::bad()
                 } else if level > -12.0 {
                     text.push_str(" · hot");
-                    WARN
+                    theme::warn()
                 } else if level < -70.0 {
                     text.push_str(" · silent");
                     grey
                 } else {
-                    GOOD
+                    theme::good()
                 };
                 stage(ui, health, "Line", text).on_hover_text(
                     "The received level, the largest sample and the crest factor, averaged \
@@ -5609,8 +5915,8 @@ impl ScopeApp {
                     )
                 });
                 match (f.carrier, seen) {
-                    (true, Some(seen)) => stage(ui, GOOD, "Carrier", format!("detected · {seen}")),
-                    (true, None) => stage(ui, GOOD, "Carrier", "detected\nnothing over the noise to measure".into()),
+                    (true, Some(seen)) => stage(ui, theme::good(), "Carrier", format!("detected · {seen}")),
+                    (true, None) => stage(ui, theme::good(), "Carrier", "detected\nnothing over the noise to measure".into()),
                     (false, Some(seen)) => stage(ui, grey, "Carrier", format!("none · {seen}")),
                     (false, None) => stage(ui, grey, "Carrier", "none\nnothing over the noise".into()),
                 };
@@ -5622,12 +5928,12 @@ impl ScopeApp {
                         let secs = since.elapsed().as_secs();
                         stage(
                             ui,
-                            GOOD,
+                            theme::good(),
                             "Start-up",
                             format!("done · {}:{:02} in data{phase}", secs / 60, secs % 60),
                         )
                     }
-                    _ if coming_up => stage(ui, WARN, "Start-up", format!("{}{phase}", f.state.label())),
+                    _ if coming_up => stage(ui, theme::warn(), "Start-up", format!("{}{phase}", f.state.label())),
                     _ => stage(ui, grey, "Start-up", format!("{}{phase}", f.state.label())),
                 };
 
@@ -5649,18 +5955,18 @@ impl ScopeApp {
                     let health = match (f.reception, f.symbol_quality()) {
                         (Some(miss), _) => {
                             text.push_str(&format!(" · reading {miss:.2} of the gap"));
-                            if miss < 0.25 { GOOD } else { WARN }
+                            if miss < 0.25 { theme::good() } else { theme::warn() }
                         }
                         (None, Some(q)) => {
                             text.push_str(&format!(" · quality {q}"));
-                            if q >= 50 { GOOD } else { WARN }
+                            if q >= 50 { theme::good() } else { theme::warn() }
                         }
                         _ if f.snr_db.is_some() => {
                             let db = f.snr_db.unwrap_or(0.0);
                             text.push_str(&format!(" · error {db:.1} dB down"));
-                            if db >= 12.0 { GOOD } else { WARN }
+                            if db >= 12.0 { theme::good() } else { theme::warn() }
                         }
-                        _ if shown > 0 => GOOD,
+                        _ if shown > 0 => theme::good(),
                         _ => grey,
                     };
                     stage(ui, health, "Demodulator", text);
@@ -5682,7 +5988,7 @@ impl ScopeApp {
                     };
                     stage(
                         ui,
-                        if db >= 6.0 && f.echo_at.is_some() { GOOD } else { WARN },
+                        if db >= 6.0 && f.echo_at.is_some() { theme::good() } else { theme::warn() },
                         "Echo canceller",
                         format!("taking out {db:.1} dB\n{found}"),
                     );
@@ -5692,7 +5998,7 @@ impl ScopeApp {
                 let bps = |r: Option<u32>| r.map_or("–".to_owned(), |r| r.to_string());
                 stage(
                     ui,
-                    if f.bit_rate.is_some() { GOOD } else { grey },
+                    if f.bit_rate.is_some() { theme::good() } else { grey },
                     "Rates",
                     format!("receiving {} · sending {} bit/s", bps(f.bit_rate), bps(f.tx_bit_rate)),
                 );
@@ -5704,7 +6010,7 @@ impl ScopeApp {
                     let change = levels.dbm0 - levels.training_dbm0;
                     stage(
                         ui,
-                        GOOD,
+                        theme::good(),
                         "PCM level",
                         format!(
                             "{} {:.1} dBm0 · {:+.1} dB on training\n{} levels, Ucode {} to {}",
@@ -5720,7 +6026,7 @@ impl ScopeApp {
 
                 stage(
                     ui,
-                    if f.leds.ec { GOOD } else { grey },
+                    if f.leds.ec { theme::good() } else { grey },
                     "Error control",
                     if let (true, Some((n, k))) = (f.leds.ec, f.code.filter(|c| c.0 > 0)) {
                         format!(
@@ -5749,7 +6055,7 @@ impl ScopeApp {
                     let on = out != "none" || back != "none";
                     stage(
                         ui,
-                        if on { GOOD } else { grey },
+                        if on { theme::good() } else { grey },
                         "Compression",
                         if on {
                             format!(
@@ -5768,11 +6074,11 @@ impl ScopeApp {
                 // way to know whether it is too loud or too faint there.
                 if let Some(far) = f.far_end {
                     let health = if far.clipped > 0 {
-                        BAD
+                        theme::bad()
                     } else if far.peak_db > -1.0 || far.trim_db > 0.0 {
-                        WARN
+                        theme::warn()
                     } else {
-                        GOOD
+                        theme::good()
                     };
                     let snr = if far.snr_db > 0.0 {
                         format!("Es/N0 {:.1} dB", far.snr_db)
@@ -5803,7 +6109,7 @@ impl ScopeApp {
                 let (rx_rate, tx_rate) = self.byte_rates();
                 stage(
                     ui,
-                    if connected { GOOD } else { grey },
+                    if connected { theme::good() } else { grey },
                     "Data",
                     format!(
                         "{} bytes in at {rx_rate:.0} a second · {} out at {tx_rate:.0}",
@@ -5829,8 +6135,8 @@ impl ScopeApp {
                         text.push_str(" · ECM");
                     }
                     match &f.fax_trouble {
-                        Some(trouble) => stage(ui, BAD, "Fax", format!("{text} · {trouble}")),
-                        None => stage(ui, GOOD, "Fax", text),
+                        Some(trouble) => stage(ui, theme::bad(), "Fax", format!("{text} · {trouble}")),
+                        None => stage(ui, theme::good(), "Fax", text),
                     };
                 }
 
@@ -5870,13 +6176,13 @@ impl ScopeApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if v90 || v92 || !connected {
-                    ui.label(RichText::new("PCM down").color(DIM));
+                    ui.label(RichText::new("PCM down").color(theme::dim()));
                     if let Some(drn) = Self::rate_menu(ui, session, v90 && connected) {
                         session.choose_rate(drn);
                     }
                 }
                 if v92 || !connected {
-                    ui.label(RichText::new("up").color(DIM));
+                    ui.label(RichText::new("up").color(theme::dim()));
                     if let Some(drn) = Self::upstream_menu(ui, session) {
                         session.choose_upstream(drn);
                     }
@@ -5941,10 +6247,10 @@ impl ScopeApp {
     fn rate_menu(ui: &mut egui::Ui, session: &live::Session, in_data: bool) -> Option<Option<u8>> {
         use datapump::v90::analogue::Outlook;
         use datapump::v90::sequences::data_rate;
-        let good = Color32::from_rgb(90, 220, 130);
-        let bad = Color32::from_rgb(235, 105, 95);
-        let grey = Color32::from_rgb(110, 115, 130);
-        let plain = Color32::from_rgb(220, 225, 235);
+        let good = theme::ink(Color32::from_rgb(90, 220, 130));
+        let bad = theme::ink(Color32::from_rgb(235, 105, 95));
+        let grey = theme::ink(Color32::from_rgb(110, 115, 130));
+        let plain = theme::ink(Color32::from_rgb(220, 225, 235));
         let menu = session.rate_menu();
         let pinned = session.rate_pinned();
         let current = menu.as_ref().and_then(|m| m.current).filter(|_| in_data);
@@ -6014,17 +6320,17 @@ impl ScopeApp {
             .show(ui, |ui| {
                 for entry in &self.log {
                     let (tag, colour) = match entry.direction {
-                        Direction::FromLine => ("RX", Color32::from_rgb(120, 210, 255)),
-                        Direction::ToLine => ("TX", Color32::from_rgb(250, 200, 120)),
-                        Direction::ToDce => ("DTE", Color32::from_rgb(180, 230, 150)),
-                        Direction::ToDte => ("DCE", Color32::from_rgb(150, 200, 240)),
-                        Direction::Note => ("--", Color32::from_rgb(140, 145, 160)),
+                        Direction::FromLine => ("RX", theme::ink(Color32::from_rgb(120, 210, 255))),
+                        Direction::ToLine => ("TX", theme::ink(Color32::from_rgb(250, 200, 120))),
+                        Direction::ToDce => ("DTE", theme::ink(Color32::from_rgb(180, 230, 150))),
+                        Direction::ToDte => ("DCE", theme::ink(Color32::from_rgb(150, 200, 240))),
+                        Direction::Note => ("--", theme::ink(Color32::from_rgb(140, 145, 160))),
                     };
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{:7.2}", entry.at.as_secs_f32()))
                                 .font(FontId::monospace(11.0))
-                                .color(Color32::from_rgb(110, 115, 130)),
+                                .color(theme::ink(Color32::from_rgb(110, 115, 130))),
                         );
                         ui.label(
                             RichText::new(format!("{tag:>3}"))
@@ -6034,11 +6340,38 @@ impl ScopeApp {
                         ui.label(
                             RichText::new(&entry.text)
                                 .font(FontId::monospace(12.0))
-                                .color(Color32::from_rgb(215, 220, 230)),
+                                .color(theme::ink(Color32::from_rgb(215, 220, 230))),
                         );
                     });
                 }
             });
+    }
+
+    /// The theme key at the right of the tab strip: system, dark, light.
+    fn theme_button(&mut self, ui: &mut egui::Ui) {
+        let next = self.theme.next();
+        let about = match self.theme {
+            theme::Choice::System => "Theme: as Windows is",
+            theme::Choice::Dark => "Theme: dark",
+            theme::Choice::Light => "Theme: light",
+        };
+        if ui
+            .small_button(self.theme.icon())
+            .on_hover_text(format!("{about}. Click for {}", next.name()))
+            .clicked()
+        {
+            self.theme = next;
+        }
+    }
+
+    /// Tell egui the theme when it changes, and read which one it draws
+    /// with, before anything asks for a colour.
+    fn apply_theme(&mut self, ui: &egui::Ui) {
+        if self.theme_set != Some(self.theme) {
+            self.theme_set = Some(self.theme);
+            ui.ctx().set_theme(self.theme.preference());
+        }
+        theme::follow(ui);
     }
 
     /// The terminal and the transcript, and the strip that switches them.
@@ -6062,9 +6395,9 @@ impl ScopeApp {
                     RichText::new(if on { "online" } else { "offline" })
                         .monospace()
                         .color(if on {
-                            Color32::from_rgb(90, 220, 130)
+                            theme::ink(Color32::from_rgb(90, 220, 130))
                         } else {
-                            Color32::from_rgb(150, 160, 175)
+                            theme::ink(Color32::from_rgb(150, 160, 175))
                         }),
                 );
             } else {
@@ -6072,12 +6405,12 @@ impl ScopeApp {
                     Mode::Command => ui.label(
                         RichText::new("command state")
                             .monospace()
-                            .color(Color32::from_rgb(150, 160, 175)),
+                            .color(theme::ink(Color32::from_rgb(150, 160, 175))),
                     ),
                     Mode::Online => ui.label(
                         RichText::new("online")
                             .monospace()
-                            .color(Color32::from_rgb(90, 220, 130)),
+                            .color(theme::ink(Color32::from_rgb(90, 220, 130))),
                     ),
                 };
             }
@@ -6107,6 +6440,7 @@ impl ScopeApp {
             if self.tab == Tab::Terminal && !self.source.is_telnet() {
                 self.font_controls(ui);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.theme_button(ui));
         });
         ui.separator();
         match self.tab {
@@ -6148,8 +6482,8 @@ impl ScopeApp {
     /// phase, and what it proposed in XID. None of that reaches the terminal
     /// and all of it is the answer to why a call went the way it did.
     fn distant(&self, ui: &mut egui::Ui) {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
+        let dim = theme::ink(Color32::from_rgb(140, 150, 165));
+        let bright = theme::ink(Color32::from_rgb(220, 225, 235));
         ui.add_space(6.0);
         // Not only V.8's menu: everything the far end has said about itself
         // and everything the two ends settled, from V.8 bis to XID.
@@ -6350,7 +6684,7 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
         "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
         "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
         _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
-        _ => (BRIGHT, None, ""),
+        _ => (theme::BRIGHT, None, ""),
     }
 }
 
@@ -6371,9 +6705,9 @@ fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
                 if row == 0 {
                     ui.painter().circle_filled(dot.center(), 4.0, health);
-                    ui.label(RichText::new(name).strong().color(BRIGHT));
+                    ui.label(RichText::new(name).strong().color(theme::bright()));
                 }
-                ui.add(egui::Label::new(RichText::new(line).color(DIM)).truncate());
+                ui.add(egui::Label::new(RichText::new(line).color(theme::dim())).truncate());
             });
         }
         ui.add_space(2.0);
@@ -6448,6 +6782,7 @@ fn key_gap(key: u8) -> u64 {
 
 impl eframe::App for ScopeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.apply_theme(ui);
         self.poll();
         self.note_last_call();
         // Anything the last frame changed, kept for the next run. Cheap when
@@ -6543,7 +6878,7 @@ fn key(ui: &mut egui::Ui, digit: char, letters: &str) -> egui::Response {
         egui::Align2::LEFT_BOTTOM,
         letters,
         egui::FontId::proportional(LETTERS_PT),
-        Color32::from_rgb(140, 150, 165),
+        theme::ink(Color32::from_rgb(140, 150, 165)),
     );
     response
 }
@@ -6623,7 +6958,7 @@ fn dot(ui: &mut egui::Ui, colour: Color32) {
 
 /// One labelled box in the credentials form.
 fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, hover: &str) {
-    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    ui.label(RichText::new(label).monospace().color(theme::ink(Color32::from_rgb(140, 150, 165))));
     ui.add(
         egui::TextEdit::singleline(value)
             .desired_width(FIELD_W)
@@ -6642,7 +6977,7 @@ fn optional_row(
     hover: &str,
 ) {
     let mut text = optional_shown(value);
-    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    ui.label(RichText::new(label).monospace().color(theme::ink(Color32::from_rgb(140, 150, 165))));
     if ui
         .add(
             egui::TextEdit::singleline(&mut text)
@@ -6664,7 +6999,7 @@ fn optional_row(
 /// whether or not there is an account to edit -- deleting the last account
 /// is a change like any other and has to be writable.
 fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
-    let dim = Color32::from_rgb(140, 150, 165);
+    let dim = theme::ink(Color32::from_rgb(140, 150, 165));
     // The four things a provider actually gives out, and nothing between
     // them and the person who has been handed them.
     egui::Grid::new("sip-credentials")
@@ -6903,6 +7238,42 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
 }
 
 /// A small folder button, true when clicked.
+/// What V.34's trellis code gives over slicing each point for itself, in
+/// decibels: its four-dimensional codes keep runs of points at least twice
+/// the gap of the two-dimensional grid apart, so four times the distance
+/// squared (the 16- and 32-state codes; the 64-state one gives more). It is
+/// the asymptotic gain, with no allowance for how many near runs there are.
+const V34_TRELLIS_DB: f32 = 6.02;
+
+/// The margin point of a QAM grid: the signal to noise, in decibels, at
+/// which the error is a quarter of the gap between neighbouring points.
+///
+/// At unit mean power a square grid of `points` has a gap of
+/// sqrt(6 / (points - 1)), so the error at the margin point is a quarter of
+/// that. It is the same line the receivers that know their own gap retrain
+/// at. None under four points, where there is no QAM grid.
+fn margin_point_db(points: usize) -> Option<f32> {
+    (points >= 4).then(|| 20.0 * 4f32.log10() + 10.0 * ((points as f32 - 1.0) / 6.0).log10())
+}
+
+/// The line under the bar for a margin in decibels.
+fn over_the_margin_point(db: f32) -> String {
+    let side = if db < 0.0 { "under" } else { "over" };
+    format!("{:.1} dB {side} the margin point", db.abs())
+}
+
+/// The colour of a margin in decibels: under 0 dB a retrain, within 3 dB a
+/// burst of noise from one.
+fn margin_colour(db: f32) -> Color32 {
+    if db < 0.0 {
+        theme::bad()
+    } else if db < 3.0 {
+        theme::warn()
+    } else {
+        theme::good()
+    }
+}
+
 fn browse_button(ui: &mut egui::Ui, hover: &str) -> bool {
     ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0))).on_hover_text(hover).clicked()
 }
@@ -6936,6 +7307,25 @@ fn rate_box(ui: &mut egui::Ui, id: &str, value: &mut u32, rates: &[u32]) {
 
 /// Compile-time reminder that the engine and UI agree on the FFT size.
 const _: () = assert!(FFT_SIZE / 2 == SPECTRUM_BINS);
+
+#[cfg(test)]
+mod margin_tests {
+    use super::margin_point_db;
+
+    /// The margin point is where the error is a quarter of the gap: 4QAM's
+    /// gap at unit power is sqrt(2), 16QAM's is 2/sqrt(10).
+    #[test]
+    fn the_margin_point_is_a_quarter_of_the_gap() {
+        assert_eq!(margin_point_db(2), None);
+        let at = |gap: f32| -20.0 * (0.25 * gap).log10();
+        assert!((margin_point_db(4).unwrap() - at(2f32.sqrt())).abs() < 1e-3);
+        assert!((margin_point_db(16).unwrap() - at(2.0 / 10f32.sqrt())).abs() < 1e-3);
+        // 512 points: about 31.34 dB.
+        assert!((margin_point_db(512).unwrap() - 31.34).abs() < 0.01);
+        // V.34's code: twice the gap, so four times the distance squared.
+        assert!((super::V34_TRELLIS_DB - 20.0 * 2f32.log10()).abs() < 0.01);
+    }
+}
 
 #[cfg(test)]
 mod modulation_tests {

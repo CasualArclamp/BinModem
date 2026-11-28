@@ -48,6 +48,87 @@ use super::{
     WITHIN_4800, bits_per_symbol, coding_for, point_spacing_at, signal_point,
 };
 
+/// Which of the two preambles of V.32bis clause 8 a rate renegotiation opens
+/// with.
+///
+/// The calling modem sends AA for 56T and then CC for 8T: one state, sent
+/// again and again. The answering modem sends AC for 56T and then CA for 8T:
+/// two opposite states, one after the other. Each end listens for the far
+/// end's preamble only, so its own echo is not a preamble to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preamble {
+    /// AA then CC, from the calling modem.
+    Repeated,
+    /// AC then CA, from the answering modem.
+    Alternating,
+}
+
+/// How far a symbol may land from the symbol before it (the same state), or
+/// from its negative (the opposite state), and still count, at unit power.
+///
+/// The four states are on the unit circle, 1.41 apart, so 0.5 keeps each one
+/// well clear of its neighbours, with the noise of two symbols in it.
+const NEAR_A_STATE: f64 = 0.5;
+
+/// How far from the unit circle a symbol may land and still be one of the
+/// four states. It refuses the inner and the outer points of a dense
+/// constellation.
+const OFF_THE_CIRCLE: f64 = 0.35;
+
+/// The symbols the watch looks back over.
+pub const PREAMBLE_WINDOW: u32 = 32;
+
+/// The last [`PREAMBLE_WINDOW`] symbols, as the two preambles see them.
+///
+/// The watch looks at the equalised symbols and not at tones. A tone detector
+/// needs more than a preamble's 64 symbols to be sure of a tone, which is why
+/// the retrain test of clause 7 asks for more than 128. A symbol that lands
+/// on the same state as the symbol before it, or on the opposite state, is a
+/// fact the receiver has at once.
+///
+/// Data cannot copy this for long. Scrambled data is a sequence of maximum
+/// length, and 28 symbols of one dibit pattern would repeat a window of 23
+/// bits, which such a sequence never does.
+///
+/// Each symbol is compared with the symbol before it, not with the four
+/// states. In data the carrier loop follows the decisions of a dense
+/// constellation, and a preamble can arrive turned from the states: 18
+/// degrees at 14 400 with noise at 20 dB. Then most symbols were more than
+/// 0.4 from every state, and the watch counted 12 of 32. A turn moves a
+/// symbol and the symbol before it together, so the comparison does not see
+/// it.
+#[derive(Debug, Clone, Default)]
+struct PreambleWatch {
+    /// The last symbol, if it landed on the unit circle.
+    previous: Option<Complex>,
+    /// One bit for each symbol, newest lowest: the symbol was on the same
+    /// state as the symbol before it.
+    repeated: u64,
+    /// The same, for the opposite state.
+    alternating: u64,
+}
+
+impl PreambleWatch {
+    fn feed(&mut self, z: Complex) {
+        let on_circle = (z.abs() - 1.0).abs() < OFF_THE_CIRCLE;
+        let (same, opposite) = match self.previous {
+            Some(p) if on_circle => ((z - p).abs() < NEAR_A_STATE, (z + p).abs() < NEAR_A_STATE),
+            _ => (false, false),
+        };
+        self.repeated = (self.repeated << 1) | u64::from(same);
+        self.alternating = (self.alternating << 1) | u64::from(opposite);
+        self.previous = on_circle.then_some(z);
+    }
+
+    fn count(&self, kind: Preamble) -> u32 {
+        let history = match kind {
+            Preamble::Repeated => self.repeated,
+            Preamble::Alternating => self.alternating,
+        };
+        (history & ((1u64 << PREAMBLE_WINDOW) - 1)).count_ones()
+    }
+}
+
 /// Level at which the far carrier is declared present, and the lower level at
 /// which it is declared gone: a 20 ms envelope of the in-band amplitude, five
 /// decibels of hysteresis, as V.22bis 6.5.2 asks for.
@@ -192,6 +273,8 @@ pub struct Receiver {
     /// goes on listening: what to train on, and the half-symbol sample by
     /// which its first window is all in.
     pending: Option<(Training, u64)>,
+    /// What the last symbols say about a clause 8 preamble.
+    watch: PreambleWatch,
 }
 
 impl Receiver {
@@ -230,6 +313,7 @@ impl Receiver {
             s_offset_hz: None,
             via: None,
             pending: None,
+            watch: PreambleWatch::default(),
         }
     }
 
@@ -330,6 +414,7 @@ impl Receiver {
             let target = self.decide(&point);
             let Some(symbol) = self.core.settle(target) else { break };
             self.last = symbol.point;
+            self.watch.feed(symbol.point);
             if self.core.slips() != self.slips {
                 // Found again after a slip: the paths the trellis decoder
                 // holds straddle the jump.
@@ -461,6 +546,19 @@ impl Receiver {
 
     pub fn take_bits(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.bits)
+    }
+
+    /// How many of the last [`PREAMBLE_WINDOW`] symbols look like `kind`.
+    ///
+    /// V.32bis 8.2: "A modem shall be conditioned to detect an incoming
+    /// preamble at any time while receiving data."
+    pub fn preamble(&self, kind: Preamble) -> u32 {
+        self.watch.count(kind)
+    }
+
+    /// Start the watch again, so that a preamble acted on is not heard twice.
+    pub fn forget_preamble(&mut self) {
+        self.watch = PreambleWatch::default();
     }
 
     /// Take whole octets, most significant bit first, leaving any remainder.
@@ -627,6 +725,38 @@ mod tests {
             for _ in 0..50_000 {
                 let z = Complex::new(uniform(), uniform()).scale(4.0);
                 assert_eq!(table.nearest(z), table.nearest_exhaustive(z), "{} points at {z:?}", table.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_turned_preamble_is_still_a_preamble() {
+        // The four states at unit power, turned as a carrier loop locked on a
+        // dense constellation can leave them, with noise on each symbol.
+        let state = |i: usize| {
+            let (x, y) = STATES[i];
+            Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)
+        };
+        let mut noise = 0x2545_f491_4f6c_dd1du64;
+        let mut wobble = || {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            (noise % 2001) as f64 / 1000.0 - 1.0
+        };
+        for degrees in [0.0, 18.0, 30.0, -40.0] {
+            let turn = Complex::from_polar(1.0, f64::to_radians(degrees));
+            for (kind, other, pattern) in [
+                (Preamble::Repeated, Preamble::Alternating, [0, 0]),
+                (Preamble::Alternating, Preamble::Repeated, [0, 2]),
+            ] {
+                let mut watch = PreambleWatch::default();
+                for k in 0..PREAMBLE_WINDOW as usize {
+                    let n = Complex::new(wobble(), wobble()).scale(0.1);
+                    watch.feed(state(pattern[k % 2]) * turn + n);
+                }
+                assert!(watch.count(kind) >= PREAMBLE_WINDOW - 2, "{kind:?} at {degrees} degrees");
+                assert_eq!(watch.count(other), 0, "{other:?} at {degrees} degrees");
             }
         }
     }

@@ -1088,6 +1088,13 @@ impl Stack {
     }
 
     /// Queue data from the terminal.
+    /// Send a break to the far end, `length_ms` long (V.42 8.13).
+    ///
+    /// False when there is no error-corrected connection to carry it.
+    pub fn send_break(&mut self, length_ms: u32) -> bool {
+        self.lapm.send_break(length_ms)
+    }
+
     pub fn send(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;

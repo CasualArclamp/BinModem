@@ -191,14 +191,14 @@ pub fn dialog(ctx: &egui::Context, caller: &str, ringing_for: f64, fax_class: bo
                 ui.label(
                     RichText::new(if lit { "Ringing" } else { "Incoming call" })
                         .size(15.0)
-                        .color(Color32::from_rgb(140, 150, 165)),
+                        .color(crate::theme::ink(Color32::from_rgb(140, 150, 165))),
                 );
                 ui.add_space(4.0);
-                ui.label(RichText::new(caller).monospace().size(26.0).strong().color(Color32::from_rgb(235, 240, 245)));
+                ui.label(RichText::new(caller).monospace().size(26.0).strong().color(crate::theme::ink(Color32::from_rgb(235, 240, 245))));
                 ui.label(
                     RichText::new(format!("ringing for {:.0} s", ringing_for.max(0.0)))
                         .small()
-                        .color(Color32::from_rgb(140, 150, 165)),
+                        .color(crate::theme::ink(Color32::from_rgb(140, 150, 165))),
                 );
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {

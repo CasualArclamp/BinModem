@@ -60,6 +60,7 @@ mod review;
 mod scopes;
 mod speed;
 mod tap;
+mod theme;
 mod window;
 
 use std::path::PathBuf;

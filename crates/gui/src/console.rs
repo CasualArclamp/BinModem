@@ -460,6 +460,44 @@ fn hint(painter: &Painter, rect: Rect) {
     );
 }
 
+/// The C0 control characters and DEL, for the terminal's send menu: the
+/// octet, its caret name, its ASCII name, and what it is used for.
+pub const CONTROL_CHARACTERS: [(u8, &str, &str, &str); 33] = [
+    (0x00, "^@", "NUL", "null"),
+    (0x01, "^A", "SOH", "start of heading"),
+    (0x02, "^B", "STX", "start of text"),
+    (0x03, "^C", "ETX", "end of text, interrupt"),
+    (0x04, "^D", "EOT", "end of transmission"),
+    (0x05, "^E", "ENQ", "enquiry, asks for the answerback"),
+    (0x06, "^F", "ACK", "acknowledge"),
+    (0x07, "^G", "BEL", "bell"),
+    (0x08, "^H", "BS", "backspace"),
+    (0x09, "^I", "HT", "horizontal tab"),
+    (0x0a, "^J", "LF", "line feed"),
+    (0x0b, "^K", "VT", "vertical tab"),
+    (0x0c, "^L", "FF", "form feed, clear screen"),
+    (0x0d, "^M", "CR", "carriage return"),
+    (0x0e, "^N", "SO", "shift out"),
+    (0x0f, "^O", "SI", "shift in"),
+    (0x10, "^P", "DLE", "data link escape"),
+    (0x11, "^Q", "DC1", "XON, resume output"),
+    (0x12, "^R", "DC2", "device control 2"),
+    (0x13, "^S", "DC3", "XOFF, pause output"),
+    (0x14, "^T", "DC4", "device control 4"),
+    (0x15, "^U", "NAK", "negative acknowledge, erase line"),
+    (0x16, "^V", "SYN", "synchronous idle"),
+    (0x17, "^W", "ETB", "end of block, erase word"),
+    (0x18, "^X", "CAN", "cancel, stops a ZMODEM transfer"),
+    (0x19, "^Y", "EM", "end of medium"),
+    (0x1a, "^Z", "SUB", "substitute, end of file"),
+    (0x1b, "^[", "ESC", "escape"),
+    (0x1c, "^\\", "FS", "file separator, quit"),
+    (0x1d, "^]", "GS", "group separator"),
+    (0x1e, "^^", "RS", "record separator"),
+    (0x1f, "^_", "US", "unit separator"),
+    (0x7f, "^?", "DEL", "delete"),
+];
+
 /// Translate egui keyboard events into the bytes a DTE would send.
 /// What a pasted string puts on the line.
 ///

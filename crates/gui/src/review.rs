@@ -331,13 +331,13 @@ impl ReviewPane {
         } else {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("no recording open").color(DIM));
+                ui.label(RichText::new("no recording open").color(crate::theme::ink(DIM)));
                 ui.label(
                     RichText::new(
                         "Open a WAV of a call, or drop one on the window. Two channels with an end on each can be followed furthest; one channel with both ends on it as far as the two share a band.",
                     )
                     .small()
-                    .color(DIM),
+                    .color(crate::theme::ink(DIM)),
                 );
             });
         }
@@ -362,14 +362,14 @@ impl ReviewPane {
             }
             if let Some((path, _)) = &self.loading {
                 ui.spinner();
-                ui.label(RichText::new(format!("reading {}", path.display())).small().color(DIM));
+                ui.label(RichText::new(format!("reading {}", path.display())).small().color(crate::theme::ink(DIM)));
                 return;
             }
             if let Some(error) = &self.error {
-                ui.label(RichText::new(error).small().color(Color32::from_rgb(235, 100, 90)));
+                ui.label(RichText::new(error).small().color(crate::theme::ink(Color32::from_rgb(235, 100, 90))));
             }
             let Some(report) = &self.report else { return };
-            ui.label(RichText::new(&report.name).monospace().color(BRIGHT));
+            ui.label(RichText::new(&report.name).monospace().color(crate::theme::ink(BRIGHT)));
             let tap = match report.tap {
                 Tap::Summed => "both ends on one channel".to_owned(),
                 Tap::Split { .. } => "an end a channel".to_owned(),
@@ -382,7 +382,7 @@ impl ReviewPane {
                     report.events.len()
                 ))
                 .small()
-                .color(DIM),
+                .color(crate::theme::ink(DIM)),
             );
             let seconds = report.seconds.max(1.0);
             let two = report.channels.len() > 1;
@@ -413,7 +413,7 @@ impl ReviewPane {
             }
             ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false)).on_hover_text("How loud");
             if let Some(error) = &self.audio_error {
-                ui.label(RichText::new(error).small().color(Color32::from_rgb(235, 100, 90)));
+                ui.label(RichText::new(error).small().color(crate::theme::ink(Color32::from_rgb(235, 100, 90))));
             }
             if toggle {
                 if playing {
@@ -806,14 +806,14 @@ impl ReviewPane {
         let Some(report) = &self.report else {
             ui.label(RichText::new("the call").strong());
             ui.add_space(4.0);
-            ui.label(RichText::new("Nothing read yet.").small().color(DIM));
+            ui.label(RichText::new("Nothing read yet.").small().color(crate::theme::ink(DIM)));
             return None;
         };
         let rows = |ui: &mut egui::Ui, id: &str, rows: &[(String, String)]| {
             egui::Grid::new(id).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
                 for (key, value) in rows {
-                    ui.label(RichText::new(key).monospace().small().color(DIM));
-                    ui.add(egui::Label::new(RichText::new(value).monospace().small().color(BRIGHT)).wrap());
+                    ui.label(RichText::new(key).monospace().small().color(crate::theme::ink(DIM)));
+                    ui.add(egui::Label::new(RichText::new(value).monospace().small().color(crate::theme::ink(BRIGHT))).wrap());
                     ui.end_row();
                 }
             });
@@ -822,12 +822,12 @@ impl ReviewPane {
             ui.label(RichText::new("the call").strong());
             ui.add_space(4.0);
             if report.verdict.is_empty() {
-                ui.label(RichText::new("Nothing recognised in this recording.").small().color(DIM));
+                ui.label(RichText::new("Nothing recognised in this recording.").small().color(crate::theme::ink(DIM)));
             }
             rows(ui, "review-verdict", &report.verdict);
             for caveat in &report.caveats {
                 ui.add_space(6.0);
-                ui.label(RichText::new(caveat).small().color(Color32::from_rgb(240, 180, 90)));
+                ui.label(RichText::new(caveat).small().color(crate::theme::ink(Color32::from_rgb(240, 180, 90))));
             }
             ui.add_space(10.0);
             ui.add(
@@ -836,7 +836,7 @@ impl ReviewPane {
                         "Click a box on the waterfall for everything read out of it. The wheel zooms, a drag moves along, the arrow keys step through the signals.",
                     )
                     .small()
-                    .color(DIM),
+                    .color(crate::theme::ink(DIM)),
                 )
                 .wrap(),
             );
@@ -844,7 +844,7 @@ impl ReviewPane {
         };
         ui.horizontal(|ui| {
             ui.label(RichText::new(&event.tag).strong().monospace().color(colour(event.from)));
-            ui.label(RichText::new(event.layer.label()).small().color(DIM));
+            ui.label(RichText::new(event.layer.label()).small().color(crate::theme::ink(DIM)));
             if ui
                 .small_button("play this")
                 .on_hover_text("Hear this signal alone, from a moment before it to a moment after")
@@ -857,7 +857,7 @@ impl ReviewPane {
             }
         });
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(&event.summary).small().color(BRIGHT)).wrap());
+        ui.add(egui::Label::new(RichText::new(&event.summary).small().color(crate::theme::ink(BRIGHT))).wrap());
         ui.add_space(6.0);
         let mut head = vec![
             ("from".to_owned(), event.from.label().to_owned()),
@@ -880,7 +880,7 @@ impl ReviewPane {
             if Self::symbols(ui, event, self.pcm_view, DETAIL_W - 24.0) {
                 self.symbols_open = true;
             }
-            ui.label(RichText::new("click the plot for a larger one").small().color(DIM));
+            ui.label(RichText::new("click the plot for a larger one").small().color(crate::theme::ink(DIM)));
         }
         if !event.fields.is_empty() {
             ui.add_space(6.0);
@@ -890,13 +890,13 @@ impl ReviewPane {
         if !event.octets.is_empty() {
             ui.add_space(6.0);
             ui.separator();
-            ui.label(RichText::new(format!("{} octets", event.octets.len())).small().color(DIM));
+            ui.label(RichText::new(format!("{} octets", event.octets.len())).small().color(crate::theme::ink(DIM)));
             let dump: Vec<String> = event
                 .octets
                 .chunks(12)
                 .map(|row| row.iter().map(|o| format!("{o:02X}")).collect::<Vec<_>>().join(" "))
                 .collect();
-            ui.label(RichText::new(dump.join("\n")).monospace().small().color(BRIGHT));
+            ui.label(RichText::new(dump.join("\n")).monospace().small().color(crate::theme::ink(BRIGHT)));
         }
         wanted
     }

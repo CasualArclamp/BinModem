@@ -333,7 +333,8 @@ impl Pump {
             Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90Server(m) => m.modem().round_trip().map(|s| (s * 1000.0).round() as u32),
-            Self::V22bis(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
+            Self::V22bis(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
+            Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -1137,6 +1138,9 @@ pub struct Modem {
     /// Start-stop framing for a connection without error control, where
     /// nothing else says where one character ends and the next begins.
     async_bits: AsyncBits,
+    /// A break asked for on a call without error control, in milliseconds,
+    /// that the transmitter has not yet put on the line.
+    break_ms: Option<u32>,
     /// Milliseconds since the last tick, accumulated from samples.
     elapsed_samples: f64,
     /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
@@ -1357,6 +1361,7 @@ impl Modem {
             role: Role::Calling,
             outbound: Vec::new(),
             async_bits: AsyncBits::new(8),
+            break_ms: None,
             elapsed_samples: 0.0,
             since_dial_ms: 0,
             dial_request: None,
@@ -2277,6 +2282,36 @@ impl Modem {
     }
 
     /// One byte typed by the terminal.
+    /// Send a break to the far end, `ms` long.
+    ///
+    /// On an error-corrected call it goes as a V.42 BRK message (8.13), which
+    /// carries the length and leaves the data as it is. On a call without
+    /// error control it goes as what a break is on a start-stop line: the
+    /// line held at space for the length, longer than any character, and then
+    /// mark again (V.14 4.1). Returns how it went, for the log, or why it did
+    /// not.
+    pub fn send_break(&mut self, ms: u32) -> Result<&'static str, &'static str> {
+        if self.state != State::Data {
+            return Err("there is no call in data mode");
+        }
+        if self.pump.is_none() {
+            return Err("this kind of call cannot carry a break");
+        }
+        match self.ec.as_mut() {
+            Some(ec) if ec.phase() != Phase::Transparent => {
+                if ec.send_break(ms) {
+                    Ok("as a V.42 BRK message")
+                } else {
+                    Err("error control is not connected yet")
+                }
+            }
+            _ => {
+                self.break_ms = Some(ms);
+                Ok("as space on the line")
+            }
+        }
+    }
+
     pub fn feed_dte(&mut self, byte: u8) {
         match self.state {
             State::Command | State::OnlineCommand => {
@@ -3207,11 +3242,16 @@ impl Modem {
     /// it. Ignored by the modulations that have no such procedure.
     ///
     /// V.34 has a rate renegotiation for this (11.6), and that is what it is
-    /// asked for: two steps below the rate arriving now.
+    /// asked for: two steps below the rate arriving now. V.32bis has one too
+    /// (clause 8), and it is asked for one step below. A V.32 far end has no
+    /// renegotiation, and the pump does a full retrain instead.
     pub fn ask_for_retrain(&mut self) {
         let arriving = self.rate;
         match self.pump.as_mut() {
-            Some(Pump::V32(m)) => m.ask_for_retrain(),
+            Some(Pump::V32(m)) => {
+                let lower = v32::startup::EVERY_RATE.iter().copied().find(|&r| r < arriving).unwrap_or(4800);
+                m.renegotiate(lower);
+            }
             Some(Pump::V34(m)) => {
                 m.renegotiate(((arriving / 2400) as u8).saturating_sub(2).max(1));
             }
@@ -3409,7 +3449,7 @@ impl Modem {
     /// the two ends keep agreeing on, and is worth seeing on the panel.
     pub fn retrains(&self) -> u32 {
         match self.pump.as_ref() {
-            Some(Pump::V32(m)) => m.retrains(),
+            Some(Pump::V32(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V34(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V90(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V90Server(m)) => m.modem().renegotiations() + m.modem().retrains(),
@@ -3547,6 +3587,19 @@ impl Modem {
                     for byte in queued {
                         bits.extend(self.async_bits.encode(byte));
                     }
+                    pump.send_bits(&bits);
+                }
+                // After what was typed before it, so the break arrives in
+                // its place. V.14 4.1 asks for at least 2M + 3 bits of space,
+                // with M the bits of one character; the time asked for is
+                // almost always far more than that.
+                if let Some(ms) = self.break_ms.take() {
+                    let rate = u64::from(self.rate.max(300));
+                    let space = (u64::from(ms) * rate / 1000).max(2 * 10 + 3) as usize;
+                    let mut bits = vec![false; space];
+                    // Mark for two characters after it, so that the far end
+                    // sees the break end before the next start bit.
+                    bits.extend([true; 20]);
                     pump.send_bits(&bits);
                 }
             }
@@ -3714,6 +3767,7 @@ impl Modem {
         self.announce = None;
         self.outbound.clear();
         self.async_bits.reset();
+        self.break_ms = None;
         self.state = State::Handshaking;
 
         // V.250 6.4.1's automode: the modem "may fall back to another
@@ -4370,7 +4424,11 @@ impl Modem {
                 let offer = v32::startup::rate_signal(
                     v32::startup::Rates::between(lowest, highest.min(ceiling)),
                 );
-                Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
+                let modem = v32::startup::Modem::new(hs_role, offer, self.fs);
+                // With automode on, a calling V.32 pump is V.32bis Annex A's:
+                // it waits for AC before AA (see `automode`).
+                let modem = if role == Role::Calling && self.negotiates() { modem.annex_a() } else { modem };
+                Pump::V32(Box::new(modem))
             }
             "B103" => {
                 let hs_role = match role {
@@ -4463,7 +4521,14 @@ impl Modem {
             }
             return None;
         }
-        self.pre_v8_ear.as_mut()?.feed(line)
+        // Over our own AA, a V.32bis answerer may send ones until it hears
+        // that AA, then AC (see `automode`): give it the time to change.
+        let blocks = if matches!(self.pump.as_ref(), Some(Pump::V32(m)) if m.phase() == "AA") {
+            automode::BLOCKS_HELD_OVER_AA
+        } else {
+            automode::BLOCKS_HELD
+        };
+        self.pre_v8_ear.as_mut()?.feed_for(line, blocks)
     }
 
     /// The answering modem's automode: keep the offer the caller answered,

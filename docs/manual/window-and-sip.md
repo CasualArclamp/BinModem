@@ -27,6 +27,47 @@ found the reflection. On a two-wire pair the echo decides everything, and
 without the panel you cannot see it. A constellation full of noise looks the
 same if the noise is the line or the echo of this modem.
 
+### The terminal: send menu and character format
+
+Hold Ctrl and right-click the terminal to open the send menu. A right click
+without Ctrl goes to the far end, as before. The menu has these items:
+
+- **Break (250 ms)** and **Hard break (3.5 s)**. On a V.42 call, the modem
+  sends a V.42 BRK message (8.13) with the length. On a call without error
+  control, the modem holds the line at space for the length. On Telnet, both
+  send `IAC BRK`. The transcript records how the modem sent the break.
+- **Control characters**: NUL to US, and DEL, with their names.
+- **Telnet commands** (Telnet only): IP, AO, AYT, EC, EL and NOP.
+
+The button after the font slider shows the character format, for example
+`8N1`. Click it to open a panel with four settings:
+
+- **Data bits**: 7 or 8. With 7, the terminal removes the eighth bit from
+  received characters.
+- **Stop bits**: 1 or 2.
+- **Parity**: None, Even, Odd, Mark or Space. With 7 data bits, the parity
+  bit goes in the eighth bit of sent characters.
+- **Flow control**: None or XON/XOFF. With XON/XOFF, an XOFF (^S) from the far
+  end stops what you type until an XON (^Q). The terminal does not show XON
+  or XOFF.
+
+The line carries 8 bits for each character. Thus the panel greys out the
+formats that need 11 bits, for example 8E1, 8N2 and 7E2. The window keeps the
+settings in `settings.txt` as `char_format` and `flow_control`.
+
+### Dark and light
+
+The key at the right end of the tab strip sets the theme:
+
+- ◑ follows the Windows theme. This is the default.
+- 🌙 is always dark.
+- ☀ is always light.
+
+Click the key to go to the next theme. The window keeps the choice in
+`settings.txt` as `theme system`, `theme dark` or `theme light`. In the light
+theme, the faceplate, the readout, the scopes and the terminal stay dark.
+DialSnoop is always dark.
+
 ## The SIP caller
 
 BinModem now has a SIP caller. It is written as all other parts are: against

@@ -431,11 +431,17 @@ struct Drift {
     recent: VecDeque<f64>,
     /// Each retimed tap's own interpolated reference, while the taps learn.
     scratch: Vec<f64>,
+    /// The rate is held at nothing: see [`EchoCanceller::hold_drift_rate`].
+    rate_held: bool,
+    /// Present with the rate held: see [`NetworkGain`].
+    network: Option<NetworkGain>,
 }
 
 impl Drift {
     fn new() -> Self {
         Self {
+            rate_held: false,
+            network: None,
             whole: 0,
             fraction: 0.0,
             rate: 0.0,
@@ -595,7 +601,9 @@ impl Drift {
                 self.realigning -= 1;
                 kp = kp.max(SLOW.0);
             }
-            self.rate = (self.rate + ki * error).clamp(-MOST_DRIFT, MOST_DRIFT);
+            if !self.rate_held {
+                self.rate = (self.rate + ki * error).clamp(-MOST_DRIFT, MOST_DRIFT);
+            }
             self.fraction += kp * error;
             self.wrap();
         }
@@ -608,6 +616,62 @@ impl Drift {
     fn coast(&mut self) {
         self.fraction += self.rate;
         self.wrap();
+    }
+}
+
+/// Samples the network echo's gain is measured over before it is moved:
+/// a tenth of a second. Its echo is 18 dB under the far end on a SIP trunk,
+/// and over this many samples the measurement still stands five times its
+/// noise when the echo the taps expect has gone.
+const NETWORK_WINDOW: usize = 1_600;
+
+/// How far each measurement moves the gain: half way.
+const NETWORK_STEP: f64 = 0.5;
+
+/// The network echo's gain: how much of what the taps learned is on the line
+/// now.
+///
+/// On a SIP trunk to NIST's time service the echo of this end was 18 dB
+/// under the far end while the far end was silent, and gone once it talked:
+/// what was left then held minus the estimate, whole. Something in the
+/// network takes it out in double talk (an echo canceller of its own, left
+/// on by a plain answer tone), and taps held from training put back an echo
+/// that is not there. The far end's second training sequence came in at
+/// 16.2 dB through them and at 18.9 dB without.
+///
+/// What is left holds the far end and the echo less the estimate. If the
+/// echo is `g` times the estimate, what is left set against the estimate,
+/// over the estimate's power, reads `g` less the gain in use; the far end,
+/// which has nothing to do with this end's signal, adds only noise. So the
+/// gain is moved by that reading, a tenth of a second at a time.
+#[derive(Debug, Clone)]
+struct NetworkGain {
+    gain: f64,
+    score: f64,
+    power: f64,
+    count: usize,
+}
+
+impl NetworkGain {
+    fn new() -> Self {
+        Self { gain: 1.0, score: 0.0, power: 0.0, count: 0 }
+    }
+
+    /// One sample of what is left and of the estimate, before the gain.
+    fn feed(&mut self, left: f64, estimate: f64) {
+        self.score += left * estimate;
+        self.power += estimate * estimate;
+        self.count += 1;
+        if self.count < NETWORK_WINDOW {
+            return;
+        }
+        if self.power > 1e-12 {
+            let off = self.score / self.power;
+            self.gain = (self.gain + NETWORK_STEP * off).clamp(0.0, 1.5);
+        }
+        self.score = 0.0;
+        self.power = 0.0;
+        self.count = 0;
     }
 }
 
@@ -693,7 +757,13 @@ impl EchoCanceller {
         let mut far = Segment::new(delay, taps);
         let reach = self.near.end().max(far.end()) + 1;
         match &self.drift {
-            None => self.history.resize(reach, 0.0),
+            // Never shorter: what [`Self::remember`] kept is what the run
+            // learns from at once.
+            None => {
+                if self.history.len() < reach {
+                    self.history.resize(reach, 0.0);
+                }
+            }
             Some(drift) => {
                 let want = reach + drift.whole.max(0) as usize + HISTORY_SPARE;
                 if self.history.len() < want {
@@ -705,6 +775,20 @@ impl EchoCanceller {
         self.far = Some(far);
         if let Some(drift) = self.drift.as_mut() {
             drift.stale = true;
+        }
+    }
+
+    /// Keep at least `samples` of what went out, ahead of a far run of taps
+    /// placed later.
+    ///
+    /// A run placed `delay` back reads what was sent `delay` samples ago. On
+    /// a SIP trunk that is a second, and a canceller that kept only its near
+    /// taps' worth padded the rest with zeros when the run was placed: the
+    /// run then had nothing to learn from for a second, which was all but
+    /// the end of the training segment.
+    pub fn remember(&mut self, samples: usize) {
+        if self.history.len() < samples + 1 {
+            self.history.resize(samples + 1, 0.0);
         }
     }
 
@@ -750,6 +834,25 @@ impl EchoCanceller {
         } else {
             self.drift = None;
             self.history.truncate(self.span() + 1);
+        }
+    }
+
+    /// While following, keep the drift rate at nothing: follow only the
+    /// fraction of a sample and the jumps.
+    ///
+    /// For a reflection from the far end of a network, where the echo goes
+    /// through the far gateway's clock both ways and comes back at the rate
+    /// it went out. What moves it there is a jitter buffer's slip, which is
+    /// a jump. A rate the loop learns there is the error of its reading, and
+    /// the delay carries it for the rest of the call: on a SIP trunk with a
+    /// second of round trip, the answering modem read -3.7 ppm off its own
+    /// rate signal, with the far end's S over it, and its echo was most of a
+    /// sample out 14 s later and the call retrained.
+    pub fn hold_drift_rate(&mut self) {
+        if let Some(drift) = self.drift.as_mut() {
+            drift.rate_held = true;
+            drift.rate = 0.0;
+            drift.network = Some(NetworkGain::new());
         }
     }
 
@@ -1015,12 +1118,16 @@ impl EchoCanceller {
 
         let unretimed = self.unretimed_echo();
         let estimate = interpolate(&drift.ring, drift.fraction);
+        let gain = drift.network.as_ref().map_or(1.0, |n| n.gain);
         // How the estimate changes along time, from half a sample either side
         // of the delay: along the delay, the other way round.
         let slope = interpolate(&drift.ring, drift.fraction - 0.5)
             - interpolate(&drift.ring, drift.fraction + 0.5);
-        let left = received - unretimed - estimate;
+        let left = received - unretimed - gain * estimate;
         self.meter(received, left);
+        if let Some(network) = drift.network.as_mut() {
+            network.feed(left, estimate);
+        }
 
         drift.recent.pop_back();
         drift.recent.push_front(received - unretimed);
@@ -1315,6 +1422,15 @@ impl EchoFinder {
             reference: 0.0,
             arriving: 0.0,
         }
+    }
+
+    /// Offer one sample of what went out, before anything that comes back
+    /// can be an echo of it worth scoring: on a long line the echo of the
+    /// training segment is a round trip behind its start, and what arrives
+    /// before then is the echo of something else.
+    pub fn remember(&mut self, transmitted: f64) {
+        self.history.pop_back();
+        self.history.push_front(transmitted);
     }
 
     /// Offer one sample of what went out and what came back.

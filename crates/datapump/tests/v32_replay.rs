@@ -116,6 +116,10 @@ fn what_this_end_made_of_it() {
     println!("started at {from:.2} s into it\n");
 
     let mut modem = Modem::new(role, offer, FS);
+    // `V32_ANNEX_A=1` replays a caller in automode, which waits for AC before AA.
+    if std::env::var_os("V32_ANNEX_A").is_some() {
+        modem = modem.annex_a();
+    }
     let mut phase = "";
     let mut status = Status::Negotiating;
     let mut carrier = false;
@@ -136,6 +140,24 @@ fn what_this_end_made_of_it() {
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
         let at = from + i as f64 / FS;
+        // `V32_EVERY=0.1` prints the receiver's own readings that often.
+        if let Some(every) = std::env::var("V32_EVERY").ok().and_then(|v| v.parse::<f64>().ok())
+            && i % ((every * FS) as usize).max(1) == 0
+        {
+            let rx = modem.receiver();
+            println!(
+                "{at:8.3}s    error {:.3} of the gap  turn {:+6.1} deg  drift {:+7.1} ppm  gain {:+5.1} dB  echo now {:+5.1} dB  echo drift {:+6.1} ppm  {} jumps {} stage {:?}",
+                modem.residual_error() / modem.point_spacing(),
+                rx.rotation_degrees(),
+                rx.drift_ppm(),
+                rx.gain_db(),
+                modem.echo_return_loss_now(),
+                modem.echo_drift_ppm(),
+                modem.phase(),
+                modem.echo_jumps(),
+                rx.stage(),
+            );
+        }
         if modem.phase() != phase {
             phase = modem.phase();
             println!("{at:8.3}s  phase {phase}");

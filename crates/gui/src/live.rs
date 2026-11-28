@@ -613,6 +613,8 @@ enum TransferRequest {
 #[derive(Debug)]
 pub struct Session {
     typed: Mutex<Vec<u8>>,
+    /// A break asked for at the terminal, in milliseconds.
+    break_ms: Mutex<Option<u32>>,
     request: Mutex<Option<Request>>,
     /// Whether a line was named before the thread started. See
     /// [`Session::was_asked_for_a_line`].
@@ -742,6 +744,7 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             typed: Mutex::default(),
+            break_ms: Mutex::default(),
             request: Mutex::default(),
             state: Mutex::default(),
             drive: AtomicU32::new(DEFAULT_DRIVE.to_bits()),
@@ -1246,6 +1249,17 @@ impl Session {
 
     fn take_request(&self) -> Option<Request> {
         self.request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    /// Ask the modem to send a break, `ms` long. See `Modem::send_break`.
+    pub fn send_break(&self, ms: u32) {
+        if let Ok(mut slot) = self.break_ms.lock() {
+            *slot = Some(ms);
+        }
+    }
+
+    fn take_break(&self) -> Option<u32> {
+        self.break_ms.lock().ok().and_then(|mut slot| slot.take())
     }
 
     fn take_typed(&self) -> Vec<u8> {
@@ -1902,6 +1916,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     modem.feed_dte(*b);
                 }
             }
+        }
+        // After the typing, so that a break follows what was typed before it.
+        if let Some(ms) = session.take_break() {
+            let note = match modem.send_break(ms) {
+                Ok(how) => format!("break of {ms} ms sent {how}"),
+                Err(why) => format!("break not sent: {why}"),
+            };
+            tx.log(Direction::Note, note);
         }
 
         // V.ARC wants the sound card as it is: both channels, at its own
