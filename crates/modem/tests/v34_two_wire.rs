@@ -223,6 +223,39 @@ fn a_far_echo_a_second_away_is_found() {
     }
 }
 
+/// The SIP trunk of NIST's time service: the far echo is there while the
+/// far end is silent, and a canceller in the network takes it out once the
+/// far end talks. Taps held from training then put back an echo that is not
+/// on the line, 16.5 dB under the far end. The canceller scales them to the
+/// echo that is left, and the call holds its rate with no retrain.
+#[test]
+fn a_far_echo_that_goes_in_double_talk_is_not_put_back() {
+    const ROUND_TRIP: usize = 2 * 8_000;
+    let mut pair = Pair::over(Echo::copy(ROUND_TRIP, 0.15), ROUND_TRIP / 2);
+    for _ in 0..40 {
+        if pair.up() {
+            break;
+        }
+        pair.run(1.0);
+    }
+    assert!(pair.up(), "the caller stopped at {} and the host at {}", pair.caller.line_phase(), pair.host.line_phase());
+    let rates = (pair.caller.rate(), pair.host.rate());
+    let retrains = (pair.caller.retrains(), pair.host.retrains());
+    for path in [&mut pair.own_caller, &mut pair.own_host] {
+        path.echo.shape = vec![0.0];
+    }
+    pair.run(10.0);
+    assert!(pair.up(), "the caller is in {} and the host in {}", pair.caller.line_phase(), pair.host.line_phase());
+    assert_eq!((pair.caller.rate(), pair.host.rate()), rates, "the rates fell");
+    assert_eq!((pair.caller.retrains(), pair.host.retrains()), retrains, "the call retrained");
+    pair.at_caller.clear();
+    for b in b"still here" {
+        pair.host.feed_dte(*b);
+    }
+    pair.run(4.0);
+    assert_eq!(String::from_utf8_lossy(&pair.at_caller), "still here");
+}
+
 /// One cable, as `modem-loop` and two windows use it: both ends send into
 /// it and both hear the sum, a crossing later. The VB-Audio cable here is
 /// 180 ms long, and with the canceller a call on it connects at 33 600.

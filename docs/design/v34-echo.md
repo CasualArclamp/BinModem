@@ -103,6 +103,31 @@ connects at 33 600 bit/s. Before the change, neither end found it.
 
 V.32 had the same faults. PR 106 corrected them for V.32.
 
+#### Double talk
+
+On the SIP trunk to NIST the far echo was 18 dB down while NIST was
+silent. When NIST talked, the echo went away: a canceller in the network
+took it out. Taps that stay as training made them then put back an echo
+that is not on the line.
+
+After training, on a far echo 100 ms or more back, V.34 now does what V.32
+does:
+
+- The canceller follows the jumps of the echo, and holds its drift rate at
+  zero (`EchoCanceller::hold_drift_rate`). The echo of a network does not
+  drift by clocks.
+- `NetworkGain` scales the far taps to the echo that is still there. Each
+  0.1 s it reads, by correlation, how much of the expected echo is on the
+  line.
+
+The first gain rule moved the gain half way to each reading. With the far
+end 16 dB louder than the echo, one reading has noise of 0.15 to 0.2. At
+33 600 bit/s that noise took signal to noise from 53 dB to between 28 dB
+and 48 dB. Now the gain holds still until four readings in a row are more
+than 0.5 from it on the same side. It then goes to their mean, or to 0 or
+1 if the mean is within 0.25 of them. An echo that goes away is found in
+0.4 s. This rule is in `dsp`, so V.32 uses it too.
+
 ### A line with no echo
 
 A canceller that trained on a line with no echo learned noise. If it
@@ -154,4 +179,5 @@ or phase 4 stopped.
 `crates/modem/tests/v34_two_wire.rs`: an echo as loud as the far end, an
 echo at other distances from the far end, one cable of 62 ms and of 178 ms,
 a faint echo, a hybrid, a line with no echo, an echo that moves, and a far
-echo on a SIP trunk with a round trip of 1 s.
+echo on a SIP trunk with a round trip of 1 s, and a far echo that goes away
+in double talk.
