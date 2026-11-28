@@ -595,11 +595,20 @@ struct Calm {
     /// Where the strongest bin was last said to be.
     peak_hz: f64,
     hz_per_bin: f64,
+    /// The receiver's signal to noise and how far it misses by, as the
+    /// call card's bar shows them: averaged a little, so the bar does not
+    /// flicker with each symbol.
+    snr_db: Option<f32>,
+    reception: Option<f64>,
 }
 
 impl Calm {
     /// Seconds a figure takes to come most of the way to a new value.
     const SECONDS: f32 = 1.0;
+
+    /// The same for the call card's bar, which has to keep up with a call
+    /// going bad: a small amount of averaging only.
+    const BAR_SECONDS: f32 = 0.4;
 
     /// Take a frame in; what the averaged spectrum says of itself.
     fn update(&mut self, f: &Frame, dt: f32) -> Option<scopes::Measured> {
@@ -612,6 +621,18 @@ impl Calm {
             *was = if fresh || (now - *was).abs() > 10.0 { now } else { *was + (now - *was) * share };
         };
         follow(&mut self.level_db, f.rx_level_db, fresh);
+        // A reading that comes or goes starts again from the new one.
+        let bar = 1.0 - (-dt / Self::BAR_SECONDS).exp();
+        self.snr_db = match (self.snr_db, f.snr_db) {
+            (Some(was), Some(now)) if now.is_finite() && was.is_finite() => Some(was + (now - was) * bar),
+            (_, now) => now,
+        };
+        self.reception = match (self.reception, f.reception) {
+            (Some(was), Some(now)) if now.is_finite() && was.is_finite() => {
+                Some(was + (now - was) * f64::from(bar))
+            }
+            (_, now) => now,
+        };
         if let Some(wave) = scopes::wave(&f.waveform) {
             follow(&mut self.rms_db, wave.rms_db, fresh);
             follow(&mut self.peak_db, wave.peak_db, fresh);
@@ -5352,7 +5373,9 @@ impl ScopeApp {
         // be sent at, the downstream's ladder for a caller and the upstream's
         // for a server.
         let v92 = f.pcm.filter(|_| f.modulation == "V.92").zip(f.bit_rate);
-        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+        // The bar's two readings, averaged a little (see `Calm`).
+        let (reception, snr_db) = (self.calm.reception, self.calm.snr_db);
+        let (merit, merit_colour, fill, tick, left, right) = match (reception, f.symbol_quality()) {
             _ if v92.is_some() => {
                 let (levels, rate) = v92.unwrap_or_default();
                 let along = (rate.saturating_sub(levels.slowest) as f32
@@ -5394,13 +5417,7 @@ impl ScopeApp {
             }
             (Some(miss), _) if miss > 0.0 => {
                 let db = 20.0 * (0.25 / miss).log10();
-                let c = if db < 0.0 {
-                    theme::bad()
-                } else if db < 3.0 {
-                    theme::warn()
-                } else {
-                    theme::good()
-                };
+                let c = margin_colour(db as f32);
                 (
                     Some(format!("{db:+5.1} dB")),
                     c,
@@ -5433,40 +5450,48 @@ impl ScopeApp {
             // of its grids can use, which is 80 dB for sixteen million
             // points. How good is good depends on the grid, so the colour
             // only says whether there is a line at all.
-            _ if f.snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
-                let db = f.snr_db.unwrap_or(0.0);
-                let c = if db >= 12.0 {
-                    theme::good()
-                } else if db >= 6.0 {
-                    theme::warn()
-                } else {
-                    theme::bad()
+            // Both of these have a margin point when the grid is a QAM one:
+            // the tick, and the colour is the room above it.
+            _ if snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
+                let db = snr_db.unwrap_or(0.0);
+                let point = margin_point_db(f.tones);
+                let c = match point {
+                    Some(point) => margin_colour(db - point),
+                    None if db >= 12.0 => theme::good(),
+                    None if db >= 6.0 => theme::warn(),
+                    None => theme::bad(),
                 };
                 (
                     Some(format!("{db:.1} dB")),
                     c,
                     (db / 80.0).clamp(0.0, 1.0),
-                    None,
-                    format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
-                    "scale 0 - 80 dB",
+                    point.map(|p| (p / 80.0).clamp(0.0, 1.0)),
+                    match point {
+                        Some(point) => over_the_margin_point(db - point),
+                        None => format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
+                    },
+                    if point.is_some() { "tick: margin point" } else { "scale 0 - 80 dB" },
                 )
             }
-            _ if f.snr_db.is_some() => {
-                let db = f.snr_db.unwrap_or(0.0);
-                let c = if db >= 20.0 {
-                    theme::good()
-                } else if db >= 12.0 {
-                    theme::warn()
-                } else {
-                    theme::bad()
+            _ if snr_db.is_some() => {
+                let db = snr_db.unwrap_or(0.0);
+                let point = margin_point_db(f.tones).filter(|_| f.symbol_label != "2FSK");
+                let c = match point {
+                    Some(point) => margin_colour(db - point),
+                    None if db >= 20.0 => theme::good(),
+                    None if db >= 12.0 => theme::warn(),
+                    None => theme::bad(),
                 };
                 (
                     Some(format!("{db:.1} dB")),
                     c,
                     (db / 60.0).clamp(0.0, 1.0),
-                    None,
-                    format!("decisions {db:.1} dB clear of the error"),
-                    "scale 0 - 60 dB",
+                    point.map(|p| (p / 60.0).clamp(0.0, 1.0)),
+                    match point {
+                        Some(point) => over_the_margin_point(db - point),
+                        None => format!("decisions {db:.1} dB clear of the error"),
+                    },
+                    if point.is_some() { "tick: margin point" } else { "scale 0 - 60 dB" },
                 )
             }
             _ => {
@@ -5517,7 +5542,7 @@ impl ScopeApp {
             "Left: what the receiver is slicing. Right: what it has in hand. On a \
              constellation that is the margin: how far it misses by, against the quarter \
              of the gap between points at which this modem gives the rate up, in decibels. \
-             Under 0 dB it retrains; within 3 dB a burst of noise will make it.",
+             Under 0 dB it retrains; within 3 dB a burst of noise will make it. Where the              receiver gives a signal to noise instead, the tick is the margin point: the              ratio at which the error is that same quarter of the gap, for this many points.",
         );
 
         let (rect, _) =
@@ -6924,6 +6949,35 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
 }
 
 /// A small folder button, true when clicked.
+/// The margin point of a QAM grid: the signal to noise, in decibels, at
+/// which the error is a quarter of the gap between neighbouring points.
+///
+/// At unit mean power a square grid of `points` has a gap of
+/// sqrt(6 / (points - 1)), so the error at the margin point is a quarter of
+/// that. It is the same line the receivers that know their own gap retrain
+/// at. None under four points, where there is no QAM grid.
+fn margin_point_db(points: usize) -> Option<f32> {
+    (points >= 4).then(|| 20.0 * 4f32.log10() + 10.0 * ((points as f32 - 1.0) / 6.0).log10())
+}
+
+/// The line under the bar for a margin in decibels.
+fn over_the_margin_point(db: f32) -> String {
+    let side = if db < 0.0 { "under" } else { "over" };
+    format!("{:.1} dB {side} the margin point", db.abs())
+}
+
+/// The colour of a margin in decibels: under 0 dB a retrain, within 3 dB a
+/// burst of noise from one.
+fn margin_colour(db: f32) -> Color32 {
+    if db < 0.0 {
+        theme::bad()
+    } else if db < 3.0 {
+        theme::warn()
+    } else {
+        theme::good()
+    }
+}
+
 fn browse_button(ui: &mut egui::Ui, hover: &str) -> bool {
     ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0))).on_hover_text(hover).clicked()
 }
@@ -6957,6 +7011,23 @@ fn rate_box(ui: &mut egui::Ui, id: &str, value: &mut u32, rates: &[u32]) {
 
 /// Compile-time reminder that the engine and UI agree on the FFT size.
 const _: () = assert!(FFT_SIZE / 2 == SPECTRUM_BINS);
+
+#[cfg(test)]
+mod margin_tests {
+    use super::margin_point_db;
+
+    /// The margin point is where the error is a quarter of the gap: 4QAM's
+    /// gap at unit power is sqrt(2), 16QAM's is 2/sqrt(10).
+    #[test]
+    fn the_margin_point_is_a_quarter_of_the_gap() {
+        assert_eq!(margin_point_db(2), None);
+        let at = |gap: f32| -20.0 * (0.25 * gap).log10();
+        assert!((margin_point_db(4).unwrap() - at(2f32.sqrt())).abs() < 1e-3);
+        assert!((margin_point_db(16).unwrap() - at(2.0 / 10f32.sqrt())).abs() < 1e-3);
+        // 512 points: about 31.34 dB.
+        assert!((margin_point_db(512).unwrap() - 31.34).abs() < 0.01);
+    }
+}
 
 #[cfg(test)]
 mod modulation_tests {
