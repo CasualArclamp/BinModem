@@ -232,6 +232,13 @@ pub struct Frame {
     /// alone which of the two is being looked at. A number for it is the
     /// difference between suspecting the canceller and knowing.
     pub echo_loss_db: Option<f64>,
+    /// What the echo canceller took out at the end of training, in decibels.
+    ///
+    /// In data the far end is in what arrives and in what is left, so
+    /// [`Self::echo_loss_db`] reads near 0 dB on a line whose echo is far
+    /// below the far end, however well the canceller works. This is the
+    /// figure that means something then.
+    pub echo_trained_db: Option<f64>,
     /// How far the receiver is missing by, as a fraction of the distance
     /// between neighbouring constellation points. Half is where a decision is
     /// as likely to be wrong as right.
@@ -310,6 +317,7 @@ impl Frame {
             tx_bit_rate: None,
             rx_bytes: 0,
             echo_loss_db: None,
+            echo_trained_db: None,
             reception: None,
             pcm: None,
             fax_phase: None,

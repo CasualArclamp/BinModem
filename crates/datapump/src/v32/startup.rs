@@ -2830,6 +2830,10 @@ const ECHO_SPAN_MS: f64 = 8.0;
 /// see [`EchoCanceller::hold_drift_rate`].
 const NETWORK_ECHO_MS: f64 = 100.0;
 
+/// How far past the measured round trip the search for a network reflection
+/// goes, in milliseconds: see [`Modem::begin_search`].
+const NETWORK_SEARCH_PAST_MS: f64 = 100.0;
+
 /// How much line the second run of taps covers, in milliseconds.
 ///
 /// A network reflection is one path among many rather than one impedance step,
@@ -3062,8 +3066,16 @@ impl Modem {
     /// on one where the returning signal is weak enough to slow the detector
     /// down, which is the error the subtraction models least well.
     fn begin_search(&mut self) {
+        let network = (NETWORK_ECHO_MS * self.fs / 1000.0) as usize;
+        let line = (self.startup.line_round_trip() as f64 * self.fs / super::BAUD) as usize;
         let first = self.echo.span();
-        let last = self.round_trip_samples() + self.far_taps();
+        // On a network line the measurement can also err short. On a live
+        // call to NIST over SIP the echo came back at 958 ms. The round trip
+        // came out near that, and a few milliseconds less put the echo
+        // outside the search: "reflection not found". So the search goes
+        // [`NETWORK_SEARCH_PAST_MS`] past the measurement there.
+        let past = if line >= network { (NETWORK_SEARCH_PAST_MS * self.fs / 1000.0) as usize } else { 0 };
+        let last = self.round_trip_samples() + self.far_taps() + past;
         if last <= first {
             return;
         }
@@ -3073,8 +3085,6 @@ impl Modem {
         // can be back, for half of the segment it gets beyond its round
         // trip; the other half is for the taps placed then to converge. A
         // shorter line scores from the start, over half the segment.
-        let network = (NETWORK_ECHO_MS * self.fs / 1000.0) as usize;
-        let line = (self.startup.line_round_trip() as f64 * self.fs / super::BAUD) as usize;
         let (listen_from, scored) = if line >= network {
             // The far taps learn from the moment they are placed, from what
             // was sent up to `last` samples before: a second, on a SIP

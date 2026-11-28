@@ -2654,6 +2654,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
+                f.echo_trained_db = modem.echo_return_loss();
                 f.reception = modem.reception();
                 f.pcm = modem.pcm_levels().map(|(levels, sending, (slowest, fastest))| telemetry::PcmLevels {
                     count: levels.count,
