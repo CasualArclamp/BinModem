@@ -110,6 +110,13 @@ pub struct Handshake {
     /// never to make the offer: 6.3.1.1 settles at 1200 unless both ends ask
     /// for more.
     ceiling: Rate,
+    /// Calling: seconds into the handshake at which this end began its
+    /// double dibit, and the seconds from then until the far end's own
+    /// double dibit was heard. The answerer sends its double dibit when it
+    /// detects ours (6.3.1.1.2 b), so that is the line's round trip, plus a
+    /// detection time. V.42's detection phase needs it on a SIP line.
+    offer_sent_at: Option<f64>,
+    round_trip: Option<f64>,
 }
 
 impl Handshake {
@@ -131,6 +138,8 @@ impl Handshake {
             held: 0.0,
             offered_2400: false,
             ceiling,
+            offer_sent_at: None,
+            round_trip: None,
         }
     }
 
@@ -242,8 +251,11 @@ impl Handshake {
             State::OfferingDoubleDibit => {
                 tx.set_rate(Rate::Bps1200);
                 tx.set_signal(Signal::DoubleDibit);
+                if self.role == Role::Calling && self.offer_sent_at.is_none() {
+                    self.offer_sent_at = Some(self.total);
+                }
                 if heard == Pattern::DoubleDibit && self.wants_2400() {
-                    self.offered_2400 = true;
+                    self.far_offered();
                 }
                 if self.elapsed >= timing::DOUBLE_DIBIT {
                     self.enter(State::Scrambled1200);
@@ -254,7 +266,7 @@ impl Handshake {
                 tx.set_rate(Rate::Bps1200);
                 tx.set_signal(Signal::ScrambledOnes);
                 if heard == Pattern::DoubleDibit && self.wants_2400() {
-                    self.offered_2400 = true;
+                    self.far_offered();
                 }
                 if self.offered_2400 {
                     self.enter(State::Rising2400);
@@ -308,6 +320,22 @@ impl Handshake {
         self.state = state;
         self.elapsed = 0.0;
         self.held = 0.0;
+    }
+
+    /// The far end has offered 2400. For a caller that offered first, the
+    /// time since its own offer is the round trip.
+    fn far_offered(&mut self) {
+        if !self.offered_2400 && self.role == Role::Calling {
+            self.round_trip = self.offer_sent_at.map(|at| self.total - at);
+        }
+        self.offered_2400 = true;
+    }
+
+    /// Calling: the line's round trip in seconds, from this end's double
+    /// dibit to the far end's answer to it. None until the far end answers,
+    /// and on a connection at 1200, where no double dibit comes back.
+    pub fn round_trip(&self) -> Option<f64> {
+        self.round_trip
     }
 
     /// Whether this end will ask for 2400 at all.
@@ -397,6 +425,11 @@ impl Modem {
 
     pub fn phase(&self) -> &'static str {
         self.hs.phase()
+    }
+
+    /// See [`Handshake::round_trip`].
+    pub fn round_trip(&self) -> Option<f64> {
+        self.hs.round_trip()
     }
 
     pub fn rate(&self) -> Rate {

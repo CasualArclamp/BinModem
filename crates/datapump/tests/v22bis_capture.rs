@@ -78,7 +78,12 @@ fn replay() {
     }
     let heard = &heard[start..];
 
-    let mut modem = Modem::new(Role::Calling, FS);
+    // `V22_CEILING=1200` replays as a caller that never offers 2400.
+    let ceiling = match std::env::var("V22_CEILING").as_deref() {
+        Ok("1200") => datapump::v22bis::Rate::Bps1200,
+        _ => datapump::v22bis::Rate::Bps2400,
+    };
+    let mut modem = Modem::at_most(Role::Calling, ceiling, FS);
     let mut last_phase = "";
     let mut last_pattern = datapump::v22bis::Pattern::None;
     let mut last = Status::Negotiating;
@@ -132,6 +137,7 @@ fn replay() {
         }
     }
 
+    println!("round trip measured in the handshake: {:?} s", modem.round_trip());
     println!("\nfinal: {:?}, {} bytes recovered", modem.status(), bytes.len());
     let text: String = bytes
         .iter()

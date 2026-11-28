@@ -307,3 +307,29 @@ fn without_a_ceiling_the_pair_still_reach_2400() {
     assert_eq!(calling.status(), Status::Connected(Rate::Bps2400));
     assert_eq!(answering.status(), Status::Connected(Rate::Bps2400));
 }
+
+#[test]
+fn the_calling_end_measures_the_round_trip() {
+    // 0.5 s each way, as on a SIP trunk to another continent. The answerer
+    // answers the caller's double dibit with its own, so the caller can time
+    // the line: V.42's detection phase needs that, or its T400 runs out
+    // before the answer to its ODP can come back.
+    use datapump::v22bis::handshake::Modem;
+    use std::collections::VecDeque;
+    const FS: f64 = 16_000.0;
+    let delay = (0.5 * FS) as usize;
+    let mut calling = Modem::new(Role::Calling, FS);
+    let mut answering = Modem::new(Role::Answering, FS);
+    let mut to_answering: VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+    let mut to_calling: VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+    for _ in 0..(12.0 * FS) as usize {
+        let c = calling.step(to_calling.pop_front().unwrap());
+        let a = answering.step(to_answering.pop_front().unwrap());
+        to_answering.push_back(c);
+        to_calling.push_back(a);
+    }
+    assert_eq!(calling.status(), Status::Connected(Rate::Bps2400));
+    let rtt = calling.round_trip().expect("no round trip measured");
+    assert!((1.0..1.3).contains(&rtt), "round trip {rtt:.3} s on a 1.0 s line");
+    assert_eq!(answering.round_trip(), None);
+}
