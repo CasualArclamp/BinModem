@@ -345,10 +345,20 @@ impl ReviewPane {
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open recording").clicked()
-                && let Some(chosen) = rfd::FileDialog::new().add_filter("recordings", &["wav"]).pick_file()
-            {
-                self.open(&chosen);
+            if ui.button("Open recording").clicked() {
+                #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+                let picked = rfd::FileDialog::new()
+                    .add_filter("recordings", &["wav"])
+                    .pick_file();
+                #[cfg(all(target_os = "windows", target_arch = "x86"))]
+                let picked = crate::xp_compat::pick_open_file(
+                    "Open recording",
+                    &[("recordings (*.wav)", "*.wav")],
+                    None,
+                );
+                if let Some(chosen) = picked {
+                    self.open(&chosen);
+                }
             }
             if let Some((path, _)) = &self.loading {
                 ui.spinner();

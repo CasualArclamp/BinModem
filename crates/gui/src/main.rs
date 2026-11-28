@@ -36,6 +36,9 @@
 // `parent_console` gives back the output a shell expects.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(all(target_os = "windows", target_arch = "x86"))]
+mod xp_compat;
+
 mod answer;
 mod app;
 mod bbs;

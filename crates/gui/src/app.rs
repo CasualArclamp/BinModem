@@ -3922,10 +3922,18 @@ impl ScopeApp {
                             );
                             // Browsing works with no call up: choosing the
                             // file first is the natural order.
-                            if browse_button(ui, "Choose a file to send")
-                                && let Some(chosen) = rfd::FileDialog::new().pick_file()
-                            {
-                                self.send_path = chosen.display().to_string();
+                            if browse_button(ui, "Choose a file to send") {
+                                #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+                                let picked = rfd::FileDialog::new().pick_file();
+                                #[cfg(all(target_os = "windows", target_arch = "x86"))]
+                                let picked = crate::xp_compat::pick_open_file(
+                                    "Choose a file to send",
+                                    &[],
+                                    None,
+                                );
+                                if let Some(chosen) = picked {
+                                    self.send_path = chosen.display().to_string();
+                                }
                             }
                             if ui.add_enabled(online, egui::Button::new("Send")).clicked() && !self.send_path.trim().is_empty() {
                                 session.send_file(self.send_path.trim().into());
@@ -3938,10 +3946,16 @@ impl ScopeApp {
                                     .desired_width(300.0)
                                     .hint_text("directory to keep files in"),
                             );
-                            if browse_button(ui, "Choose the folder received files go in")
-                                && let Some(chosen) = rfd::FileDialog::new().pick_folder()
-                            {
-                                self.receive_dir = chosen.display().to_string();
+                            if browse_button(ui, "Choose the folder received files go in") {
+                                #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+                                let picked = rfd::FileDialog::new().pick_folder();
+                                #[cfg(all(target_os = "windows", target_arch = "x86"))]
+                                let picked = crate::xp_compat::pick_folder(
+                                    "Choose the folder received files go in",
+                                );
+                                if let Some(chosen) = picked {
+                                    self.receive_dir = chosen.display().to_string();
+                                }
                             }
                             if ui
                                 .add_enabled(online, egui::Button::new("Receive"))

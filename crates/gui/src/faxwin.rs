@@ -526,7 +526,7 @@ impl Zoom {
 
     /// Where the page was shown, for the next frame's wheel, and the zoom
     /// in the corner.
-    fn end(&mut self, ui: &egui::Ui, inner: egui::Rect, offset: egui::Vec2, level: i32) {
+    fn end(&mut self, ui: &mut egui::Ui, inner: egui::Rect, offset: egui::Vec2, level: i32) {
         self.inner = Some(inner);
         self.offset = offset;
         let (n, m) = Self::factors(level);
@@ -1780,7 +1780,7 @@ impl Fax {
         if let Some(scan) = self.scan.as_ref() {
             match self.incoming.as_ref() {
                 Some(page) => {
-                    pages.push((scan.sheet, &page.lines, page.resolution, self.incoming_picture.as_deref()));
+                    pages.push((scan.sheet, &page.lines, scan.resolution, self.incoming_picture.as_deref()));
                 }
                 None if !scan.lines.is_empty() => {
                     pages.push((scan.sheet, &scan.lines, scan.resolution, scan.picture()));
@@ -2180,26 +2180,48 @@ impl Fax {
         if step != 0 {
             self.look(step);
         }
-        if save
-            && let Some(chosen) = rfd::FileDialog::new()
+        if save {
+            let default_name = match self.in_view() {
+                Some((sheet, _, _)) if pages > 1 => format!("fax-{sheet}.pdf"),
+                _ => "fax.pdf".to_owned(),
+            };
+            #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+            let picked = rfd::FileDialog::new()
                 .add_filter("PDF", &["pdf"])
                 .add_filter("PNG picture", &["png"])
-                .set_file_name(match self.in_view() {
-                    Some((sheet, _, _)) if pages > 1 => format!("fax-{sheet}.pdf"),
-                    _ => "fax.pdf".to_owned(),
-                })
-                .save_file()
-        {
-            self.save(&chosen);
+                .set_file_name(&default_name)
+                .save_file();
+            #[cfg(all(target_os = "windows", target_arch = "x86"))]
+            let picked = crate::xp_compat::pick_save_file(
+                "Save fax",
+                Some(&default_name),
+                &[("PDF", "*.pdf"), ("PNG picture", "*.png")],
+                None,
+            );
+            if let Some(chosen) = picked {
+                self.save(&chosen);
+            }
         }
-        if save_all
-            && let Some(chosen) = rfd::FileDialog::new()
+        if save_all {
+            #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+            let picked = rfd::FileDialog::new()
                 .add_filter("PDF, every page in one", &["pdf"])
                 .add_filter("PNG pictures, a page each", &["png"])
                 .set_file_name("fax.pdf")
-                .save_file()
-        {
-            self.save_all(&chosen);
+                .save_file();
+            #[cfg(all(target_os = "windows", target_arch = "x86"))]
+            let picked = crate::xp_compat::pick_save_file(
+                "Save all fax pages",
+                Some("fax.pdf"),
+                &[
+                    ("PDF, every page in one", "*.pdf"),
+                    ("PNG pictures, a page each", "*.png"),
+                ],
+                None,
+            );
+            if let Some(chosen) = picked {
+                self.save_all(&chosen);
+            }
         }
     }
 
@@ -2474,14 +2496,27 @@ impl Fax {
                              the size it is printed -- up to 50 of its pages",
                         )
                         .clicked()
-                        && let Some(chosen) = rfd::FileDialog::new()
+                    {
+                        #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+                        let picked = rfd::FileDialog::new()
                             .add_filter("pictures and PDFs", &["png", "jpg", "jpeg", "bmp", "gif", "pdf"])
                             .add_filter("PDFs", &["pdf"])
                             .add_filter("pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
-                            .pick_file()
-                    {
-                        self.load(&chosen);
-                        self.view = View::Sending;
+                            .pick_file();
+                        #[cfg(all(target_os = "windows", target_arch = "x86"))]
+                        let picked = crate::xp_compat::pick_open_file(
+                            "Choose picture or PDF",
+                            &[
+                                ("pictures and PDFs", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.pdf"),
+                                ("PDFs", "*.pdf"),
+                                ("pictures", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"),
+                            ],
+                            None,
+                        );
+                        if let Some(chosen) = picked {
+                            self.load(&chosen);
+                            self.view = View::Sending;
+                        }
                     }
                     let shown = std::path::Path::new(&self.path)
                         .file_name()
@@ -2709,23 +2744,36 @@ impl Fax {
         if let Some(i) = open {
             self.open(i, 0);
         }
-        if let Some(i) = save
-            && let Some(chosen) = rfd::FileDialog::new()
+        if let Some(i) = save {
+            #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+            let picked = rfd::FileDialog::new()
                 .add_filter("PDF, every page in one", &["pdf"])
                 .add_filter("PNG pictures, a page each", &["png"])
                 .set_file_name("fax.pdf")
-                .save_file()
-            && let Some(call) = self.calls.get(i)
-        {
-            let pages: Vec<Kept<'_>> = call
-                .received
-                .iter()
-                .map(|(sheet, page)| {
-                    let picture = call.pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
-                    (*sheet, page.lines.as_slice(), page.resolution, picture)
-                })
-                .collect();
-            self.saved = Some(save_pages(&pages, &chosen));
+                .save_file();
+            #[cfg(all(target_os = "windows", target_arch = "x86"))]
+            let picked = crate::xp_compat::pick_save_file(
+                "Save received fax",
+                Some("fax.pdf"),
+                &[
+                    ("PDF, every page in one", "*.pdf"),
+                    ("PNG pictures, a page each", "*.png"),
+                ],
+                None,
+            );
+            if let Some(chosen) = picked
+                && let Some(call) = self.calls.get(i)
+            {
+                let pages: Vec<Kept<'_>> = call
+                    .received
+                    .iter()
+                    .map(|(sheet, page)| {
+                        let picture = call.pictures.iter().find(|(s, _)| s == sheet).map(|(_, p)| p.as_ref());
+                        (*sheet, page.lines.as_slice(), page.resolution, picture)
+                    })
+                    .collect();
+                self.saved = Some(save_pages(&pages, &chosen));
+            }
         }
         if let Some(saved) = &self.saved {
             ui.label(RichText::new(saved).small().color(crate::theme::ink(dim)));

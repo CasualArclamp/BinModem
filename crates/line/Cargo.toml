@@ -8,8 +8,10 @@ license.workspace    = true
 workspace = true
 
 [dependencies]
+dsp = { path = "../dsp" }
+
+[target.'cfg(not(all(target_os = "windows", target_arch = "x86")))'.dependencies]
 cpal = "0.18.2"
-dsp  = { path = "../dsp" }
 
 # On Linux, go through the sound server where there is one. cpal's ALSA host
 # opens the hardware itself, which takes the device away from PipeWire or
@@ -20,5 +22,5 @@ dsp  = { path = "../dsp" }
 # PipeWire's own nodes, virtual loopbacks among them, beside the hardware; it
 # needs libpipewire's development files (`libpipewire-0.3-dev`) and libclang
 # to build.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(all(target_os = "linux", not(all(target_os = "windows", target_arch = "x86"))))'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio", "pipewire"] }
