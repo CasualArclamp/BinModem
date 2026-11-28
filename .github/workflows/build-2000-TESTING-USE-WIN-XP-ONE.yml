@@ -30,26 +30,40 @@ jobs:
           $release = Invoke-RestMethod "https://api.github.com/repos/Chuyu-Team/YY-Thunks/releases/latest"
           $asset = $release.assets | Where-Object { $_.name -like "*Objs.zip" } | Select-Object -First 1
           if (-not $asset) {
-            throw "Could not find YY-Thunks-Objs.zip in latest release."
+            throw "Could not find YY-Thunks Objs archive in latest release."
           }
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "yy-thunks.zip"
           Expand-Archive -Path "yy-thunks.zip" -DestinationPath "yy-thunks" -Force
           $obj = Get-ChildItem -Path "yy-thunks" -Recurse -File |
             Where-Object {
               $_.FullName -match "[\\/](x86)[\\/]" -and
-              $_.Name -match "^YY_Thunks_for_Win(2K|2000).*\.obj$"
+              $_.Name -match "^YY_Thunks_for_Win2K\.obj$"
             } |
             Select-Object -First 1
           if (-not $obj) {
-            throw "Windows 2000 YY-Thunks .obj for x86 not found in archive."
+            throw "YY_Thunks_for_Win2K.obj for x86 not found in archive."
           }
           "YY_THUNKS_OBJ=$($obj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using YY-Thunks object: $($obj.FullName)"
 
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.00"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
+
+      - name: Patch PE Subsystem Version to 5.00
+        shell: pwsh
+        run: |
+          foreach ($name in "binmodem", "dialsnoop") {
+            $exe = "target/i686-pc-windows-msvc/release/$name.exe"
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $optHeader = $peOffset + 0x18
+            # MajorSubsystemVersion (+0x30) and MinorSubsystemVersion (+0x32)
+            [BitConverter]::GetBytes([uint16]5).CopyTo($bytes, $optHeader + 0x30)
+            [BitConverter]::GetBytes([uint16]0).CopyTo($bytes, $optHeader + 0x32)
+            [IO.File]::WriteAllBytes($exe, $bytes)
+          }
 
       - name: Audit Windows 2000 Imports
         shell: pwsh
@@ -101,7 +115,8 @@ jobs:
 
           foreach ($name in "binmodem", "dialsnoop") {
             $exe = "target/i686-pc-windows-msvc/release/$name.exe"
-            Write-Host "=== Imports for $name.exe ==="
+            Write-Host "=== Headers & Imports for $name.exe ==="
+            & $dumpbin.FullName /headers $exe | Select-String -Pattern "subsystem version|operating system version"
             $imports = & $dumpbin.FullName /imports $exe
             $imports | Write-Host
 
@@ -126,10 +141,6 @@ jobs:
             }
           }
 
-      # "Standalone" as a measurement rather than a claim. Static CRT linking
-      # keeps the only imports to Windows itself; if that ever slips, the
-      # binary starts naming vcruntime140.dll / ucrtbase.dll and fails on a
-      # clean machine without Visual C++ redistributables.
       - name: No C runtime dependency
         shell: pwsh
         run: |
