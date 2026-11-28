@@ -38,7 +38,7 @@ mod receiver;
 pub mod startup;
 pub mod trellis;
 
-pub use receiver::Receiver;
+pub use receiver::{PREAMBLE_WINDOW, Preamble, Receiver};
 
 use dsp::{Nco, rrc_at};
 
@@ -703,6 +703,15 @@ impl Transmitter {
             // 5.2.3: the scrambler starts from all zeros for the segment.
             self.scrambler.reset();
         }
+    }
+
+    /// Start the scrambler again from all zeros.
+    ///
+    /// V.32bis 8: in a rate renegotiation "the initial state of the scrambler
+    /// shall be all zeros" for the rate signal. The start-up's rate signals
+    /// run on from TRN instead, so [`Self::set_signal`] does not do this.
+    pub fn restart_scrambler(&mut self) {
+        self.scrambler.reset();
     }
 
     /// Symbols sent of the rate sequence now going out.

@@ -3208,11 +3208,16 @@ impl Modem {
     /// it. Ignored by the modulations that have no such procedure.
     ///
     /// V.34 has a rate renegotiation for this (11.6), and that is what it is
-    /// asked for: two steps below the rate arriving now.
+    /// asked for: two steps below the rate arriving now. V.32bis has one too
+    /// (clause 8), and it is asked for one step below. A V.32 far end has no
+    /// renegotiation, and the pump does a full retrain instead.
     pub fn ask_for_retrain(&mut self) {
         let arriving = self.rate;
         match self.pump.as_mut() {
-            Some(Pump::V32(m)) => m.ask_for_retrain(),
+            Some(Pump::V32(m)) => {
+                let lower = v32::startup::EVERY_RATE.iter().copied().find(|&r| r < arriving).unwrap_or(4800);
+                m.renegotiate(lower);
+            }
             Some(Pump::V34(m)) => {
                 m.renegotiate(((arriving / 2400) as u8).saturating_sub(2).max(1));
             }
@@ -3410,7 +3415,7 @@ impl Modem {
     /// the two ends keep agreeing on, and is worth seeing on the panel.
     pub fn retrains(&self) -> u32 {
         match self.pump.as_ref() {
-            Some(Pump::V32(m)) => m.retrains(),
+            Some(Pump::V32(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V34(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V90(m)) => m.renegotiations() + m.retrains(),
             Some(Pump::V90Server(m)) => m.modem().renegotiations() + m.modem().retrains(),

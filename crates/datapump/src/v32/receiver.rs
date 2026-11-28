@@ -48,6 +48,81 @@ use super::{
     WITHIN_4800, bits_per_symbol, coding_for, point_spacing_at, signal_point,
 };
 
+/// Which of the two preambles of V.32bis clause 8 a rate renegotiation opens
+/// with.
+///
+/// The calling modem sends AA for 56T and then CC for 8T: one state, sent
+/// again and again. The answering modem sends AC for 56T and then CA for 8T:
+/// two opposite states, one after the other. Each end listens for the far
+/// end's preamble only, so its own echo is not a preamble to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preamble {
+    /// AA then CC, from the calling modem.
+    Repeated,
+    /// AC then CA, from the answering modem.
+    Alternating,
+}
+
+/// How far a symbol may land from one of the four states and still count as
+/// that state, at unit power.
+///
+/// The four states are on the unit circle, 1.41 apart, so 0.4 keeps each one
+/// well clear of its neighbours. It also refuses most of the points of a
+/// dense constellation, which do not sit on the states.
+const NEAR_A_STATE: f64 = 0.4;
+
+/// The symbols the watch looks back over.
+pub const PREAMBLE_WINDOW: u32 = 32;
+
+/// The last [`PREAMBLE_WINDOW`] symbols, as the two preambles see them.
+///
+/// The watch looks at the equalised symbols and not at tones. A tone detector
+/// needs more than a preamble's 64 symbols to be sure of a tone, which is why
+/// the retrain test of clause 7 asks for more than 128. A symbol that lands
+/// on the same state as the symbol before it, or on the opposite state, is a
+/// fact the receiver has at once.
+///
+/// Data cannot copy this for long. Scrambled data is a sequence of maximum
+/// length, and 28 symbols of one dibit pattern would repeat a window of 23
+/// bits, which such a sequence never does.
+#[derive(Debug, Clone, Default)]
+struct PreambleWatch {
+    /// The state the last symbol landed near, if it landed near one.
+    previous: Option<usize>,
+    /// One bit for each symbol, newest lowest: the symbol was on the same
+    /// state as the symbol before it.
+    repeated: u64,
+    /// The same, for the opposite state.
+    alternating: u64,
+}
+
+impl PreambleWatch {
+    fn feed(&mut self, z: Complex) {
+        let (state, distance) = STATES
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                let s = Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS);
+                (i, (z - s).abs())
+            })
+            .fold((0, f64::MAX), |best, this| if this.1 < best.1 { this } else { best });
+        let near = distance < NEAR_A_STATE;
+        let same = near && self.previous == Some(state);
+        let opposite = near && self.previous == Some((state + 2) & 3);
+        self.repeated = (self.repeated << 1) | u64::from(same);
+        self.alternating = (self.alternating << 1) | u64::from(opposite);
+        self.previous = near.then_some(state);
+    }
+
+    fn count(&self, kind: Preamble) -> u32 {
+        let history = match kind {
+            Preamble::Repeated => self.repeated,
+            Preamble::Alternating => self.alternating,
+        };
+        (history & ((1u64 << PREAMBLE_WINDOW) - 1)).count_ones()
+    }
+}
+
 /// Level at which the far carrier is declared present, and the lower level at
 /// which it is declared gone: a 20 ms envelope of the in-band amplitude, five
 /// decibels of hysteresis, as V.22bis 6.5.2 asks for.
@@ -192,6 +267,8 @@ pub struct Receiver {
     /// goes on listening: what to train on, and the half-symbol sample by
     /// which its first window is all in.
     pending: Option<(Training, u64)>,
+    /// What the last symbols say about a clause 8 preamble.
+    watch: PreambleWatch,
 }
 
 impl Receiver {
@@ -230,6 +307,7 @@ impl Receiver {
             s_offset_hz: None,
             via: None,
             pending: None,
+            watch: PreambleWatch::default(),
         }
     }
 
@@ -330,6 +408,7 @@ impl Receiver {
             let target = self.decide(&point);
             let Some(symbol) = self.core.settle(target) else { break };
             self.last = symbol.point;
+            self.watch.feed(symbol.point);
             if self.core.slips() != self.slips {
                 // Found again after a slip: the paths the trellis decoder
                 // holds straddle the jump.
@@ -461,6 +540,19 @@ impl Receiver {
 
     pub fn take_bits(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.bits)
+    }
+
+    /// How many of the last [`PREAMBLE_WINDOW`] symbols look like `kind`.
+    ///
+    /// V.32bis 8.2: "A modem shall be conditioned to detect an incoming
+    /// preamble at any time while receiving data."
+    pub fn preamble(&self, kind: Preamble) -> u32 {
+        self.watch.count(kind)
+    }
+
+    /// Start the watch again, so that a preamble acted on is not heard twice.
+    pub fn forget_preamble(&mut self) {
+        self.watch = PreambleWatch::default();
     }
 
     /// Take whole octets, most significant bit first, leaving any remainder.

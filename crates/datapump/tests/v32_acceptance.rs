@@ -424,6 +424,9 @@ struct Direction {
     /// The far end replaced by loud noise: when, from the start of data, and
     /// for how long.
     loss_in_data: Option<(f64, f64)>,
+    /// The noise changed to a new Es/N0: when, from the start of data, and
+    /// to what, in dB.
+    snr_in_data: Vec<(f64, f64)>,
 }
 
 impl Default for Direction {
@@ -439,8 +442,15 @@ impl Default for Direction {
             gains_in_data: Vec::new(),
             limiter: false,
             loss_in_data: None,
+            snr_in_data: Vec::new(),
         }
     }
+}
+
+/// The deviation of §9.1's noise at `snr_db` of Es/N0, against a far signal
+/// that arrives at `received`.
+fn noise_for(received: f64, snr_db: f64) -> f64 {
+    (FS / 2.0 / 2400.0 * received * 10f64.powf(-snr_db / 10.0)).sqrt()
 }
 
 /// One direction of the line while a call is on it: the chain in the module
@@ -472,6 +482,10 @@ struct Path {
     limiter: Option<Limiter>,
     /// A stretch where the far end is replaced by noise of this deviation.
     loss: Option<(usize, usize, f64)>,
+    /// The far signal's power as it arrives, which a noise is set against.
+    received: f64,
+    /// Changes of the noise still to come: when, and the deviation after.
+    noises: VecDeque<(usize, f64)>,
     now: usize,
     /// Samples the line had nothing to give for, which only a mistake in this
     /// file could cause.
@@ -499,9 +513,7 @@ impl Path {
             .sum();
         let fill = direction.delay.max(1) - 1 + lead + drift + dropped;
         let received = direction.attenuation * direction.attenuation * power;
-        let noise = direction
-            .snr_db
-            .map_or(0.0, |snr| (FS / 2.0 / 2400.0 * received * 10f64.powf(-snr / 10.0)).sqrt());
+        let noise = direction.snr_db.map_or(0.0, |snr| noise_for(received, snr));
         let mut path = Self {
             attenuation: direction.attenuation,
             shifter,
@@ -525,6 +537,8 @@ impl Path {
                 clamped: 0,
             }),
             loss: None,
+            received,
+            noises: VecDeque::new(),
             now: 0,
             underruns: 0,
         };
@@ -544,6 +558,9 @@ impl Path {
         for &(at, over, to_db) in &direction.gains_in_data {
             self.gains.push_back((from + (at * FS) as usize, (over * FS) as usize, to_db));
         }
+        for &(at, snr) in &direction.snr_in_data {
+            self.noises.push_back((from + (at * FS) as usize, noise_for(self.received, snr)));
+        }
         if let Some((at, seconds)) = direction.loss_in_data {
             // Loud: four times the power of the far end it replaces.
             let sigma = 2.0 * direction.attenuation * power.sqrt();
@@ -553,6 +570,12 @@ impl Path {
     }
 
     fn carry(&mut self, x: f64) -> f64 {
+        while let Some(&(at, noise)) = self.noises.front()
+            && at <= self.now
+        {
+            self.noises.pop_front();
+            self.noise = noise;
+        }
         let mut x = x * self.attenuation;
         if let Some(shifter) = self.shifter.as_mut() {
             x = shifter.process(x);
@@ -986,6 +1009,9 @@ struct Call {
     seed: u64,
     /// Print the start-up's phases and every errored block.
     trace: bool,
+    /// Renegotiations asked for (V.32bis clause 8): when, in seconds from the
+    /// start of data, by which end, and to what rate.
+    renegotiate: Vec<(f64, Role, u32)>,
 }
 
 /// What happened.
@@ -1002,6 +1028,13 @@ struct Outcome {
     /// At the calling end and at the answering end.
     ends: [Reception; 2],
     underruns: usize,
+    /// Rate renegotiations each end completed.
+    renegotiations: [u32; 2],
+    /// Each rate each end was connected at, in order, without repeats.
+    rates: [Vec<u32>; 2],
+    /// The share of errored blocks in the second half of the data, at the
+    /// worse end.
+    errored_late: f64,
 }
 
 impl Call {
@@ -1031,6 +1064,8 @@ impl Call {
         let blocks = (self.data_s * 10.0) as usize;
 
         let mut phases = ("", "");
+        let mut rates: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+        let mut asks: VecDeque<(usize, Role, u32)> = VecDeque::new();
         let mut i = 0;
         while i < end {
             if self.trace && (calling.phase(), answering.phase()) != phases {
@@ -1072,6 +1107,22 @@ impl Call {
             }
 
             let both = (calling.status(), answering.status());
+            for (k, status) in [both.0, both.1].into_iter().enumerate() {
+                if let Status::Connected(rate) = status
+                    && rates[k].last() != Some(&rate)
+                {
+                    rates[k].push(rate);
+                }
+            }
+            while let Some(&(at, role, rate)) = asks.front()
+                && at <= i
+            {
+                asks.pop_front();
+                match role {
+                    Role::Calling => calling.renegotiate(rate),
+                    Role::Answering => answering.renegotiate(rate),
+                }
+            }
             if up_at.is_none()
                 && let (Status::Connected(rate), Status::Connected(_)) = both
             {
@@ -1102,6 +1153,7 @@ impl Call {
                 }
                 end = listening_from.iter().max().copied().unwrap_or(i) + blocks * BLOCK;
                 loss_at = self.line.loss().map(|at| i + (at * FS) as usize);
+                asks.extend(self.renegotiate.iter().map(|&(at, role, rate)| (i + (at * FS) as usize, role, rate)));
             }
 
             if data_at.is_some_and(|data| i >= data) {
@@ -1136,6 +1188,7 @@ impl Call {
 
         let held = first == Some(want) && !left && calling.retrains() == 0 && answering.retrains() == 0;
         let mut ends = [Reception::default(), Reception::default()];
+        let mut errored_late: f64 = 0.0;
         for (k, role) in [Role::Calling, Role::Answering].into_iter().enumerate() {
             // What the calling end received was sent by the answering end.
             let far = &sent[1 - k];
@@ -1160,6 +1213,13 @@ impl Call {
                 }
             }
             r.reception = median(&mut reception[k]);
+            let late = &received[k][received[k].len() / 2..];
+            if let Some(&(_, from)) = late.first() {
+                let errored = r.errored.iter().filter(|&&at| at >= from).count();
+                errored_late = errored_late.max(errored as f64 / late.len() as f64);
+            } else {
+                errored_late = 1.0;
+            }
             let path = wiring.heard_by(role);
             r.slips = path.slipped.iter().copied().filter(|&at| at >= listening_from[k] && at < end).collect();
             if self.trace {
@@ -1182,6 +1242,9 @@ impl Call {
             retrain_after_loss,
             ends,
             underruns: wiring.underruns(),
+            renegotiations: [calling.renegotiations(), answering.renegotiations()],
+            rates,
+            errored_late,
         }
     }
 }
@@ -1205,6 +1268,14 @@ enum Pass {
     /// Exactly one retrain at each end, begun within 1.6 s of the far end
     /// being lost, and back at this rate.
     OneRetrain(u32),
+    /// No retrain; each end renegotiated `times` times, was connected at
+    /// `through` on the way, and ended at `ends_at`; and at least this share
+    /// of blocks clean at each end.
+    Renegotiated { times: u32, through: u32, ends_at: u32, clean: f64 },
+    /// No retrain; at least one renegotiation at each end; both ends at the
+    /// same rate, no faster than `at_most`; and at least this share of the
+    /// second half's blocks clean at each end.
+    SteppedDown { at_most: u32, clean: f64 },
 }
 
 /// One line of §9.2: a test's call at one rate or one setting.
@@ -1271,6 +1342,41 @@ impl Row {
                 }
                 Ok(())
             }
+            Pass::Renegotiated { times, through, ends_at, clean } => {
+                if o.retrains != [0, 0] {
+                    return Err(format!("{} / {} retrains", o.retrains[0], o.retrains[1]));
+                }
+                if o.renegotiations != [times; 2] {
+                    return Err(format!("{} / {} renegotiations", o.renegotiations[0], o.renegotiations[1]));
+                }
+                if !o.rates.iter().all(|r| r.contains(&through)) {
+                    return Err(format!("never at {through}: rates {:?}", o.rates));
+                }
+                if o.last != [Status::Connected(ends_at); 2] {
+                    return Err(format!("ended at {:?} / {:?}", o.last[0], o.last[1]));
+                }
+                let errored = worst(Reception::errored_share);
+                if 1.0 - errored < clean {
+                    return Err(format!("{:.1} % of blocks errored", 100.0 * errored));
+                }
+                Ok(())
+            }
+            Pass::SteppedDown { at_most, clean } => {
+                if o.retrains != [0, 0] {
+                    return Err(format!("{} / {} retrains", o.retrains[0], o.retrains[1]));
+                }
+                if o.renegotiations[0] == 0 || o.renegotiations[1] == 0 {
+                    return Err(format!("{} / {} renegotiations", o.renegotiations[0], o.renegotiations[1]));
+                }
+                match o.last {
+                    [Status::Connected(a), Status::Connected(b)] if a == b && a <= at_most => {}
+                    _ => return Err(format!("ended at {:?} / {:?}, rates {:?}", o.last[0], o.last[1], o.rates)),
+                }
+                if 1.0 - o.errored_late < clean {
+                    return Err(format!("{:.1} % of late blocks errored", 100.0 * o.errored_late));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1286,6 +1392,13 @@ impl Row {
         let mut notes = String::new();
         if let Some(after) = o.retrain_after_loss {
             let _ = write!(notes, "retrain {after:.2} s after the loss; ");
+        }
+        if o.renegotiations != [0, 0] {
+            let _ = write!(
+                notes,
+                "{} / {} renegotiations, rates {:?} / {:?}; ",
+                o.renegotiations[0], o.renegotiations[1], o.rates[0], o.rates[1]
+            );
         }
         let slip = o.ends[0].worst_slip().max(o.ends[1].worst_slip());
         if !o.ends[0].slips.is_empty() || !o.ends[1].slips.is_empty() {
@@ -1351,7 +1464,7 @@ fn check(test: &str) {
 // ---------------------------------------------------------------------------
 
 fn call(speed: Speed, line: Line, data_s: f64, seed: u64) -> Call {
-    Call { offer: speed.offer(), speed, line, data_s, seed, trace: false }
+    Call { offer: speed.offer(), speed, line, data_s, seed, trace: false, renegotiate: Vec::new() }
 }
 
 /// The same impairments both ways.
@@ -1485,7 +1598,7 @@ fn every_row() -> Vec<Row> {
     for (k, ppm) in [0.0, 5.0, 20.0, 100.0].into_iter().enumerate() {
         let line = Line::Cable { ppm, slips_in_data: Vec::new() };
         let call =
-            Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x700 + k as u64, trace: false };
+            Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x700 + k as u64, trace: false, renegotiate: Vec::new() };
         add("cable_with_drift", format!("cable {ppm} ppm"), call, Pass::Ber);
     }
 
@@ -1496,7 +1609,7 @@ fn every_row() -> Vec<Row> {
         let mut slips = one_sample_slips();
         slips.extend(std::iter::repeat_n(Slip::Insert(160, Fill::Silence), 2));
         let line = Line::Cable { ppm: 20.0, slips_in_data: spread(&mut rng, slips, 60.0) };
-        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x800, trace: false };
+        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x800, trace: false, renegotiate: Vec::new() };
         // Two errored 100 ms blocks per fault, and no more: twelve faults in
         // 600 blocks is 96 % clean. A slip here costs the canceller 36-49 ms to
         // find where the echo went and the receiver a clean 64-symbol window
@@ -1546,8 +1659,72 @@ fn every_row() -> Vec<Row> {
     // four seconds into data at 14 400.
     {
         let line = both_ways(Direction { loss_in_data: Some((4.0, 1.5)), ..Direction::default() });
-        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 30.0, seed: 0xB00, trace: false };
+        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 30.0, seed: 0xB00, trace: false, renegotiate: Vec::new() };
         add("a_real_loss_still_retrains", "14400T, 1.5 s lost".into(), call, Pass::OneRetrain(14_400));
+    }
+
+    // V.32bis clause 8: each end in turn asks the other to go down, and then
+    // up again, on a line with a second's round trip in it, as a SIP trunk
+    // has. The working SNR of 14 400 throughout.
+    //
+    // The responding end receives nothing from the far end's preamble to
+    // the far end's E (8.2 clamps circuit 104), and on this line that is a
+    // round trip and a tenth of a second: eleven empty blocks for each
+    // renegotiation, 7 % of the 300.
+    for (k, role) in [Role::Calling, Role::Answering].into_iter().enumerate() {
+        let line = both_ways(Direction {
+            delay: (0.5 * FS) as usize,
+            snr_db: Some(Speed::At14400T.working_snr()),
+            ..Direction::default()
+        });
+        let call = Call {
+            offer: everything,
+            speed: Speed::At14400T,
+            line,
+            data_s: 30.0,
+            seed: 0xC00 + k as u64,
+            trace: false,
+            renegotiate: vec![(3.0, role, 4800), (10.0, role, 14_400)],
+        };
+        add(
+            "renegotiates_down_and_up",
+            format!("{role:?} asks, 0.5 s each way"),
+            call,
+            Pass::Renegotiated { times: 2, through: 4800, ends_at: 14_400, clean: 0.9 },
+        );
+    }
+
+    // The line of the NIST calls: trained clean, and then in data noise comes
+    // up to well below what 14 400 needs. The end that hears it steps down
+    // by renegotiation and holds, with no retrain. One way, and then both
+    // ways, where both ends begin at once.
+    for (k, both) in [false, true].into_iter().enumerate() {
+        let quiet = Direction {
+            delay: (0.5 * FS) as usize,
+            snr_db: Some(Speed::At14400T.working_snr()),
+            ..Direction::default()
+        };
+        let noisy = Direction { snr_in_data: vec![(3.0, Speed::At9600T.working_snr() - 1.0)], ..quiet.clone() };
+        let line = Line::TwoWire {
+            to_calling: noisy.clone(),
+            to_answering: if both { noisy } else { quiet },
+            hybrid: None,
+        };
+        let call = Call {
+            offer: everything,
+            speed: Speed::At14400T,
+            line,
+            data_s: 20.0,
+            seed: 0xD00 + k as u64,
+            trace: false,
+            renegotiate: Vec::new(),
+        };
+        add(
+            "noise_in_data_steps_down_by_renegotiation",
+            if both { "noise both ways".into() } else { "noise to the calling end".into() },
+            call,
+            Pass::SteppedDown { at_most: 9600, clean: 0.95 },
+        );
     }
 
     rows
@@ -1672,6 +1849,22 @@ fn hybrid_with_everything() {
 #[test]
 fn a_real_loss_still_retrains() {
     check("a_real_loss_still_retrains");
+}
+
+/// V.32bis clause 8 between two of our own modems: either end asks the other
+/// to go down to 4800 and then back up to 14 400, and the call goes with it
+/// each time, with no retrain and little data lost.
+#[test]
+fn renegotiates_down_and_up() {
+    check("renegotiates_down_and_up");
+}
+
+/// Noise that comes up in data, as it does on a SIP trunk to NIST, is met by
+/// a step down by renegotiation (clause 8) and not by a retrain (clause 7):
+/// the retrain costs ten seconds and more on a long line.
+#[test]
+fn noise_in_data_steps_down_by_renegotiation() {
+    check("noise_in_data_steps_down_by_renegotiation");
 }
 
 /// Every line above, as the before (or after) table: the rate both ends came
