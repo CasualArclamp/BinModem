@@ -529,6 +529,10 @@ pub struct ScopeApp {
     font_size: f32,
     /// How the terminal reads and sends characters: 8N1, 7E1 and so on.
     char_format: terminal::CharFormat,
+    /// Whether XON and XOFF from the far end are obeyed.
+    flow: terminal::Flow,
+    /// What was typed while the far end had sent XOFF, to go at its XON.
+    held: Vec<u8>,
     last_repaint: std::time::Instant,
     /// The highest each spectrum bin has been lately, falling slowly.
     hold: Vec<f32>,
@@ -791,6 +795,8 @@ impl ScopeApp {
             tab: Tab::Terminal,
             font_size: 14.0,
             char_format: terminal::CharFormat::default(),
+            flow: terminal::Flow::default(),
+            held: Vec::new(),
             last_repaint: std::time::Instant::now(),
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
@@ -919,6 +925,11 @@ impl ScopeApp {
 
     fn terminal_pane(&mut self, ui: &mut egui::Ui) {
         self.console.term.set_format(self.char_format);
+        self.console.term.set_flow(self.flow);
+        if !self.console.term.stopped() && !self.held.is_empty() {
+            let held = std::mem::take(&mut self.held);
+            self.type_into_terminal(&held);
+        }
         let view = console::view(ui, &self.console.term, self.font_size);
         let response = view.response;
         if response.clicked() {
@@ -1049,6 +1060,12 @@ impl ScopeApp {
     /// Bytes typed at the terminal, or chosen from its menu, to wherever they
     /// go.
     fn type_into_terminal(&mut self, typed: &[u8]) {
+        // The far end said XOFF: hold it all until XON.
+        let line = self.source.is_live() || self.source.is_telnet();
+        if line && self.console.term.stopped() {
+            self.held.extend_from_slice(typed);
+            return;
+        }
         {
             if !typed.is_empty() {
                 // The parity of the character format, on everything that
@@ -3728,6 +3745,9 @@ impl ScopeApp {
         if let Some(format) = loaded.text("char_format").and_then(terminal::CharFormat::parse) {
             self.char_format = format;
         }
+        if let Some(flow) = loaded.text("flow_control").and_then(terminal::Flow::parse) {
+            self.flow = flow;
+        }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
             + &self.line_fingerprint();
@@ -3735,7 +3755,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", self.char_format.name(), self.theme.name(), self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
+        format!("\u{1}{}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", self.char_format.name(), self.flow.name(), self.theme.name(), self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3777,6 +3797,7 @@ impl ScopeApp {
             r.set("easysip_upnp", u8::from(self.easy_upnp));
             r.set("theme", self.theme.name());
             r.set("char_format", self.char_format.name());
+            r.set("flow_control", self.flow.name());
             r.save();
         }
     }
@@ -4837,6 +4858,97 @@ impl ScopeApp {
         self.script.pop_front();
     }
 
+    /// The character format and flow control: a button that names the
+    /// format, and a panel of four rows under it.
+    fn format_button(&mut self, ui: &mut egui::Ui) {
+        use terminal::{CharFormat, Flow, Parity};
+        let mut label = self.char_format.name();
+        if self.flow == Flow::XonXoff {
+            label.push_str(" XON");
+        }
+        let button = ui
+            .button(format!("{label} \u{23f7}"))
+            .on_hover_text("Data bits, stop bits, parity and flow control");
+        egui::Popup::menu(&button)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                // A menu draws its buttons without frames or fill. These are
+                // boxes to choose from, so they get the window's own style.
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                let mut f = self.char_format;
+                egui::Grid::new("char_format_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        let width = 130.0;
+                        ui.label("Data bits");
+                        egui::ComboBox::from_id_salt("data_bits")
+                            .selected_text(f.data_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::DATA_BITS {
+                                    let fits = CharFormat { data_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.data_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Stop bits");
+                        egui::ComboBox::from_id_salt("stop_bits")
+                            .selected_text(f.stop_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::STOP_BITS {
+                                    let fits = CharFormat { stop_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.stop_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Parity");
+                        egui::ComboBox::from_id_salt("parity")
+                            .selected_text(f.parity.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for parity in Parity::ALL {
+                                    let fits = CharFormat { parity, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.parity, parity, parity.name());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Flow control");
+                        egui::ComboBox::from_id_salt("flow_control")
+                            .selected_text(self.flow.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for flow in Flow::ALL {
+                                    ui.selectable_value(&mut self.flow, flow, flow.name());
+                                }
+                            });
+                        ui.end_row();
+                    });
+                if f.carried() {
+                    self.char_format = f;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Greyed choices need 11 bits for each character,\n\
+                         and the line carries 8.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+    }
+
     /// The type's size: fitted to the room, or set by hand.
     fn font_controls(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.fit, "fit")
@@ -4845,19 +4957,7 @@ impl ScopeApp {
             !self.fit,
             egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
         );
-        egui::ComboBox::from_id_salt("char_format")
-            .selected_text(self.char_format.name())
-            .width(52.0)
-            .show_ui(ui, |ui| {
-                for format in terminal::CharFormat::ALL {
-                    ui.selectable_value(&mut self.char_format, format, format.name());
-                }
-            })
-            .response
-            .on_hover_text(
-                "Character format. A 7-bit format drops the eighth bit of what \
-                 arrives and puts the parity in the eighth bit of what is sent",
-            );
+        self.format_button(ui);
     }
 
     /// How far the call has got, as the timeline numbers it: on hook, off

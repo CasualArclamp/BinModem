@@ -13,7 +13,7 @@
 pub mod cp437;
 pub mod format;
 
-pub use format::CharFormat;
+pub use format::{CharFormat, Flow, Parity};
 
 use std::collections::VecDeque;
 
@@ -213,6 +213,9 @@ pub struct Terminal {
     reply: Vec<u8>,
     /// How received octets are read: all eight bits, or seven.
     format: CharFormat,
+    flow: Flow,
+    /// The far end sent XOFF and not yet XON.
+    stopped: bool,
 }
 
 impl Default for Terminal {
@@ -251,6 +254,8 @@ impl Terminal {
             mouse_cell: None,
             reply: Vec::new(),
             format: CharFormat::default(),
+            flow: Flow::default(),
+            stopped: false,
         }
     }
 
@@ -302,8 +307,26 @@ impl Terminal {
         self.format
     }
 
+    /// Obey XON and XOFF from the far end, or not.
+    pub fn set_flow(&mut self, flow: Flow) {
+        self.flow = flow;
+        if flow == Flow::None {
+            self.stopped = false;
+        }
+    }
+
+    /// Whether the far end sent XOFF and not yet XON. The caller holds what
+    /// is typed while this is true.
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+
     pub fn feed(&mut self, byte: u8) {
         let byte = self.format.decode(byte);
+        if self.flow == Flow::XonXoff && (byte == format::XON || byte == format::XOFF) {
+            self.stopped = byte == format::XOFF;
+            return;
+        }
         match self.state {
             State::Ground => self.ground(byte),
             State::Escape => self.escape(byte),
@@ -1248,6 +1271,29 @@ mod tests {
         assert!(t.take_reply().len() <= 256);
     }
 
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    #[test]
+    fn xoff_stops_and_xon_starts_and_neither_is_drawn() {
+        let mut t = Terminal::new(10, 2);
+        t.set_flow(Flow::XonXoff);
+        t.feed_bytes(b"ab");
+        assert!(t.stopped());
+        t.feed_bytes(b"c");
+        assert!(!t.stopped());
+        assert!(t.text().starts_with("abc"));
+    }
+
+    #[test]
+    fn without_flow_control_xoff_is_only_a_character() {
+        let mut t = Terminal::new(10, 2);
+        t.feed(0x13);
+        assert!(!t.stopped());
+    }
 }
 
 #[cfg(test)]

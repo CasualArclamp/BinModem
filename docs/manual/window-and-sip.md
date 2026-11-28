@@ -39,11 +39,21 @@ without Ctrl goes to the far end, as before. The menu has these items:
 - **Control characters**: NUL to US, and DEL, with their names.
 - **Telnet commands** (Telnet only): IP, AO, AYT, EC, EL and NOP.
 
-The box after the font slider sets the character format: 8N1, 7N1, 7E1, 7O1,
-7M1 or 7S1. A 7-bit format removes the eighth bit from received characters.
-It also puts the parity bit in the eighth bit of sent characters. The window
-keeps the choice in `settings.txt` as `char_format`. 8E1 and 8O1 are not
-available, because they need 11 bits for each character.
+The button after the font slider shows the character format, for example
+`8N1`. Click it to open a panel with four settings:
+
+- **Data bits**: 7 or 8. With 7, the terminal removes the eighth bit from
+  received characters.
+- **Stop bits**: 1 or 2.
+- **Parity**: None, Even, Odd, Mark or Space. With 7 data bits, the parity
+  bit goes in the eighth bit of sent characters.
+- **Flow control**: None or XON/XOFF. With XON/XOFF, an XOFF (^S) from the far
+  end stops what you type until an XON (^Q). The terminal does not show XON
+  or XOFF.
+
+The line carries 8 bits for each character. Thus the panel greys out the
+formats that need 11 bits, for example 8E1, 8N2 and 7E2. The window keeps the
+settings in `settings.txt` as `char_format` and `flow_control`.
 
 ### Dark and light
 
