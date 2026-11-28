@@ -66,6 +66,17 @@ the policy on top.
   receiver's signal to noise and asks for a new rate with attention 0x3R; the
   holder retrains at it. The Courier changes bits per symbol without
   retraining; the V.17 engine cannot, so this retrains.
+- The fallback is off while a handover or retraining is under way. The
+  receiver stays in data 150 ms after the far carrier stops, and its signal
+  to noise then is of nothing (issue 84).
+- Retrain at a rate: attention 0x2R, from either end. The forward holder
+  retrains at R when it receives the attention, or when its own attention is
+  acknowledged; the other end listens for a training at R. The receiving end
+  asks for it when it is at the slowest rate and has lost the line.
+  `Session::request_retrain` asks for one at the current rate.
+- An attention for a rate that is acknowledged while this end holds the
+  forward channel is carried out, so a far end that follows it gets its
+  training (issue 84).
 - The forward-holding end listens for both back-channel speeds at once, so a
   change of speed needs no coordination.
 - A watchdog puts the roles back (answerer forward, caller back) if a handover
