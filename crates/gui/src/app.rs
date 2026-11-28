@@ -5475,7 +5475,11 @@ impl ScopeApp {
             }
             _ if snr_db.is_some() => {
                 let db = snr_db.unwrap_or(0.0);
-                let point = margin_point_db(f.tones).filter(|_| f.symbol_label != "2FSK");
+                // A bare "QAM" is V.34's data mode, and V.90's V.34 upstream:
+                // always trellis coded, so its margin point is lower by what
+                // the code gives.
+                let trellis = if f.symbol_label == "QAM" { V34_TRELLIS_DB } else { 0.0 };
+                let point = margin_point_db(f.tones).filter(|_| f.symbol_label != "2FSK").map(|p| p - trellis);
                 let c = match point {
                     Some(point) => margin_colour(db - point),
                     None if db >= 20.0 => theme::good(),
@@ -5542,7 +5546,10 @@ impl ScopeApp {
             "Left: what the receiver is slicing. Right: what it has in hand. On a \
              constellation that is the margin: how far it misses by, against the quarter \
              of the gap between points at which this modem gives the rate up, in decibels. \
-             Under 0 dB it retrains; within 3 dB a burst of noise will make it. Where the              receiver gives a signal to noise instead, the tick is the margin point: the              ratio at which the error is that same quarter of the gap, for this many points.",
+             Under 0 dB it retrains; within 3 dB a burst of noise will make it. Where the \
+             receiver gives a signal to noise instead, the tick is the margin point: the \
+             ratio at which the error is that same quarter of the gap, for this many points, \
+             less what V.34's trellis code gives (6 dB) on a V.34 data call.",
         );
 
         let (rect, _) =
@@ -6949,6 +6956,13 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
 }
 
 /// A small folder button, true when clicked.
+/// What V.34's trellis code gives over slicing each point for itself, in
+/// decibels: its four-dimensional codes keep runs of points at least twice
+/// the gap of the two-dimensional grid apart, so four times the distance
+/// squared (the 16- and 32-state codes; the 64-state one gives more). It is
+/// the asymptotic gain, with no allowance for how many near runs there are.
+const V34_TRELLIS_DB: f32 = 6.02;
+
 /// The margin point of a QAM grid: the signal to noise, in decibels, at
 /// which the error is a quarter of the gap between neighbouring points.
 ///
@@ -7026,6 +7040,8 @@ mod margin_tests {
         assert!((margin_point_db(16).unwrap() - at(2.0 / 10f32.sqrt())).abs() < 1e-3);
         // 512 points: about 31.34 dB.
         assert!((margin_point_db(512).unwrap() - 31.34).abs() < 0.01);
+        // V.34's code: twice the gap, so four times the distance squared.
+        assert!((super::V34_TRELLIS_DB - 20.0 * 2f32.log10()).abs() < 0.01);
     }
 }
 
