@@ -60,6 +60,20 @@ impl Source {
     }
 }
 
+/// What the terminal's Ctrl + right-click menu sends.
+enum Send {
+    Bytes(Vec<u8>),
+    /// A break, this many milliseconds long.
+    Break(u32),
+    /// A Telnet command, after an IAC.
+    Telnet(u8),
+}
+
+/// A break as the BREAK key of a terminal sends it.
+const BREAK_MS: u32 = 250;
+/// A long ("hard") break, for equipment that ignores a short one.
+const HARD_BREAK_MS: u32 = 3500;
+
 /// The subparameters of `AT+MS`, as V.250 6.4.1 defines them.
 ///
 /// The command carries four things: which modulation, whether the modem may
@@ -513,6 +527,12 @@ pub struct ScopeApp {
     host: String,
     tab: Tab,
     font_size: f32,
+    /// How the terminal reads and sends characters: 8N1, 7E1 and so on.
+    char_format: terminal::CharFormat,
+    /// Whether XON and XOFF from the far end are obeyed.
+    flow: terminal::Flow,
+    /// What was typed while the far end had sent XOFF, to go at its XON.
+    held: Vec<u8>,
     last_repaint: std::time::Instant,
     /// The highest each spectrum bin has been lately, falling slowly.
     hold: Vec<f32>,
@@ -774,6 +794,9 @@ impl ScopeApp {
             receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
             font_size: 14.0,
+            char_format: terminal::CharFormat::default(),
+            flow: terminal::Flow::default(),
+            held: Vec::new(),
             last_repaint: std::time::Instant::now(),
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
@@ -901,10 +924,47 @@ impl ScopeApp {
     }
 
     fn terminal_pane(&mut self, ui: &mut egui::Ui) {
+        self.console.term.set_format(self.char_format);
+        self.console.term.set_flow(self.flow);
+        if !self.console.term.stopped() && !self.held.is_empty() {
+            let held = std::mem::take(&mut self.held);
+            self.type_into_terminal(&held);
+        }
         let view = console::view(ui, &self.console.term, self.font_size);
         let response = view.response;
         if response.clicked() {
             response.request_focus();
+        }
+        // Ctrl and the right button: the menu of what the keyboard cannot
+        // type. A right click without Ctrl stays the far end's, for a board
+        // that reads the mouse.
+        let ctrl = ui.input(|i| i.modifiers.ctrl);
+        let open = if response.secondary_clicked() && ctrl {
+            Some(egui::SetOpenCommand::Bool(true))
+        } else if response.clicked() {
+            Some(egui::SetOpenCommand::Bool(false))
+        } else {
+            None
+        };
+        let mut chosen: Option<Send> = None;
+        egui::Popup::context_menu(&response).open_memory(open).show(|ui| {
+            chosen = self.send_menu(ui);
+        });
+        if let Some(chosen) = chosen {
+            response.request_focus();
+            match chosen {
+                Send::Bytes(bytes) => self.type_into_terminal(&bytes),
+                Send::Break(ms) => match &self.source {
+                    Source::Live(session) => session.send_break(ms),
+                    Source::Telnet(session) => session.send_command(telnet::BRK),
+                    Source::Capture => {}
+                },
+                Send::Telnet(command) => {
+                    if let Source::Telnet(session) = &self.source {
+                        session.send_command(command);
+                    }
+                }
+            }
         }
         // Straight into the terminal, which knows which of these the far end
         // asked for and drops the rest. What it decides to report joins the
@@ -912,6 +972,9 @@ impl ScopeApp {
         // board hears about the mouse over a call exactly as it does over a
         // socket.
         for event in view.mouse {
+            if ctrl && event.button == Some(terminal::Button::Right) {
+                continue;
+            }
             self.console.term.mouse(event);
         }
         if response.has_focus() {
@@ -934,7 +997,84 @@ impl ScopeApp {
                 );
             });
             let typed = console::keys_to_bytes(ui);
+            self.type_into_terminal(&typed);
+        }
+    }
+
+    /// The Ctrl + right-click menu. Returns what was chosen, if anything.
+    fn send_menu(&self, ui: &mut egui::Ui) -> Option<Send> {
+        let mut chosen = None;
+        let live = self.source.is_live();
+        let telnet = self.source.is_telnet();
+        ui.label(RichText::new("Send").strong());
+        let can_break = live || telnet;
+        let why = if telnet {
+            "Telnet IAC BRK"
+        } else {
+            "On a V.42 call a BRK message, otherwise the line held at space"
+        };
+        if ui
+            .add_enabled(can_break, egui::Button::new("Break (250 ms)"))
+            .on_hover_text(why)
+            .clicked()
+        {
+            chosen = Some(Send::Break(BREAK_MS));
+        }
+        if ui
+            .add_enabled(can_break, egui::Button::new("Hard break (3.5 s)"))
+            .on_hover_text(why)
+            .clicked()
+        {
+            chosen = Some(Send::Break(HARD_BREAK_MS));
+        }
+        ui.separator();
+        ui.menu_button("Control characters", |ui| {
+            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                for (byte, caret, name, what) in console::CONTROL_CHARACTERS {
+                    let label = format!("{caret:<3} {name:<4} {what}");
+                    if ui.button(RichText::new(label).monospace()).clicked() {
+                        chosen = Some(Send::Bytes(vec![byte]));
+                    }
+                }
+            });
+        });
+        if telnet {
+            ui.menu_button("Telnet commands", |ui| {
+                for (command, label) in [
+                    (telnet::IP, "IP   interrupt process"),
+                    (telnet::AO, "AO   abort output"),
+                    (telnet::AYT, "AYT  are you there"),
+                    (telnet::EC, "EC   erase character"),
+                    (telnet::EL, "EL   erase line"),
+                    (telnet::NOP, "NOP  no operation"),
+                ] {
+                    if ui.button(RichText::new(label).monospace()).clicked() {
+                        chosen = Some(Send::Telnet(command));
+                    }
+                }
+            });
+        }
+        chosen
+    }
+
+    /// Bytes typed at the terminal, or chosen from its menu, to wherever they
+    /// go.
+    fn type_into_terminal(&mut self, typed: &[u8]) {
+        // The far end said XOFF: hold it all until XON.
+        let line = self.source.is_live() || self.source.is_telnet();
+        if line && self.console.term.stopped() {
+            self.held.extend_from_slice(typed);
+            return;
+        }
+        {
             if !typed.is_empty() {
+                // The parity of the character format, on everything that
+                // goes down a line. A capture has no line.
+                let typed: Vec<u8> = if self.source.is_live() || self.source.is_telnet() {
+                    typed.iter().map(|&b| self.char_format.encode(b)).collect()
+                } else {
+                    typed.to_vec()
+                };
                 match &self.source {
                     // Straight to the modem, which has an AT interpreter of
                     // its own and will echo, answer, and decide for itself
@@ -3602,6 +3742,12 @@ impl ScopeApp {
         if let Some(choice) = loaded.text("theme").and_then(theme::Choice::parse) {
             self.theme = choice;
         }
+        if let Some(format) = loaded.text("char_format").and_then(terminal::CharFormat::parse) {
+            self.char_format = format;
+        }
+        if let Some(flow) = loaded.text("flow_control").and_then(terminal::Flow::parse) {
+            self.flow = flow;
+        }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
             + &self.line_fingerprint();
@@ -3609,7 +3755,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}\u{1}{}", self.theme.name(), self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
+        format!("\u{1}{}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", self.char_format.name(), self.flow.name(), self.theme.name(), self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3650,6 +3796,8 @@ impl ScopeApp {
             r.set("easysip_coding", self.easy_coding);
             r.set("easysip_upnp", u8::from(self.easy_upnp));
             r.set("theme", self.theme.name());
+            r.set("char_format", self.char_format.name());
+            r.set("flow_control", self.flow.name());
             r.save();
         }
     }
@@ -4710,6 +4858,97 @@ impl ScopeApp {
         self.script.pop_front();
     }
 
+    /// The character format and flow control: a button that names the
+    /// format, and a panel of four rows under it.
+    fn format_button(&mut self, ui: &mut egui::Ui) {
+        use terminal::{CharFormat, Flow, Parity};
+        let mut label = self.char_format.name();
+        if self.flow == Flow::XonXoff {
+            label.push_str(" XON");
+        }
+        let button = ui
+            .button(format!("{label} \u{23f7}"))
+            .on_hover_text("Data bits, stop bits, parity and flow control");
+        egui::Popup::menu(&button)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                // A menu draws its buttons without frames or fill. These are
+                // boxes to choose from, so they get the window's own style.
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                let mut f = self.char_format;
+                egui::Grid::new("char_format_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        let width = 130.0;
+                        ui.label("Data bits");
+                        egui::ComboBox::from_id_salt("data_bits")
+                            .selected_text(f.data_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::DATA_BITS {
+                                    let fits = CharFormat { data_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.data_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Stop bits");
+                        egui::ComboBox::from_id_salt("stop_bits")
+                            .selected_text(f.stop_bits.to_string())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for bits in CharFormat::STOP_BITS {
+                                    let fits = CharFormat { stop_bits: bits, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.stop_bits, bits, bits.to_string());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Parity");
+                        egui::ComboBox::from_id_salt("parity")
+                            .selected_text(f.parity.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for parity in Parity::ALL {
+                                    let fits = CharFormat { parity, ..f }.carried();
+                                    ui.add_enabled_ui(fits, |ui| {
+                                        ui.selectable_value(&mut f.parity, parity, parity.name());
+                                    });
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Flow control");
+                        egui::ComboBox::from_id_salt("flow_control")
+                            .selected_text(self.flow.name())
+                            .width(width)
+                            .show_ui(ui, |ui| {
+                                for flow in Flow::ALL {
+                                    ui.selectable_value(&mut self.flow, flow, flow.name());
+                                }
+                            });
+                        ui.end_row();
+                    });
+                if f.carried() {
+                    self.char_format = f;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Greyed choices need 11 bits for each character,\n\
+                         and the line carries 8.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+    }
+
     /// The type's size: fitted to the room, or set by hand.
     fn font_controls(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.fit, "fit")
@@ -4718,6 +4957,7 @@ impl ScopeApp {
             !self.fit,
             egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
         );
+        self.format_button(ui);
     }
 
     /// How far the call has got, as the timeline numbers it: on hook, off
@@ -5000,6 +5240,7 @@ impl ScopeApp {
             if self.frame.state == telemetry::CallState::Connected {
                 let reply = self.console.term.take_reply();
                 if !reply.is_empty() {
+                    let reply: Vec<u8> = reply.into_iter().map(|b| self.char_format.encode(b)).collect();
                     self.source.send(&reply);
                 }
             }

@@ -78,6 +78,8 @@ pub struct NetState {
 #[derive(Debug, Default)]
 pub struct Session {
     typed: Mutex<Vec<u8>>,
+    /// Telnet commands (RFC 854) to send, each after an IAC.
+    commands: Mutex<Vec<u8>>,
     request: Mutex<Option<Request>>,
     state: Mutex<NetState>,
     /// Whether to put everything that arrives in the transcript as well as on
@@ -101,6 +103,13 @@ impl Session {
     pub fn type_bytes(&self, bytes: &[u8]) {
         if let Ok(mut q) = self.typed.lock() {
             q.extend_from_slice(bytes);
+        }
+    }
+
+    /// Send one Telnet command, such as [`telnet::BRK`], after an IAC.
+    pub fn send_command(&self, command: u8) {
+        if let Ok(mut q) = self.commands.lock() {
+            q.push(command);
         }
     }
 
@@ -228,6 +237,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>) {
         if !typed.is_empty() {
             proto.encode(&typed, &mut out);
             tx_bytes += typed.len() as u64;
+        }
+        // After what was typed before it, so that an Erase Character erases
+        // the character it was meant for.
+        let commands = session.commands.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for command in commands {
+            out.extend_from_slice(&[telnet::IAC, command]);
         }
         let mut lost: Option<String> = None;
         if !out.is_empty()

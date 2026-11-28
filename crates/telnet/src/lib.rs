@@ -37,6 +37,20 @@ pub const SB: u8 = 250;
 pub const GA: u8 = 249;
 /// Subnegotiation ends.
 pub const SE: u8 = 240;
+/// No operation (RFC 854).
+pub const NOP: u8 = 241;
+/// Break: the BREAK or ATTENTION key of a terminal (RFC 854).
+pub const BRK: u8 = 243;
+/// Interrupt Process (RFC 854).
+pub const IP: u8 = 244;
+/// Abort Output (RFC 854).
+pub const AO: u8 = 245;
+/// Are You There (RFC 854).
+pub const AYT: u8 = 246;
+/// Erase Character (RFC 854).
+pub const EC: u8 = 247;
+/// Erase Line (RFC 854).
+pub const EL: u8 = 248;
 
 /// The options this end has an opinion about.
 pub mod option {

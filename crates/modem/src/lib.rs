@@ -1138,6 +1138,9 @@ pub struct Modem {
     /// Start-stop framing for a connection without error control, where
     /// nothing else says where one character ends and the next begins.
     async_bits: AsyncBits,
+    /// A break asked for on a call without error control, in milliseconds,
+    /// that the transmitter has not yet put on the line.
+    break_ms: Option<u32>,
     /// Milliseconds since the last tick, accumulated from samples.
     elapsed_samples: f64,
     /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
@@ -1358,6 +1361,7 @@ impl Modem {
             role: Role::Calling,
             outbound: Vec::new(),
             async_bits: AsyncBits::new(8),
+            break_ms: None,
             elapsed_samples: 0.0,
             since_dial_ms: 0,
             dial_request: None,
@@ -2278,6 +2282,36 @@ impl Modem {
     }
 
     /// One byte typed by the terminal.
+    /// Send a break to the far end, `ms` long.
+    ///
+    /// On an error-corrected call it goes as a V.42 BRK message (8.13), which
+    /// carries the length and leaves the data as it is. On a call without
+    /// error control it goes as what a break is on a start-stop line: the
+    /// line held at space for the length, longer than any character, and then
+    /// mark again (V.14 4.1). Returns how it went, for the log, or why it did
+    /// not.
+    pub fn send_break(&mut self, ms: u32) -> Result<&'static str, &'static str> {
+        if self.state != State::Data {
+            return Err("there is no call in data mode");
+        }
+        if self.pump.is_none() {
+            return Err("this kind of call cannot carry a break");
+        }
+        match self.ec.as_mut() {
+            Some(ec) if ec.phase() != Phase::Transparent => {
+                if ec.send_break(ms) {
+                    Ok("as a V.42 BRK message")
+                } else {
+                    Err("error control is not connected yet")
+                }
+            }
+            _ => {
+                self.break_ms = Some(ms);
+                Ok("as space on the line")
+            }
+        }
+    }
+
     pub fn feed_dte(&mut self, byte: u8) {
         match self.state {
             State::Command | State::OnlineCommand => {
@@ -3550,6 +3584,19 @@ impl Modem {
                     }
                     pump.send_bits(&bits);
                 }
+                // After what was typed before it, so the break arrives in
+                // its place. V.14 4.1 asks for at least 2M + 3 bits of space,
+                // with M the bits of one character; the time asked for is
+                // almost always far more than that.
+                if let Some(ms) = self.break_ms.take() {
+                    let rate = u64::from(self.rate.max(300));
+                    let space = (u64::from(ms) * rate / 1000).max(2 * 10 + 3) as usize;
+                    let mut bits = vec![false; space];
+                    // Mark for two characters after it, so that the far end
+                    // sees the break end before the next start bit.
+                    bits.extend([true; 20]);
+                    pump.send_bits(&bits);
+                }
             }
         }
     }
@@ -3715,6 +3762,7 @@ impl Modem {
         self.announce = None;
         self.outbound.clear();
         self.async_bits.reset();
+        self.break_ms = None;
         self.state = State::Handshaking;
 
         // V.250 6.4.1's automode: the modem "may fall back to another

@@ -193,6 +193,9 @@ pub enum Event {
     /// The peer re-established mid-connection, so unacknowledged data was lost
     /// (V.42 8.2.4.3: previously-transmitted I frames are discarded).
     Reset,
+    /// The peer sent a break (V.42 8.13), with its length in units of 10 ms.
+    /// Zero is a break of default length and 255 is one longer than 2.54 s.
+    Break(u8),
 }
 
 /// One LAPM entity.
@@ -251,7 +254,24 @@ pub struct Lapm {
     awaiting_ms: Option<u32>,
     /// Whether the error correction procedure is suspended (V.42 7.10.2).
     suspended: bool,
+
+    /// Break send state variable V(SB) (V.42 8.13.2.2).
+    vsb: bool,
+    /// Break receive state variable V(RB) (V.42 8.13.2.3).
+    vrb: bool,
+    /// The BRK message that has no BRKACK yet, with the time left on its own
+    /// T401 and the number of times it was sent again (8.13.3.4).
+    brk_out: Option<(Vec<u8>, u32, u32)>,
 }
+
+/// First octet of a BRK message without its sequence bit (V.42 Figure 12).
+const BRK: u8 = 0x40;
+/// The one octet of a BRKACK message without its sequence bit.
+const BRKACK: u8 = 0x60;
+/// Break-handling option for a break typed at the terminal: non-destructive
+/// and expedited ("D" = 0, "S" = 1, V.42 12.3.1). Data already sent is kept,
+/// and the break goes in front of what the far end has not yet delivered.
+const BRK_OPTION: u8 = 0x40;
 
 /// The most T401 will be allowed to grow to.
 ///
@@ -283,6 +303,9 @@ impl Lapm {
             retries: 0,
             awaiting_ms: None,
             suspended: false,
+            vsb: false,
+            vrb: false,
+            brk_out: None,
         }
     }
 
@@ -435,6 +458,75 @@ impl Lapm {
         }
     }
 
+    /// Send a break to the peer (V.42 8.13.3.1), `length_ms` long.
+    ///
+    /// The length goes in units of 10 ms, and a break longer than 2.54 s is
+    /// sent as 255, which V.42 12.3.1 keeps for "longer than 2.54 seconds".
+    /// Returns false when there is no connection to send it on. A break that
+    /// is still waiting for its BRKACK is replaced: 7.4 lets a DCE discard a
+    /// second break while the first is not acknowledged, and replacing it
+    /// keeps the sequence number that the peer expects.
+    pub fn send_break(&mut self, length_ms: u32) -> bool {
+        if self.state != State::Connected {
+            return false;
+        }
+        let length = if length_ms > 2540 { 255 } else { length_ms.div_ceil(10).max(1) as u8 };
+        let info = vec![BRK | (u8::from(self.vsb) << 7), BRK_OPTION, length];
+        self.send(Frame::Ui { pf: false, info: info.clone() }, Kind::Command);
+        self.brk_out = Some((info, self.params.t401_ms, 0));
+        true
+    }
+
+    /// Whether a break that was sent has no BRKACK yet.
+    pub fn break_outstanding(&self) -> bool {
+        self.brk_out.is_some()
+    }
+
+    fn on_ui(&mut self, pf: bool, info: &[u8], kind: Kind) {
+        let Some(&first) = info.first() else { return };
+        let seq = first & 0x80 != 0;
+        match (kind, first & 0x7f) {
+            // 8.13.3.2. A duplicate gets the previous BRKACK again and is
+            // not given to the control function a second time.
+            (Kind::Command, BRK) => {
+                if seq == self.vrb {
+                    self.vrb = !self.vrb;
+                    self.events.push_back(Event::Break(info.get(2).copied().unwrap_or(0)));
+                }
+                let ack = BRKACK | (u8::from(self.vrb) << 7);
+                self.send(Frame::Ui { pf, info: vec![ack] }, Kind::Response);
+            }
+            // 8.13.3.3: N(RB) must be V(SB) + 1, modulo 2.
+            (Kind::Response, BRKACK) if self.brk_out.is_some() && seq != self.vsb => {
+                self.vsb = !self.vsb;
+                self.brk_out = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The T401 of a BRK message (8.13.3.4). It runs apart from the T401 of
+    /// the I frames, because a break can be outstanding while data is not.
+    fn tick_break(&mut self, dt_ms: u32) {
+        let n400 = self.params.n400;
+        let t401 = self.params.t401_ms;
+        let Some((info, left, retries)) = self.brk_out.as_mut() else { return };
+        if *left > dt_ms {
+            *left -= dt_ms;
+            return;
+        }
+        if *retries >= n400 {
+            // Nothing above this waits for a confirmation, so the failure
+            // is only that the break is gone.
+            self.brk_out = None;
+            return;
+        }
+        *retries += 1;
+        *left = t401;
+        let info = info.clone();
+        self.send(Frame::Ui { pf: false, info }, Kind::Command);
+    }
+
     /// Advance timers by `dt_ms` (V.42 8.3.2.2, 8.7.3, 8.4.8).
     pub fn tick(&mut self, dt_ms: u32) {
         // 7.10.2's freeze, and the only thing suspension does here. Time is
@@ -443,6 +535,7 @@ impl Lapm {
         if self.suspended {
             return;
         }
+        self.tick_break(dt_ms);
         if let Some(waited) = self.awaiting_ms {
             self.awaiting_ms = Some(waited.saturating_add(dt_ms));
         }
@@ -527,7 +620,8 @@ impl Lapm {
             Frame::Rnr { nr, pf } => self.on_rnr(*nr, *pf, kind),
             Frame::Rej { nr, pf } => self.on_rej(*nr, *pf, kind),
             Frame::Srej { nr } => self.on_srej(*nr),
-            // SREJ, UI, XID, TEST and FRMR are not implemented yet; ignoring
+            Frame::Ui { pf, info } => self.on_ui(*pf, info, kind),
+            // XID, TEST and FRMR are not implemented yet; ignoring
             // them is safe because the peer's timers will recover.
             _ => {}
         }
@@ -814,6 +908,10 @@ impl Lapm {
         self.reject_sent = false;
         self.ack_pending = false;
         self.timer_recovery = false;
+        // 8.13.2.2 and 8.13.2.3: both are zero when the connection starts.
+        self.vsb = false;
+        self.vrb = false;
+        self.brk_out = None;
     }
 
     fn enter_disconnected(&mut self, cause: Cause) {
@@ -1460,5 +1558,61 @@ mod tests {
         a.send_data(&payload);
         settle(&mut a, &mut b);
         assert_eq!(data_from(&mut b), payload, "wrapping lost or reordered data");
+    }
+
+    fn connected_pair() -> (Lapm, Lapm) {
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
+        let mut b = Lapm::new(Role::Answerer, DLCI_DATA, Params::default());
+        a.connect();
+        for _ in 0..4 {
+            while let Some((f, k)) = a.poll_transmit() {
+                b.receive(f, k);
+            }
+            while let Some((f, k)) = b.poll_transmit() {
+                a.receive(f, k);
+            }
+        }
+        assert!(a.is_connected() && b.is_connected());
+        let _ = events(&mut a);
+        let _ = events(&mut b);
+        (a, b)
+    }
+
+    #[test]
+    fn a_break_is_carried_and_acknowledged() {
+        let (mut a, mut b) = connected_pair();
+        assert!(a.send_break(300));
+        let (frame, kind) = a.poll_transmit().unwrap();
+        assert_eq!(frame, Frame::Ui { pf: false, info: vec![0x40, 0x40, 30] });
+        b.receive(frame.clone(), kind);
+        assert_eq!(events(&mut b), vec![Event::Break(30)]);
+        let (ack, ack_kind) = b.poll_transmit().unwrap();
+        assert_eq!(ack, Frame::Ui { pf: false, info: vec![0xe0] });
+        // A copy of the same BRK is not a second break, but it is answered.
+        b.receive(frame, kind);
+        assert!(events(&mut b).is_empty());
+        assert!(b.poll_transmit().is_some());
+        a.receive(ack, ack_kind);
+        assert!(!a.break_outstanding());
+        // The next one carries the other sequence number.
+        assert!(a.send_break(5000));
+        let (frame, _) = a.poll_transmit().unwrap();
+        assert_eq!(frame, Frame::Ui { pf: false, info: vec![0xc0, 0x40, 255] });
+    }
+
+    #[test]
+    fn an_unanswered_break_is_sent_again() {
+        let (mut a, _) = connected_pair();
+        assert!(a.send_break(250));
+        let _ = std::iter::from_fn(|| a.poll_transmit()).count();
+        a.tick(a.t401_ms() + 1);
+        let again: Vec<_> = std::iter::from_fn(|| a.poll_transmit()).collect();
+        assert!(again.iter().any(|(f, _)| *f == Frame::Ui { pf: false, info: vec![0x40, 0x40, 25] }));
+    }
+
+    #[test]
+    fn no_break_without_a_connection() {
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
+        assert!(!a.send_break(250));
     }
 }
