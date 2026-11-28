@@ -69,7 +69,7 @@ jobs:
               return (*a == L'\0' && *b == L'\0');
           }
 
-          BOOL WINAPI GetVolumePathNamesForVolumeNameW(
+          BOOL WINAPI Win2K_GetVolumePathNamesForVolumeNameW(
               LPCWSTR lpszVolumeName,
               LPWCH lpszVolumePathNames,
               DWORD cchBufferLength,
@@ -134,7 +134,7 @@ jobs:
               return TRUE;
           }
 
-          VOID NTAPI RtlCaptureContext(PCONTEXT ContextRecord)
+          VOID NTAPI Win2K_RtlCaptureContext(PCONTEXT ContextRecord)
           {
               DWORD val_eax = 0, val_ebx = 0, val_ecx = 0, val_edx = 0;
               DWORD val_esi = 0, val_edi = 0, val_ebp = 0, val_esp = 0, val_eip = 0;
@@ -201,7 +201,7 @@ jobs:
             throw "VsDevCmd.bat not found."
           }
 
-          cmd /c "`"$($vsDevCmd.FullName)`" -arch=x86 -host_arch=x64 && cl.exe /nologo /c /O2 /Gs100000 win2k_shim.c /Fowin2k_shim.obj"
+          cmd /c "`"$($vsDevCmd.FullName)`" -arch=x86 -host_arch=x64 && cl.exe /nologo /c /O2 /Gy /Gs100000 win2k_shim.c /Fowin2k_shim.obj"
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to compile win2k_shim.obj"
           }
@@ -212,7 +212,7 @@ jobs:
 
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.WIN2K_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib -C link-arg=/FORCE:MULTIPLE"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.WIN2K_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib -C link-arg=/FORCE:MULTIPLE -C link-arg=/ALTERNATENAME:_GetVolumePathNamesForVolumeNameW@16=_Win2K_GetVolumePathNamesForVolumeNameW@16 -C link-arg=/ALTERNATENAME:_RtlCaptureContext@4=_Win2K_RtlCaptureContext@4"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
       - name: Patch PE Subsystem Version to 5.00
