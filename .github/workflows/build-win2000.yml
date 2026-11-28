@@ -12,7 +12,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  windows-x86:
+  windows-win2k:
     name: binmodem-win2k.exe and dialsnoop-win2k.exe (Win2K)
     runs-on: windows-latest
     steps:
@@ -46,9 +46,173 @@ jobs:
           "YY_THUNKS_OBJ=$($obj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using YY-Thunks object: $($obj.FullName)"
 
+      - name: Build Win2K Shim Object
+        shell: pwsh
+        run: |
+          @'
+          #define WIN32_LEAN_AND_MEAN
+          #include <windows.h>
+          #include <wchar.h>
+
+          static BOOL WideStringsEqualInsensitive(LPCWSTR a, LPCWSTR b)
+          {
+              if (!a || !b) return FALSE;
+              while (*a && *b) {
+                  WCHAR ca = *a;
+                  WCHAR cb = *b;
+                  if (ca >= L'A' && ca <= L'Z') ca = (WCHAR)(ca - L'A' + L'a');
+                  if (cb >= L'A' && cb <= L'Z') cb = (WCHAR)(cb - L'A' + L'a');
+                  if (ca != cb) return FALSE;
+                  ++a;
+                  ++b;
+              }
+              return (*a == L'\0' && *b == L'\0');
+          }
+
+          BOOL WINAPI GetVolumePathNamesForVolumeNameW(
+              LPCWSTR lpszVolumeName,
+              LPWCH lpszVolumePathNames,
+              DWORD cchBufferLength,
+              PDWORD lpcchReturnLength)
+          {
+              WCHAR matches[26][4];
+              DWORD matchCount = 0;
+              DWORD totalWchars = 1; /* final terminating NUL of MULTI_SZ */
+              DWORD drives = GetLogicalDrives();
+              int i;
+
+              if (!lpszVolumeName) {
+                  SetLastError(ERROR_INVALID_PARAMETER);
+                  return FALSE;
+              }
+
+              for (i = 0; i < 26; ++i) {
+                  if ((drives & (1u << i)) != 0) {
+                      WCHAR root[4];
+                      WCHAR volName[MAX_PATH * 2];
+                      root[0] = (WCHAR)(L'A' + i);
+                      root[1] = L':';
+                      root[2] = L'\\';
+                      root[3] = L'\0';
+
+                      volName[0] = L'\0';
+                      if (GetVolumeNameForVolumeMountPointW(root, volName, ARRAYSIZE(volName))) {
+                          if (WideStringsEqualInsensitive(lpszVolumeName, volName)) {
+                              matches[matchCount][0] = root[0];
+                              matches[matchCount][1] = root[1];
+                              matches[matchCount][2] = root[2];
+                              matches[matchCount][3] = L'\0';
+                              totalWchars += 4; /* includes per-string NUL */
+                              ++matchCount;
+                          }
+                      }
+                  }
+              }
+
+              if (lpcchReturnLength) {
+                  *lpcchReturnLength = totalWchars;
+              }
+
+              if (!lpszVolumePathNames || cchBufferLength < totalWchars) {
+                  SetLastError(ERROR_MORE_DATA);
+                  return FALSE;
+              }
+
+              {
+                  LPWCH dst = lpszVolumePathNames;
+                  DWORD m;
+                  for (m = 0; m < matchCount; ++m) {
+                      dst[0] = matches[m][0];
+                      dst[1] = matches[m][1];
+                      dst[2] = matches[m][2];
+                      dst[3] = L'\0';
+                      dst += 4;
+                  }
+                  *dst = L'\0';
+              }
+
+              return TRUE;
+          }
+
+          VOID NTAPI RtlCaptureContext(PCONTEXT ContextRecord)
+          {
+              DWORD val_eax = 0, val_ebx = 0, val_ecx = 0, val_edx = 0;
+              DWORD val_esi = 0, val_edi = 0, val_ebp = 0, val_esp = 0, val_eip = 0;
+              DWORD val_eflags = 0;
+              WORD seg_cs = 0, seg_ds = 0, seg_es = 0, seg_fs = 0, seg_gs = 0, seg_ss = 0;
+
+              if (!ContextRecord) {
+                  return;
+              }
+
+              __asm {
+                  mov val_eax, eax
+                  mov val_ebx, ebx
+                  mov val_ecx, ecx
+                  mov val_edx, edx
+                  mov val_esi, esi
+                  mov val_edi, edi
+                  mov val_ebp, ebp
+                  lea eax, [esp + 4]
+                  mov val_esp, eax
+                  mov eax, [esp]
+                  mov val_eip, eax
+                  pushfd
+                  pop eax
+                  mov val_eflags, eax
+                  mov ax, cs
+                  mov seg_cs, ax
+                  mov ax, ds
+                  mov seg_ds, ax
+                  mov ax, es
+                  mov seg_es, ax
+                  mov ax, fs
+                  mov seg_fs, ax
+                  mov ax, gs
+                  mov seg_gs, ax
+                  mov ax, ss
+                  mov seg_ss, ax
+              }
+
+              ZeroMemory(ContextRecord, sizeof(*ContextRecord));
+              ContextRecord->ContextFlags = CONTEXT_FULL;
+              ContextRecord->SegGs = seg_gs;
+              ContextRecord->SegFs = seg_fs;
+              ContextRecord->SegEs = seg_es;
+              ContextRecord->SegDs = seg_ds;
+              ContextRecord->Edi = val_edi;
+              ContextRecord->Esi = val_esi;
+              ContextRecord->Ebx = val_ebx;
+              ContextRecord->Edx = val_edx;
+              ContextRecord->Ecx = val_ecx;
+              ContextRecord->Eax = val_eax;
+              ContextRecord->Ebp = val_ebp;
+              ContextRecord->Eip = val_eip;
+              ContextRecord->SegCs = seg_cs;
+              ContextRecord->EFlags = val_eflags;
+              ContextRecord->Esp = val_esp;
+              ContextRecord->SegSs = seg_ss;
+          }
+          '@ | Set-Content -Encoding ascii win2k_shim.c
+
+          $vsDevCmd = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "VsDevCmd.bat" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $vsDevCmd) {
+            throw "VsDevCmd.bat not found."
+          }
+
+          cmd /c "`"$($vsDevCmd.FullName)`" -arch=x86 -host_arch=x64 && cl.exe /nologo /c /O2 /Gs100000 win2k_shim.c /Fowin2k_shim.obj"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to compile win2k_shim.obj"
+          }
+
+          $shimObj = (Resolve-Path "win2k_shim.obj").Path
+          "WIN2K_SHIM_OBJ=$shimObj" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Compiled shim object: $shimObj"
+
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib"
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=${{ env.YY_THUNKS_OBJ }} -C link-arg=${{ env.WIN2K_SHIM_OBJ }} -C link-arg=/SUBSYSTEM:WINDOWS,5.01 -C link-arg=/DELAYLOAD:uxtheme.dll -C link-arg=delayimp.lib"
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
       - name: Patch PE Subsystem Version to 5.00
@@ -179,12 +343,12 @@ jobs:
             Copy-Item "target/i686-pc-windows-msvc/release/$($pair.src)" "dist/$($pair.dst)"
             (Get-FileHash "dist/$($pair.dst)" -Algorithm SHA256).Hash.ToLower() + "  $($pair.dst)"
           }
-          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-2k.txt
-          Get-Content dist/SHA256SUMS-2k.txt
+          $sums | Set-Content -Encoding ascii dist/SHA256SUMS-win2k.txt
+          Get-Content dist/SHA256SUMS-win2k.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binmodem-windows-x86
+          name: binmodem-windows-win2k
           path: dist/*
 
       - name: Release
@@ -195,10 +359,10 @@ jobs:
         run: |
           if (gh release view "${{ github.ref_name }}" 2>$null) {
             gh release upload "${{ github.ref_name }}" `
-              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-2k.txt --clobber
+              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-win2k.txt --clobber
           } else {
             gh release create "${{ github.ref_name }}" `
-              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-2k.txt `
+              dist/binmodem-win2k.exe dist/dialsnoop-win2k.exe dist/SHA256SUMS-win2k.txt `
               --title "${{ github.ref_name }}" `
               --notes-file .github/release-notes.md
           }
